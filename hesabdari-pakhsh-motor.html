@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>حساب‌داری پخش موتر</title>
+<style>
+  :root{
+    --ink:#1B2430;
+    --ink2:#242f3f;
+    --paper:#F5F4EF;
+    --card:#FFFFFF;
+    --gold:#C9922B;
+    --gold-d:#a97a20;
+    --green:#2E7D5B;
+    --green-bg:#e7f3ee;
+    --red:#C0392B;
+    --red-bg:#fbeae8;
+    --muted:#6b7280;
+    --border:#E4E1D8;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font-family:'Vazirmatn','Noto Sans Arabic',Tahoma,system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    min-height:100vh;
+    padding-bottom:78px;
+  }
+  .num{font-variant-numeric:tabular-nums;direction:ltr;unicode-bidi:isolate;font-family:'Vazirmatn',Tahoma,sans-serif;}
+  header.topbar{
+    background:var(--ink);
+    color:#fff;
+    padding:14px 16px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    position:sticky;top:0;z-index:20;
+    box-shadow:0 2px 10px rgba(0,0,0,.15);
+  }
+  header.topbar .brand{display:flex;flex-direction:column;gap:2px;}
+  header.topbar .brand b{font-size:16px;}
+  header.topbar .brand span{font-size:11px;color:#c9c4b6;}
+  header.topbar button{
+    background:none;border:none;color:#fff;font-size:20px;cursor:pointer;padding:6px;
+  }
+  main#screen{padding:14px;max-width:640px;margin:0 auto;}
+  .card{
+    background:var(--card);
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    padding:14px;
+    margin-bottom:12px;
+  }
+  .hero{
+    background:linear-gradient(135deg,var(--ink) 0%, var(--ink2) 100%);
+    color:#fff;
+    border-radius:16px;
+    padding:16px;
+    margin-bottom:14px;
+  }
+  .hero .row{display:flex;justify-content:space-between;align-items:flex-end;padding:8px 0;border-bottom:1px dashed rgba(255,255,255,.15);}
+  .hero .row:last-child{border-bottom:none;}
+  .hero .row .label{font-size:12.5px;color:#c9c4b6;}
+  .hero .row .val{font-size:19px;font-weight:700;color:var(--gold);}
+  .hero .row .val.green{color:#6fd9ac;}
+  .hero .row .val.red{color:#f28b7f;}
+  .ledger-strip{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;margin-bottom:14px;}
+  .ledger-strip .chip{
+    flex:0 0 auto;background:#fff;border:1px solid var(--border);border-radius:12px;
+    padding:10px 14px;min-width:108px;text-align:center;
+  }
+  .ledger-strip .chip .t{font-size:11px;color:var(--muted);margin-bottom:4px;}
+  .ledger-strip .chip .v{font-size:15px;font-weight:700;border-bottom:2px solid var(--gold);display:inline-block;padding-bottom:2px;}
+  h2.section-title{font-size:15px;margin:18px 0 8px;color:var(--ink);border-right:4px solid var(--gold);padding-right:8px;}
+  .quick-actions{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px;}
+  .qa-btn{
+    background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 4px;
+    text-align:center;font-size:12.5px;cursor:pointer;color:var(--ink);
+  }
+  .qa-btn .ic{font-size:22px;display:block;margin-bottom:4px;}
+  .row-item{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--border);font-size:13.5px;}
+  .row-item:last-child{border-bottom:none;}
+  .row-item .r-left{display:flex;flex-direction:column;gap:2px;}
+  .row-item .r-left .sub{font-size:11.5px;color:var(--muted);}
+  .row-item .r-right{font-weight:700;}
+  .badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;}
+  .badge.green{background:var(--green-bg);color:var(--green);}
+  .badge.red{background:var(--red-bg);color:var(--red);}
+  .badge.gold{background:#faf1de;color:var(--gold-d);}
+  label{display:block;font-size:12.5px;color:var(--muted);margin:10px 0 4px;}
+  input,select,textarea{
+    width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:10px;
+    font-size:14.5px;background:#fff;color:var(--ink);font-family:inherit;
+  }
+  textarea{resize:vertical;min-height:50px;}
+  .btn{
+    display:inline-block;width:100%;padding:12px;border-radius:12px;border:none;
+    font-size:15px;font-weight:700;cursor:pointer;text-align:center;margin-top:12px;
+  }
+  .btn-primary{background:var(--gold);color:#fff;}
+  .btn-primary:active{background:var(--gold-d);}
+  .btn-outline{background:#fff;border:1px solid var(--border);color:var(--ink);}
+  .btn-danger{background:var(--red);color:#fff;}
+  .btn-green{background:var(--green);color:#fff;}
+  .btn-sm{width:auto;padding:7px 14px;font-size:13px;margin-top:0;}
+  .item-row{display:flex;justify-content:space-between;align-items:center;background:var(--paper);border-radius:10px;padding:8px 10px;margin-bottom:6px;font-size:13px;}
+  .item-row .x{color:var(--red);cursor:pointer;font-weight:900;padding:0 6px;}
+  .total-line{display:flex;justify-content:space-between;font-size:16px;font-weight:800;padding:10px 0;border-top:2px solid var(--ink);margin-top:6px;}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+  .tabbar-sub{display:flex;gap:6px;margin-bottom:12px;}
+  .tabbar-sub button{
+    flex:1;padding:9px;border-radius:10px;border:1px solid var(--border);background:#fff;
+    font-size:13px;cursor:pointer;color:var(--ink);
+  }
+  .tabbar-sub button.active{background:var(--ink);color:#fff;border-color:var(--ink);}
+  nav.bottomnav{
+    position:fixed;bottom:0;right:0;left:0;background:#fff;border-top:1px solid var(--border);
+    display:flex;z-index:30;box-shadow:0 -2px 10px rgba(0,0,0,.06);
+  }
+  nav.bottomnav button{
+    flex:1;background:none;border:none;padding:9px 2px 8px;text-align:center;cursor:pointer;color:var(--muted);
+  }
+  nav.bottomnav button.active{color:var(--gold-d);}
+  nav.bottomnav .ic{display:block;font-size:20px;}
+  nav.bottomnav .lb{display:block;font-size:10.5px;margin-top:2px;}
+  .empty{text-align:center;color:var(--muted);font-size:13px;padding:24px 8px;}
+  .more-list button{
+    width:100%;display:flex;align-items:center;gap:10px;background:#fff;border:1px solid var(--border);
+    border-radius:12px;padding:14px;margin-bottom:9px;font-size:14.5px;cursor:pointer;color:var(--ink);text-align:right;
+  }
+  .more-list .ic{font-size:20px;}
+  .back-btn{background:none;border:none;color:var(--gold-d);font-size:14px;cursor:pointer;padding:0 0 10px;font-weight:700;}
+  .field-note{font-size:11.5px;color:var(--muted);margin-top:4px;}
+  .divider{border:none;border-top:1px solid var(--border);margin:14px 0;}
+  .period-btns{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;}
+  .period-btns button{padding:8px 12px;border-radius:20px;border:1px solid var(--border);background:#fff;font-size:12.5px;cursor:pointer;}
+  .period-btns button.active{background:var(--gold);color:#fff;border-color:var(--gold);}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><b id="biz-name">پخش موتر</b><span id="biz-date"></span></div>
+  <button onclick="App.navigate('more','settings')">⚙️</button>
+</header>
+<main id="screen"></main>
+<nav class="bottomnav" id="bottomnav"></nav>
+
+<script type="module">
+/* ---------- Firebase ---------- */
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
+import {
+  getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence
+} from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
+import {
+  initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+  doc, getDoc, setDoc, onSnapshot
+} from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyC1ro1e1rwR7dB9gHGWQkwq2G2r1ZolLGs",
+  authDomain: "motar-pakhsh.firebaseapp.com",
+  projectId: "motar-pakhsh",
+  storageBucket: "motar-pakhsh.firebasestorage.app",
+  messagingSenderId: "220111355867",
+  appId: "1:220111355867:web:22fe8b83980f82f2cb71fe"
+};
+const fbApp = initializeApp(firebaseConfig);
+const auth = getAuth(fbApp);
+const db = initializeFirestore(fbApp, {
+  localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+});
+setPersistence(auth, browserLocalPersistence).catch(()=>{});
+
+const BIZ_ID = 'main'; // یک کسب‌وکار — همه اطلاعات زیر همین شناسه ذخیره می‌شود
+const stateDocRef = doc(db, 'businesses', BIZ_ID, 'data', 'state');
+const teamDocRef  = (uid_) => doc(db, 'businesses', BIZ_ID, 'team', uid_);
+
+/* ---------- Helpers ---------- */
+function uid(){ return 'id_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8); }
+function todayISO(){ return new Date().toISOString().slice(0,10); }
+function fmt(n){ n = Math.round(Number(n)||0); return n.toLocaleString('en-US'); }
+function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function sum(arr,key){ return arr.reduce((a,b)=>a+(Number(b[key])||0),0); }
+function dateLabel(d){
+  const dt=new Date(d+'T00:00:00');
+  const days=['یکشنبه','دوشنبه','سه‌شنبه','چهارشنبه','پنجشنبه','جمعه','شنبه'];
+  return days[dt.getDay()]+' '+d;
+}
+function startOfWeek(d){
+  const dt=new Date(d+'T00:00:00');
+  const day=dt.getDay(); // 0=Sun
+  dt.setDate(dt.getDate()-day);
+  return dt.toISOString().slice(0,10);
+}
+function startOfMonth(d){ return d.slice(0,7)+'-01'; }
+
+/* ---------- Default state ---------- */
+function defaultState(){
+  return {
+    settings:{ businessName:'پخش موتر من', currency:'افغانی', openingCash:0 },
+    products:[], customers:[], suppliers:[],
+    sales:[], purchases:[], expenses:[], payments:[]
+  };
+}
+
+/* ---------- App ---------- */
+const App = {
+  state: null,
+  tab:'dashboard', sub:null,
+  saleDraft:null, purchaseDraft:null,
+  reportPeriod:'today', reportStart:null, reportEnd:null,
+  user:null, role:null, authReady:false, dataReady:false, saveTimer:null,
+
+  init(){
+    this.state = defaultState();
+    this.resetSaleDraft();
+    this.resetPurchaseDraft();
+    this.renderLogin();
+    onAuthStateChanged(auth, (u)=>{
+      this.user = u;
+      if(u){ this.afterLogin(u); }
+      else { this.role=null; this.dataReady=false; this.renderLogin(); }
+    });
+  },
+
+  async afterLogin(u){
+    try{
+      const teamSnap = await getDoc(teamDocRef(u.uid));
+      this.role = teamSnap.exists() ? (teamSnap.data().role||'staff') : 'staff';
+    }catch(e){ this.role='staff'; }
+
+    onSnapshot(stateDocRef, async (snap)=>{
+      if(snap.exists()){
+        this.state = snap.data();
+        if(!this.state.suppliers) this.state.suppliers=[];
+        if(!this.state.payments) this.state.payments=[];
+      } else {
+        this.state = defaultState();
+        try{ await setDoc(stateDocRef, this.state); }catch(e){}
+      }
+      this.dataReady = true;
+      document.getElementById('biz-name').textContent = this.state.settings.businessName || 'پخش موتر';
+      document.getElementById('biz-date').textContent = dateLabel(todayISO());
+      this.renderNav();
+      this.render();
+    }, (err)=>{ console.error('sync error', err); });
+  },
+
+  load(){ /* دیگر لازم نیست — دیتا از Firestore با onSnapshot می‌آید */ },
+
+  save(){
+    clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(()=>{
+      setDoc(stateDocRef, this.state).catch(e=>console.error('save error',e));
+    }, 250);
+  },
+
+  isOwner(){ return this.role==='owner'; },
+
+  logout(){
+    if(!confirm('از حساب خارج شوید؟')) return;
+    signOut(auth);
+  },
+
+  renderLogin(){
+    document.getElementById('bottomnav').innerHTML='';
+    document.getElementById('biz-name').textContent='پخش موتر';
+    document.getElementById('biz-date').textContent='';
+    document.getElementById('screen').innerHTML = `
+    <div class="card" style="margin-top:40px;">
+      <h2 class="section-title">🔐 ورود به سیستم</h2>
+      <label>ایمیل</label>
+      <input id="login-email" type="email" placeholder="ایمیل خود را بنویسید" autocomplete="username">
+      <label>رمز عبور</label>
+      <input id="login-pass" type="password" placeholder="رمز عبور" autocomplete="current-password">
+      <div id="login-err" style="color:var(--red);font-size:12.5px;margin-top:6px;"></div>
+      <button class="btn btn-primary" onclick="App.doLogin()">ورود</button>
+      <div class="field-note">اگر اینترنت ندارید ولی قبلاً یک‌بار وارد شده‌اید، برنامه به‌صورت آفلاین باز می‌شود.</div>
+    </div>`;
+  },
+  async doLogin(){
+    const email=(document.getElementById('login-email').value||'').trim();
+    const pass=document.getElementById('login-pass').value||'';
+    const errBox=document.getElementById('login-err');
+    errBox.textContent='';
+    if(!email||!pass){ errBox.textContent='ایمیل و رمز عبور را بنویسید'; return; }
+    try{
+      await signInWithEmailAndPassword(auth, email, pass);
+    }catch(e){
+      errBox.textContent = 'ورود ناکام شد. ایمیل یا رمز عبور اشتباه است.';
+    }
+  },
+  resetSaleDraft(){ this.saleDraft = { items:[] }; },
+  resetPurchaseDraft(){ this.purchaseDraft = { items:[] }; },
+
+  navigate(tab,sub){ this.tab=tab; this.sub=sub||null; this.renderNav(); this.render(); window.scrollTo(0,0); },
+
+  renderNav(){
+    const tabs=[
+      {id:'dashboard',ic:'🏠',lb:'داشبورد'},
+      {id:'sale',ic:'🧾',lb:'فروش'},
+      {id:'purchase',ic:'📦',lb:'خرید'},
+      {id:'customers',ic:'👥',lb:'بدهی‌ها'},
+      {id:'more',ic:'☰',lb:'بیشتر'},
+    ];
+    if(!this.dataReady){ document.getElementById('bottomnav').innerHTML=''; return; }
+    document.getElementById('bottomnav').innerHTML = tabs.map(t=>
+      `<button class="${this.tab===t.id?'active':''}" onclick="App.navigate('${t.id}')">
+        <span class="ic">${t.ic}</span><span class="lb">${t.lb}</span>
+      </button>`).join('');
+  },
+
+  render(){
+    const s = document.getElementById('screen');
+    let html='';
+    switch(this.tab){
+      case 'dashboard': html=this.renderDashboard(); break;
+      case 'sale': html=this.renderSale(); break;
+      case 'purchase': html=this.renderPurchase(); break;
+      case 'customers': html=this.renderCustomers(); break;
+      case 'more': html=this.renderMore(); break;
+      default: html=this.renderDashboard();
+    }
+    s.innerHTML = html;
+  },
+
+  /* ---------- Computations ---------- */
+  cashBalance(){
+    const s=this.state;
+    let cash = Number(s.settings.openingCash)||0;
+    cash += sum(s.sales,'paid');
+    cash += sum(s.payments.filter(p=>p.type==='receive'),'amount');
+    cash -= sum(s.purchases,'paid');
+    cash -= sum(s.payments.filter(p=>p.type==='pay'),'amount');
+    cash -= sum(s.expenses,'amount');
+    return cash;
+  },
+  inventoryValue(){
+    return this.state.products.reduce((a,p)=>a+(p.stock*p.avgCost),0);
+  },
+  totalReceivable(){ return this.state.customers.reduce((a,c)=>a+Math.max(0,c.balance),0); },
+  totalPayable(){ return this.state.suppliers.reduce((a,c)=>a+Math.max(0,c.balance),0); },
+  salesInRange(start,end){
+    return this.state.sales.filter(x=>x.date>=start && x.date<=end);
+  },
+  expensesInRange(start,end){
+    return this.state.expenses.filter(x=>x.date>=start && x.date<=end);
+  },
+  purchasesInRange(start,end){
+    return this.state.purchases.filter(x=>x.date>=start && x.date<=end);
+  },
+
+  /* ---------- Dashboard ---------- */
+  renderDashboard(){
+    const today = todayISO();
+    const todaySales = this.salesInRange(today,today);
+    const todayExpenses = this.expensesInRange(today,today);
+    const todayProfit = sum(todaySales,'profit') - sum(todayExpenses,'amount');
+    const cur = this.state.settings.currency;
+
+    const recent = [
+      ...this.state.sales.map(x=>({...x,_type:'sale'})),
+      ...this.state.purchases.map(x=>({...x,_type:'purchase'})),
+      ...this.state.expenses.map(x=>({...x,_type:'expense'})),
+    ].sort((a,b)=>(b.ts||0)-(a.ts||0)).slice(0,8);
+
+    const recentHtml = recent.length ? recent.map(x=>{
+      if(x._type==='sale'){
+        return `<div class="row-item"><div class="r-left"><b>فروش — ${escapeHtml(x.customerName)}</b><span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--green)">+${fmt(x.paid)}</div></div>`;
+      } else if(x._type==='purchase'){
+        return `<div class="row-item"><div class="r-left"><b>خرید — ${escapeHtml(x.supplierName||'—')}</b><span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--red)">-${fmt(x.paid)}</div></div>`;
+      } else {
+        return `<div class="row-item"><div class="r-left"><b>مصرف — ${escapeHtml(x.category)}</b><span class="sub">${x.date}${x.note?(' · '+escapeHtml(x.note)):''}</span></div><div class="r-right num" style="color:var(--red)">-${fmt(x.amount)}</div></div>`;
+      }
+    }).join('') : `<div class="empty">هنوز معامله‌ای ثبت نشده. از دکمه‌های بالا شروع کنید.</div>`;
+
+    return `
+    <div class="hero">
+      <div class="row"><span class="label">💵 موجودی نقد</span><span class="val num">${fmt(this.cashBalance())} ${cur}</span></div>
+      <div class="row"><span class="label">📦 ارزش کالای انبار</span><span class="val num">${fmt(this.inventoryValue())} ${cur}</span></div>
+      <div class="row"><span class="label">📈 سود امروز</span><span class="val num ${todayProfit>=0?'green':'red'}">${fmt(todayProfit)} ${cur}</span></div>
+    </div>
+    <div class="ledger-strip">
+      <div class="chip"><div class="t">فروش امروز</div><div class="v num">${fmt(sum(todaySales,'total'))}</div></div>
+      <div class="chip"><div class="t">مصرف امروز</div><div class="v num">${fmt(sum(todayExpenses,'amount'))}</div></div>
+      <div class="chip"><div class="t">طلب از مشتریان</div><div class="v num">${fmt(this.totalReceivable())}</div></div>
+      <div class="chip"><div class="t">قرض به عمده‌فروش</div><div class="v num">${fmt(this.totalPayable())}</div></div>
+    </div>
+    <div class="quick-actions">
+      <div class="qa-btn" onclick="App.navigate('sale')"><span class="ic">🧾</span>فروش جدید</div>
+      <div class="qa-btn" onclick="App.navigate('purchase')"><span class="ic">📦</span>خرید جدید</div>
+      <div class="qa-btn" onclick="App.navigate('more','expenses')"><span class="ic">💸</span>ثبت مصرف</div>
+    </div>
+    <h2 class="section-title">آخرین معاملات</h2>
+    <div class="card">${recentHtml}</div>
+    `;
+  },
+
+  /* ---------- Sale ---------- */
+  addSaleItem(){
+    const sel=document.getElementById('sp-product');
+    let pid=sel.value;
+    if(!pid){ alert('یک محصول انتخاب کنید'); return; }
+    let product;
+    if(pid==='__new__'){
+      const name=(document.getElementById('sp-newname').value||'').trim();
+      const unit=(document.getElementById('sp-newunit').value||'').trim()||'عدد';
+      if(!name){ alert('نام محصول جدید را بنویسید'); return; }
+      product = this.addProduct(name,unit,0,0,0);
+    } else {
+      product = this.state.products.find(p=>p.id===pid);
+    }
+    if(!product){ alert('محصول یافت نشد'); return; }
+    const qty=parseFloat(document.getElementById('sp-qty').value);
+    const price=parseFloat(document.getElementById('sp-price').value);
+    if(!qty||qty<=0){ alert('تعداد را درست بنویسید'); return; }
+    if(isNaN(price)||price<0){ alert('قیمت فروش را بنویسید'); return; }
+    if(qty>product.stock){
+      if(!confirm('موجودی این محصول کافی نیست ('+product.stock+' '+product.unit+' باقی‌مانده). آیا ادامه می‌دهید؟')) return;
+    }
+    this.saleDraft.items.push({productId:product.id,name:product.name,unit:product.unit,qty,unitPrice:price,cost:product.avgCost});
+    this.render();
+  },
+  removeSaleItem(idx){ this.saleDraft.items.splice(idx,1); this.render(); },
+
+  submitSale(){
+    if(this.saleDraft.items.length===0){ alert('حداقل یک محصول اضافه کنید'); return; }
+    const total = this.saleDraft.items.reduce((a,i)=>a+i.qty*i.unitPrice,0);
+    const totalCost = this.saleDraft.items.reduce((a,i)=>a+i.qty*i.cost,0);
+    let paid = parseFloat(document.getElementById('sale-paid').value);
+    if(isNaN(paid)) paid=0;
+    if(paid>total) paid=total;
+    if(paid<0) paid=0;
+    const custName = (document.getElementById('sale-customer-name').value||'').trim();
+    const date = document.getElementById('sale-date').value || todayISO();
+    const note = (document.getElementById('sale-note').value||'').trim();
+    const remaining = total-paid;
+
+    let customerId=null, customerNameFinal='مشتری نقدی';
+    if(custName){
+      let customer=this.state.customers.find(c=>c.name===custName);
+      if(!customer){ customer={id:uid(),name:custName,phone:'',balance:0}; this.state.customers.push(customer); }
+      customer.balance += remaining;
+      customerId=customer.id; customerNameFinal=customer.name;
+    } else if(remaining>0.001){
+      alert('برای فروش قرضی (نسیه) باید نام مشتری را بنویسید'); return;
+    }
+
+    this.saleDraft.items.forEach(it=>{
+      const p=this.state.products.find(pp=>pp.id===it.productId);
+      if(p) p.stock -= it.qty;
+    });
+
+    this.state.sales.push({
+      id:uid(), ts:Date.now(), date, customerId, customerName:customerNameFinal,
+      items:this.saleDraft.items, total, totalCost, profit: total-totalCost,
+      paid, remaining, note
+    });
+    this.resetSaleDraft();
+    this.save();
+    alert('فروش با موفقیت ثبت شد ✅');
+    this.navigate('dashboard');
+  },
+
+  renderSale(){
+    const items = this.saleDraft.items;
+    const total = items.reduce((a,i)=>a+i.qty*i.unitPrice,0);
+    const itemsHtml = items.length ? items.map((it,idx)=>
+      `<div class="item-row"><span>${escapeHtml(it.name)} — ${it.qty} ${escapeHtml(it.unit)} × <span class="num">${fmt(it.unitPrice)}</span></span>
+      <span style="display:flex;align-items:center;gap:8px;"><b class="num">${fmt(it.qty*it.unitPrice)}</b><span class="x" onclick="App.removeSaleItem(${idx})">✕</span></span></div>`
+    ).join('') : `<div class="field-note">هنوز محصولی اضافه نشده.</div>`;
+
+    return `
+    <h2 class="section-title">🧾 ثبت فروش جدید</h2>
+    <div class="card">
+      <label>محصول</label>
+      <select id="sp-product" onchange="App.onSaleProductChange()">${this.productOptions()}</select>
+      <div id="sp-new-fields" style="display:none;">
+        <div class="grid2">
+          <div><label>نام محصول جدید</label><input id="sp-newname" placeholder="مثلاً بطری موتر"></div>
+          <div><label>واحد</label><input id="sp-newunit" placeholder="عدد / کارتن" value="عدد"></div>
+        </div>
+      </div>
+      <div class="grid2">
+        <div><label>تعداد</label><input id="sp-qty" type="number" inputmode="decimal" placeholder="0"></div>
+        <div><label>قیمت فروش هر واحد</label><input id="sp-price" type="number" inputmode="decimal" placeholder="0"></div>
+      </div>
+      <button class="btn btn-outline" onclick="App.addSaleItem()">+ افزودن به فاکتور</button>
+      <hr class="divider">
+      ${itemsHtml}
+      <div class="total-line"><span>مجموع فاکتور</span><span class="num">${fmt(total)} ${this.state.settings.currency}</span></div>
+
+      <label>نام مشتری (خالی = فروش نقدی)</label>
+      <input id="sale-customer-name" list="customers-list" placeholder="مثلاً دوکان احمد">
+      <datalist id="customers-list">${this.state.customers.map(c=>`<option value="${escapeHtml(c.name)}">`).join('')}</datalist>
+
+      <div class="grid2">
+        <div><label>مبلغ دریافت‌شده (نقد)</label><input id="sale-paid" type="number" inputmode="decimal" value="${total?Math.round(total):''}"></div>
+        <div><label>تاریخ</label><input id="sale-date" type="date" value="${todayISO()}"></div>
+      </div>
+      <div class="field-note">اگر مبلغ دریافتی کمتر از مجموع باشد، باقیمانده به عنوان بدهی مشتری ثبت می‌شود.</div>
+      <label>یادداشت (اختیاری)</label>
+      <input id="sale-note" placeholder="مثلاً تحویل با موتر شرکت">
+      <button class="btn btn-primary" onclick="App.submitSale()">ثبت فروش</button>
+    </div>
+    `;
+  },
+  onSaleProductChange(){
+    const v=document.getElementById('sp-product').value;
+    document.getElementById('sp-new-fields').style.display = v==='__new__' ? 'block':'none';
+    if(v && v!=='__new__'){
+      const p=this.state.products.find(pp=>pp.id===v);
+      if(p && p.sellPrice) document.getElementById('sp-price').value = p.sellPrice;
+    }
+  },
+  productOptions(){
+    return '<option value="">— انتخاب محصول —</option>' +
+      this.state.products.map(p=>`<option value="${p.id}">${escapeHtml(p.name)} (موجودی: ${p.stock} ${escapeHtml(p.unit)})</option>`).join('') +
+      '<option value="__new__">+ محصول جدید</option>';
+  },
+
+  /* ---------- Purchase ---------- */
+  addPurchaseItem(){
+    const sel=document.getElementById('pp-product');
+    let pid=sel.value;
+    if(!pid){ alert('یک محصول انتخاب کنید'); return; }
+    let product;
+    if(pid==='__new__'){
+      const name=(document.getElementById('pp-newname').value||'').trim();
+      const unit=(document.getElementById('pp-newunit').value||'').trim()||'عدد';
+      if(!name){ alert('نام محصول جدید را بنویسید'); return; }
+      product = this.addProduct(name,unit,0,0,0);
+    } else {
+      product = this.state.products.find(p=>p.id===pid);
+    }
+    if(!product){ alert('محصول یافت نشد'); return; }
+    const qty=parseFloat(document.getElementById('pp-qty').value);
+    const cost=parseFloat(document.getElementById('pp-cost').value);
+    if(!qty||qty<=0){ alert('تعداد را درست بنویسید'); return; }
+    if(isNaN(cost)||cost<0){ alert('قیمت خرید را بنویسید'); return; }
+    this.purchaseDraft.items.push({productId:product.id,name:product.name,unit:product.unit,qty,unitCost:cost});
+    this.render();
+  },
+  removePurchaseItem(idx){ this.purchaseDraft.items.splice(idx,1); this.render(); },
+
+  submitPurchase(){
+    if(this.purchaseDraft.items.length===0){ alert('حداقل یک محصول اضافه کنید'); return; }
+    const total = this.purchaseDraft.items.reduce((a,i)=>a+i.qty*i.unitCost,0);
+    let paid = parseFloat(document.getElementById('purchase-paid').value);
+    if(isNaN(paid)) paid=0;
+    if(paid>total) paid=total;
+    if(paid<0) paid=0;
+    const supName = (document.getElementById('purchase-supplier-name').value||'').trim();
+    const date = document.getElementById('purchase-date').value || todayISO();
+    const note = (document.getElementById('purchase-note').value||'').trim();
+    const remaining = total-paid;
+
+    let supplierId=null, supplierNameFinal=supName||'—';
+    if(supName){
+      let supplier=this.state.suppliers.find(c=>c.name===supName);
+      if(!supplier){ supplier={id:uid(),name:supName,balance:0}; this.state.suppliers.push(supplier); }
+      supplier.balance += remaining;
+      supplierId=supplier.id; supplierNameFinal=supplier.name;
+    } else if(remaining>0.001){
+      alert('برای خرید نسیه باید نام عمده‌فروش/شرکت را بنویسید'); return;
+    }
+
+    this.purchaseDraft.items.forEach(it=>{
+      const p=this.state.products.find(pp=>pp.id===it.productId);
+      if(p){
+        const newStock = p.stock + it.qty;
+        p.avgCost = newStock>0 ? ((p.stock*p.avgCost)+(it.qty*it.unitCost))/newStock : it.unitCost;
+        p.stock = newStock;
+        if(!p.sellPrice) p.sellPrice = Math.round(it.unitCost*1.15);
+      }
+    });
+
+    this.state.purchases.push({
+      id:uid(), ts:Date.now(), date, supplierId, supplierName:supplierNameFinal,
+      items:this.purchaseDraft.items, total, paid, remaining, note
+    });
+    this.resetPurchaseDraft();
+    this.save();
+    alert('خرید با موفقیت ثبت شد ✅');
+    this.navigate('dashboard');
+  },
+
+  renderPurchase(){
+    const items = this.purchaseDraft.items;
+    const total = items.reduce((a,i)=>a+i.qty*i.unitCost,0);
+    const itemsHtml = items.length ? items.map((it,idx)=>
+      `<div class="item-row"><span>${escapeHtml(it.name)} — ${it.qty} ${escapeHtml(it.unit)} × <span class="num">${fmt(it.unitCost)}</span></span>
+      <span style="display:flex;align-items:center;gap:8px;"><b class="num">${fmt(it.qty*it.unitCost)}</b><span class="x" onclick="App.removePurchaseItem(${idx})">✕</span></span></div>`
+    ).join('') : `<div class="field-note">هنوز محصولی اضافه نشده.</div>`;
+
+    return `
+    <h2 class="section-title">📦 ثبت خرید جدید</h2>
+    <div class="card">
+      <label>محصول</label>
+      <select id="pp-product" onchange="document.getElementById('pp-new-fields').style.display=this.value==='__new__'?'block':'none'">${this.productOptions()}</select>
+      <div id="pp-new-fields" style="display:none;">
+        <div class="grid2">
+          <div><label>نام محصول جدید</label><input id="pp-newname" placeholder="مثلاً فیلتر روغن"></div>
+          <div><label>واحد</label><input id="pp-newunit" placeholder="عدد / کارتن" value="عدد"></div>
+        </div>
+      </div>
+      <div class="grid2">
+        <div><label>تعداد</label><input id="pp-qty" type="number" inputmode="decimal" placeholder="0"></div>
+        <div><label>قیمت خرید هر واحد</label><input id="pp-cost" type="number" inputmode="decimal" placeholder="0"></div>
+      </div>
+      <button class="btn btn-outline" onclick="App.addPurchaseItem()">+ افزودن به فاکتور</button>
+      <hr class="divider">
+      ${itemsHtml}
+      <div class="total-line"><span>مجموع فاکتور</span><span class="num">${fmt(total)} ${this.state.settings.currency}</span></div>
+
+      <label>نام شرکت / عمده‌فروش (خالی = خرید نقدی)</label>
+      <input id="purchase-supplier-name" list="suppliers-list" placeholder="مثلاً شرکت البرز">
+      <datalist id="suppliers-list">${this.state.suppliers.map(c=>`<option value="${escapeHtml(c.name)}">`).join('')}</datalist>
+
+      <div class="grid2">
+        <div><label>مبلغ پرداخت‌شده (نقد)</label><input id="purchase-paid" type="number" inputmode="decimal" value="${total?Math.round(total):''}"></div>
+        <div><label>تاریخ</label><input id="purchase-date" type="date" value="${todayISO()}"></div>
+      </div>
+      <div class="field-note">اگر مبلغ پرداختی کمتر از مجموع باشد، باقیمانده به عنوان بدهی شما به آن شرکت/عمده‌فروش ثبت می‌شود.</div>
+      <label>یادداشت (اختیاری)</label>
+      <input id="purchase-note" placeholder="مثلاً فاکتور شماره ۱۲">
+      <button class="btn btn-primary" onclick="App.submitPurchase()">ثبت خرید</button>
+    </div>
+    `;
+  },
+
+  /* ---------- Customers / Suppliers (debts) ---------- */
+  renderCustomers(){
+    const sub = this.sub || 'customers';
+    if(this.detailId){
+      return this.renderPartyDetail();
+    }
+    const listArr = sub==='customers' ? this.state.customers : this.state.suppliers;
+    const sorted = [...listArr].sort((a,b)=>b.balance-a.balance);
+    const totalKey = sub==='customers' ? this.totalReceivable() : this.totalPayable();
+    const rows = sorted.length ? sorted.map(c=>{
+      const bal=c.balance;
+      const badge = bal>0.5 ? `<span class="badge red num">${fmt(bal)}</span>` : (bal<-0.5? `<span class="badge green num">${fmt(-bal)}- طلب شما</span>` : `<span class="badge gold">تسویه</span>`);
+      return `<div class="row-item" onclick="App.openParty('${sub}','${c.id}')" style="cursor:pointer;">
+        <div class="r-left"><b>${escapeHtml(c.name)}</b>${c.phone?`<span class="sub">${escapeHtml(c.phone)}</span>`:''}</div>
+        <div class="r-right">${badge}</div>
+      </div>`;
+    }).join('') : `<div class="empty">${sub==='customers'?'هنوز مشتری بدهکار ثبت نشده.':'هنوز عمده‌فروش بدهکار ثبت نشده.'}</div>`;
+
+    return `
+    <h2 class="section-title">👥 مدیریت بدهی‌ها</h2>
+    <div class="tabbar-sub">
+      <button class="${sub==='customers'?'active':''}" onclick="App.navigate('customers','customers')">بدهی مشتریان (طلب من)</button>
+      <button class="${sub==='suppliers'?'active':''}" onclick="App.navigate('customers','suppliers')">بدهی به عمده‌فروش</button>
+    </div>
+    <div class="card" style="text-align:center;">
+      <div class="field-note">مجموع</div>
+      <div class="num" style="font-size:20px;font-weight:800;color:${sub==='customers'?'var(--green)':'var(--red)'}">${fmt(totalKey)} ${this.state.settings.currency}</div>
+    </div>
+    <div class="card">${rows}</div>
+    `;
+  },
+  openParty(type,id){ this.sub=type; this.detailId=id; this.render(); },
+  closeParty(){ this.detailId=null; this.render(); },
+  renderPartyDetail(){
+    const type=this.sub;
+    const arr = type==='customers' ? this.state.customers : this.state.suppliers;
+    const p = arr.find(x=>x.id===this.detailId);
+    if(!p){ this.detailId=null; return this.renderCustomers(); }
+    let history=[];
+    if(type==='customers'){
+      history = this.state.sales.filter(s=>s.customerId===p.id).map(s=>({date:s.date,ts:s.ts,label:'فروش',amount:s.total,paid:s.paid}));
+    } else {
+      history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید',amount:s.total,paid:s.paid}));
+    }
+    const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:x.type==='receive'?'دریافت پول':'پرداخت پول',amount:x.amount,paid:null,isPayment:true}));
+    history = [...history,...pays].sort((a,b)=>(b.ts||0)-(a.ts||0));
+
+    const rows = history.length ? history.map(h=>{
+      if(h.isPayment){
+        const color = (type==='customers') ? 'var(--green)' : 'var(--red)';
+        return `<div class="row-item"><div class="r-left"><b>${h.label}</b><span class="sub">${h.date}</span></div><div class="r-right num" style="color:${color}">${fmt(h.amount)}</div></div>`;
+      }
+      return `<div class="row-item"><div class="r-left"><b>${h.label} — مجموع ${fmt(h.amount)}</b><span class="sub">${h.date} · پرداخت‌شده: ${fmt(h.paid)}</span></div><div class="r-right num" style="color:var(--red)">${fmt(h.amount-h.paid)}</div></div>`;
+    }).join('') : `<div class="empty">هنوز معامله‌ای نیست.</div>`;
+
+    const actionLabel = type==='customers' ? 'دریافت پول از مشتری' : 'پرداخت پول به عمده‌فروش';
+
+    return `
+    <button class="back-btn" onclick="App.closeParty()">← بازگشت به فهرست</button>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <b style="font-size:16px;">${escapeHtml(p.name)}</b>
+        <span class="badge ${p.balance>0.5?'red':'green'} num">${fmt(Math.abs(p.balance))} ${p.balance>0.5?'بدهکار':(p.balance<-0.5?'طلبکار':'تسویه')}</span>
+      </div>
+      <button class="btn btn-green" onclick="App.recordPartyPayment('${type}','${p.id}')">${actionLabel}</button>
+    </div>
+    <h2 class="section-title">سابقهٔ معاملات</h2>
+    <div class="card">${rows}</div>
+    `;
+  },
+  recordPartyPayment(type,id){
+    const amt = parseFloat(prompt(type==='customers'?'مبلغ دریافتی از مشتری را بنویسید:':'مبلغ پرداختی به عمده‌فروش را بنویسید:'));
+    if(!amt || amt<=0) return;
+    const arr = type==='customers' ? this.state.customers : this.state.suppliers;
+    const p = arr.find(x=>x.id===id);
+    if(!p) return;
+    if(type==='customers'){ p.balance -= amt; }
+    else { p.balance -= amt; }
+    this.state.payments.push({id:uid(), ts:Date.now(), date:todayISO(), type: type==='customers'?'receive':'pay', partyType:type==='customers'?'customer':'supplier', partyId:id, partyName:p.name, amount:amt});
+    this.save();
+    this.render();
+  },
+
+  /* ---------- More menu ---------- */
+  renderMore(){
+    if((this.sub==='reports' || this.sub==='settings') && !this.isOwner()){
+      return `<div class="empty">این بخش فقط برای مالک/مدیر قابل‌دسترسی است.</div>`;
+    }
+    if(this.sub==='expenses') return this.renderExpenses();
+    if(this.sub==='reports') return this.renderReports();
+    if(this.sub==='products') return this.renderProducts();
+    if(this.sub==='settings') return this.renderSettings();
+    return `
+    <h2 class="section-title">☰ بیشتر</h2>
+    <div class="more-list">
+      <button onclick="App.navigate('more','expenses')"><span class="ic">💸</span> مصارف روزانه (کرایه، تیل، تعمیرات...)</button>
+      ${this.isOwner()?`<button onclick="App.navigate('more','reports')"><span class="ic">📊</span> گزارش سود روزانه / هفته‌وار / ماهوار</button>`:''}
+      <button onclick="App.navigate('more','products')"><span class="ic">🗂️</span> مدیریت محصولات و موجودی</button>
+      ${this.isOwner()?`<button onclick="App.navigate('more','settings')"><span class="ic">⚙️</span> تنظیمات و پشتیبان‌گیری</button>`:''}
+      <button onclick="App.logout()"><span class="ic">🚪</span> خروج از حساب (${escapeHtml(this.user?this.user.email:'')})</button>
+    </div>
+    `;
+  },
+
+  /* ---------- Expenses ---------- */
+  submitExpense(){
+    let category = document.getElementById('exp-category').value;
+    if(category==='__other__') category = (document.getElementById('exp-other').value||'متفرقه').trim();
+    const amount = parseFloat(document.getElementById('exp-amount').value);
+    const date = document.getElementById('exp-date').value || todayISO();
+    const note = (document.getElementById('exp-note').value||'').trim();
+    if(!amount || amount<=0){ alert('مبلغ مصرف را درست بنویسید'); return; }
+    this.state.expenses.push({id:uid(), ts:Date.now(), date, category, amount, note});
+    this.save();
+    alert('مصرف ثبت شد ✅');
+    this.navigate('more','expenses');
+  },
+  deleteExpense(id){
+    if(!confirm('این مصرف حذف شود؟')) return;
+    this.state.expenses = this.state.expenses.filter(x=>x.id!==id);
+    this.save(); this.render();
+  },
+  renderExpenses(){
+    const today = todayISO();
+    const sorted = [...this.state.expenses].sort((a,b)=>(b.ts||0)-(a.ts||0));
+    const rows = sorted.length ? sorted.slice(0,40).map(e=>
+      `<div class="row-item"><div class="r-left"><b>${escapeHtml(e.category)}</b><span class="sub">${e.date}${e.note?(' · '+escapeHtml(e.note)):''}</span></div>
+      <div class="r-right" style="display:flex;align-items:center;gap:8px;"><span class="num" style="color:var(--red)">-${fmt(e.amount)}</span><span class="x" style="color:var(--red);cursor:pointer;" onclick="App.deleteExpense('${e.id}')">✕</span></div></div>`
+    ).join('') : `<div class="empty">هنوز مصرفی ثبت نشده.</div>`;
+
+    return `
+    <button class="back-btn" onclick="App.navigate('more')">← بازگشت</button>
+    <h2 class="section-title">💸 ثبت مصرف روزانه</h2>
+    <div class="card">
+      <label>نوع مصرف</label>
+      <select id="exp-category" onchange="document.getElementById('exp-other-wrap').style.display=this.value==='__other__'?'block':'none'">
+        <option value="کرایه">کرایه دکان/گدام</option>
+        <option value="تیل/بنزین">تیل / بنزین موتر</option>
+        <option value="تعمیرات">تعمیرات موتر</option>
+        <option value="معاش">معاش کارمند</option>
+        <option value="حمل و نقل">کرایه حمل و نقل بار</option>
+        <option value="__other__">متفرقه / دیگر</option>
+      </select>
+      <div id="exp-other-wrap" style="display:none;"><label>نام مصرف</label><input id="exp-other" placeholder="مثلاً چای و نان"></div>
+      <div class="grid2">
+        <div><label>مبلغ</label><input id="exp-amount" type="number" inputmode="decimal" placeholder="0"></div>
+        <div><label>تاریخ</label><input id="exp-date" type="date" value="${today}"></div>
+      </div>
+      <label>یادداشت (اختیاری)</label>
+      <input id="exp-note" placeholder="توضیح کوتاه">
+      <button class="btn btn-primary" onclick="App.submitExpense()">ثبت مصرف</button>
+    </div>
+    <h2 class="section-title">آخرین مصارف</h2>
+    <div class="card">${rows}</div>
+    `;
+  },
+
+  /* ---------- Products ---------- */
+  addProduct(name,unit,stock,avgCost,sellPrice){
+    const p={id:uid(), name, unit:unit||'عدد', stock:stock||0, avgCost:avgCost||0, sellPrice:sellPrice||0};
+    this.state.products.push(p);
+    this.save();
+    return p;
+  },
+  submitNewProductForm(){
+    const name=(document.getElementById('np-name').value||'').trim();
+    const unit=(document.getElementById('np-unit').value||'').trim()||'عدد';
+    const stock=parseFloat(document.getElementById('np-stock').value)||0;
+    const cost=parseFloat(document.getElementById('np-cost').value)||0;
+    const sell=parseFloat(document.getElementById('np-sell').value)||0;
+    if(!name){ alert('نام محصول را بنویسید'); return; }
+    this.addProduct(name,unit,stock,cost,sell);
+    this.render();
+  },
+  editProduct(id){
+    const p=this.state.products.find(x=>x.id===id); if(!p) return;
+    const name=prompt('نام محصول:',p.name); if(name===null) return;
+    const unit=prompt('واحد:',p.unit); if(unit===null) return;
+    const sellPrice=prompt('قیمت فروش پیشنهادی:',p.sellPrice); if(sellPrice===null) return;
+    const stock=prompt('اصلاح موجودی فعلی (تعداد):',p.stock); if(stock===null) return;
+    p.name=name.trim()||p.name; p.unit=unit.trim()||p.unit;
+    p.sellPrice=parseFloat(sellPrice)||0; p.stock=parseFloat(stock)||0;
+    this.save(); this.render();
+  },
+  deleteProduct(id){
+    if(!confirm('این محصول حذف شود؟ این کار سابقهٔ فروش/خرید را تغییر نمی‌دهد.')) return;
+    this.state.products = this.state.products.filter(x=>x.id!==id);
+    this.save(); this.render();
+  },
+  renderProducts(){
+    const sorted=[...this.state.products].sort((a,b)=>a.name.localeCompare(b.name,'fa'));
+    const rows = sorted.length ? sorted.map(p=>
+      `<div class="row-item"><div class="r-left"><b>${escapeHtml(p.name)}</b><span class="sub">قیمت تمام‌شده: <span class="num">${fmt(p.avgCost)}</span> · قیمت فروش: <span class="num">${fmt(p.sellPrice)}</span></span></div>
+      <div class="r-right" style="display:flex;align-items:center;gap:10px;">
+        <span class="badge ${p.stock<=0?'red':'gold'} num">${p.stock} ${escapeHtml(p.unit)}</span>
+        <span onclick="App.editProduct('${p.id}')" style="cursor:pointer;">✏️</span>
+        <span onclick="App.deleteProduct('${p.id}')" style="cursor:pointer;color:var(--red);">✕</span>
+      </div></div>`
+    ).join('') : `<div class="empty">هنوز محصولی اضافه نشده.</div>`;
+
+    return `
+    <button class="back-btn" onclick="App.navigate('more')">← بازگشت</button>
+    <h2 class="section-title">🗂️ محصولات و موجودی</h2>
+    <div class="card">
+      <label>افزودن محصول جدید</label>
+      <input id="np-name" placeholder="نام محصول">
+      <div class="grid2">
+        <div><label>واحد</label><input id="np-unit" placeholder="عدد / کارتن" value="عدد"></div>
+        <div><label>موجودی آغازین</label><input id="np-stock" type="number" placeholder="0"></div>
+      </div>
+      <div class="grid2">
+        <div><label>قیمت تمام‌شده (خرید)</label><input id="np-cost" type="number" placeholder="0"></div>
+        <div><label>قیمت فروش پیشنهادی</label><input id="np-sell" type="number" placeholder="0"></div>
+      </div>
+      <button class="btn btn-primary" onclick="App.submitNewProductForm()">افزودن محصول</button>
+    </div>
+    <h2 class="section-title">فهرست محصولات (${sorted.length})</h2>
+    <div class="card">${rows}</div>
+    `;
+  },
+
+  /* ---------- Reports ---------- */
+  setPeriod(p){ this.reportPeriod=p; this.render(); },
+  renderReports(){
+    const today=todayISO();
+    let start,end=today,label='امروز';
+    if(this.reportPeriod==='today'){ start=today; label='امروز'; }
+    else if(this.reportPeriod==='week'){ start=startOfWeek(today); label='این هفته'; }
+    else if(this.reportPeriod==='month'){ start=startOfMonth(today); label='این ماه'; }
+    else { start=this.reportStart||today; end=this.reportEnd||today; label='بازهٔ دلخواه'; }
+
+    const sales=this.salesInRange(start,end);
+    const purchases=this.purchasesInRange(start,end);
+    const expenses=this.expensesInRange(start,end);
+    const revenue=sum(sales,'total');
+    const cogs=sum(sales,'totalCost');
+    const grossProfit=revenue-cogs;
+    const expTotal=sum(expenses,'amount');
+    const netProfit=grossProfit-expTotal;
+    const purchTotal=sum(purchases,'total');
+
+    const catMap={};
+    expenses.forEach(e=>{ catMap[e.category]=(catMap[e.category]||0)+e.amount; });
+    const catRows = Object.keys(catMap).length ? Object.entries(catMap).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
+      `<div class="row-item"><div class="r-left"><b>${escapeHtml(k)}</b></div><div class="r-right num">${fmt(v)}</div></div>`
+    ).join('') : `<div class="empty">مصرفی در این بازه ثبت نشده.</div>`;
+
+    return `
+    <button class="back-btn" onclick="App.navigate('more')">← بازگشت</button>
+    <h2 class="section-title">📊 گزارش سود و زیان</h2>
+    <div class="period-btns">
+      <button class="${this.reportPeriod==='today'?'active':''}" onclick="App.setPeriod('today')">امروز</button>
+      <button class="${this.reportPeriod==='week'?'active':''}" onclick="App.setPeriod('week')">این هفته</button>
+      <button class="${this.reportPeriod==='month'?'active':''}" onclick="App.setPeriod('month')">این ماه</button>
+      <button class="${this.reportPeriod==='custom'?'active':''}" onclick="App.setPeriod('custom')">بازهٔ دلخواه</button>
+    </div>
+    ${this.reportPeriod==='custom'?`
+    <div class="card">
+      <div class="grid2">
+        <div><label>از تاریخ</label><input type="date" value="${this.reportStart||today}" onchange="App.reportStart=this.value; App.render();"></div>
+        <div><label>تا تاریخ</label><input type="date" value="${this.reportEnd||today}" onchange="App.reportEnd=this.value; App.render();"></div>
+      </div>
+    </div>`:''}
+    <div class="card">
+      <div class="field-note">بازه: ${label} (${start} تا ${end})</div>
+      <div class="row-item"><div class="r-left">مجموع فروش</div><div class="r-right num">${fmt(revenue)}</div></div>
+      <div class="row-item"><div class="r-left">قیمت تمام‌شدهٔ کالای فروخته‌شده</div><div class="r-right num">${fmt(cogs)}</div></div>
+      <div class="row-item"><div class="r-left"><b>سود ناخالص</b></div><div class="r-right num" style="color:var(--green)"><b>${fmt(grossProfit)}</b></div></div>
+      <div class="row-item"><div class="r-left">مجموع مصارف</div><div class="r-right num" style="color:var(--red)">-${fmt(expTotal)}</div></div>
+      <div class="total-line"><span>سود خالص</span><span class="num ${netProfit>=0?'':'red'}" style="color:${netProfit>=0?'var(--green)':'var(--red)'}">${fmt(netProfit)}</span></div>
+    </div>
+    <div class="card">
+      <div class="row-item"><div class="r-left">مجموع خرید در این بازه</div><div class="r-right num">${fmt(purchTotal)}</div></div>
+      <div class="row-item"><div class="r-left">تعداد فاکتور فروش</div><div class="r-right num">${sales.length}</div></div>
+    </div>
+    <h2 class="section-title">مصارف بر اساس نوع</h2>
+    <div class="card">${catRows}</div>
+    `;
+  },
+
+  /* ---------- Settings / Backup ---------- */
+  saveSettings(){
+    this.state.settings.businessName=(document.getElementById('set-name').value||'').trim()||'پخش موتر من';
+    this.state.settings.currency=(document.getElementById('set-currency').value||'').trim()||'افغانی';
+    this.state.settings.openingCash=parseFloat(document.getElementById('set-cash').value)||0;
+    this.save();
+    document.getElementById('biz-name').textContent=this.state.settings.businessName;
+    alert('تنظیمات ذخیره شد ✅');
+    this.render();
+  },
+  exportBackup(){
+    const data=JSON.stringify(this.state,null,2);
+    const blob=new Blob([data],{type:'application/json'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;
+    a.download='backup-hesabdari-'+todayISO()+'.json';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  },
+  importBackup(input){
+    const file=input.files[0];
+    if(!file) return;
+    const reader=new FileReader();
+    reader.onload=(e)=>{
+      try{
+        const parsed=JSON.parse(e.target.result);
+        if(!confirm('بازیابی از فایل پشتیبان، تمام اطلاعات فعلی را جایگزین می‌کند. ادامه می‌دهید؟')) return;
+        this.state=parsed;
+        if(!this.state.suppliers) this.state.suppliers=[];
+        if(!this.state.payments) this.state.payments=[];
+        this.save();
+        alert('بازیابی موفقانه انجام شد ✅');
+        this.navigate('dashboard');
+      }catch(err){ alert('فایل پشتیبان معتبر نیست.'); }
+    };
+    reader.readAsText(file);
+  },
+  wipeAll(){
+    if(!confirm('تمام اطلاعات (فروش، خرید، مصارف، محصولات) برای همیشه پاک می‌شود. مطمئن هستید؟')) return;
+    if(!confirm('این کار قابل بازگشت نیست. یک‌بار دیگر تأیید کنید.')) return;
+    this.state=defaultState();
+    this.save();
+    this.navigate('dashboard');
+  },
+  renderSettings(){
+    const s=this.state.settings;
+    return `
+    <button class="back-btn" onclick="App.navigate('more')">← بازگشت</button>
+    <h2 class="section-title">⚙️ تنظیمات</h2>
+    <div class="card">
+      <label>نام کسب‌وکار</label>
+      <input id="set-name" value="${escapeHtml(s.businessName)}">
+      <label>واحد پول</label>
+      <select id="set-currency">
+        <option value="افغانی" ${s.currency==='افغانی'?'selected':''}>افغانی</option>
+        <option value="دالر" ${s.currency==='دالر'?'selected':''}>دالر</option>
+        <option value="کلدار" ${s.currency==='کلدار'?'selected':''}>کلدار پاکستانی</option>
+      </select>
+      <label>موجودی نقد آغازین صندوق</label>
+      <input id="set-cash" type="number" value="${s.openingCash}">
+      <button class="btn btn-primary" onclick="App.saveSettings()">ذخیره تنظیمات</button>
+    </div>
+    <h2 class="section-title">پشتیبان‌گیری و سینک دستی</h2>
+    <div class="card">
+      <div class="field-note">این برنامه کاملاً آفلاین است و اطلاعات فقط روی همین گوشی ذخیره می‌شود. برای انتقال اطلاعات به گوشی دیگر یا نگه‌داری نسخهٔ پشتیبان، فایل زیر را بگیرید و بعداً بازیابی کنید (مثلاً از طریق واتساپ یا ایمیل بفرستید).</div>
+      <button class="btn btn-outline" onclick="App.exportBackup()">⬇️ دانلود فایل پشتیبان</button>
+      <label style="margin-top:14px;">بازیابی از فایل پشتیبان</label>
+      <input type="file" accept="application/json" onchange="App.importBackup(this)">
+    </div>
+    <h2 class="section-title">منطقهٔ خطر</h2>
+    <div class="card">
+      <button class="btn btn-danger" onclick="App.wipeAll()">پاک کردن همهٔ اطلاعات</button>
+    </div>
+    `;
+  },
+};
+
+window.App = App;
+App.init();
+</script>
+</body>
+</html>
