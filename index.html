@@ -222,12 +222,22 @@ const App = {
     this.state = defaultState();
     this.resetSaleDraft();
     this.resetPurchaseDraft();
-    this.renderLogin();
+    this.renderLoading();
     onAuthStateChanged(auth, (u)=>{
       this.user = u;
       if(u){ this.afterLogin(u); }
       else { this.role=null; this.dataReady=false; this.renderLogin(); }
     });
+  },
+
+  renderLoading(){
+    document.getElementById('bottomnav').innerHTML='';
+    document.getElementById('biz-name').textContent='پخش موتر';
+    document.getElementById('biz-date').textContent='';
+    document.getElementById('screen').innerHTML = `
+    <div class="card" style="margin-top:40px;text-align:center;color:#c9c4b6;">
+      در حال بارگذاری...
+    </div>`;
   },
 
   async afterLogin(u){
