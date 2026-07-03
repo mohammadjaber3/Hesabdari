@@ -223,6 +223,27 @@ function todayISO(){ return new Date().toISOString().slice(0,10); }
 function fmt(n){ n = Math.round(Number(n)||0); return n.toLocaleString('en-US'); }
 function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function sum(arr,key){ return arr.reduce((a,b)=>a+(Number(b[key])||0),0); }
+function migrateState(state){
+  if(!state.suppliers) state.suppliers=[];
+  if(!state.payments) state.payments=[];
+  if(state.settings.invoiceCounter===undefined) state.settings.invoiceCounter=0;
+  if(state.settings.businessPhone===undefined) state.settings.businessPhone='';
+  if(state.settings.businessAddress===undefined) state.settings.businessAddress='';
+  if(state.settings.logoEmoji===undefined) state.settings.logoEmoji='🏪';
+  (state.sales||[]).forEach(s=>{
+    if(!s.status) s.status='active';
+    if(!s.returns) s.returns=[];
+    if(s.originalTotal===undefined) s.originalTotal=s.total;
+    (s.items||[]).forEach(it=>{ if(it.returnedQty===undefined) it.returnedQty=0; });
+  });
+  (state.purchases||[]).forEach(p=>{
+    if(!p.status) p.status='active';
+    if(!p.returns) p.returns=[];
+    if(p.originalTotal===undefined) p.originalTotal=p.total;
+    (p.items||[]).forEach(it=>{ if(it.returnedQty===undefined) it.returnedQty=0; });
+  });
+  return state;
+}
 function dateLabel(d){
   const dt=new Date(d+'T00:00:00');
   const days=['یکشنبه','دوشنبه','سه‌شنبه','چهارشنبه','پنجشنبه','جمعه','شنبه'];
@@ -285,12 +306,7 @@ const App = {
     onSnapshot(stateDocRef, async (snap)=>{
       if(snap.exists()){
         this.state = snap.data();
-        if(!this.state.suppliers) this.state.suppliers=[];
-        if(!this.state.payments) this.state.payments=[];
-        if(this.state.settings.invoiceCounter===undefined) this.state.settings.invoiceCounter=0;
-        if(this.state.settings.businessPhone===undefined) this.state.settings.businessPhone='';
-        if(this.state.settings.businessAddress===undefined) this.state.settings.businessAddress='';
-        if(this.state.settings.logoEmoji===undefined) this.state.settings.logoEmoji='🏪';
+        migrateState(this.state);
       } else {
         this.state = defaultState();
         try{ await setDoc(stateDocRef, this.state); }catch(e){}
@@ -384,6 +400,7 @@ const App = {
       case 'customers': html=this.renderCustomers(); break;
       case 'more': html=this.renderMore(); break;
       case 'invoice': html=this.renderInvoiceView(); break;
+      case 'purchase-view': html=this.renderPurchaseView(); break;
       default: html=this.renderDashboard();
     }
     s.innerHTML = html;
@@ -431,9 +448,11 @@ const App = {
 
     const recentHtml = recent.length ? recent.map(x=>{
       if(x._type==='sale'){
-        return `<div class="row-item clickable" onclick="App.viewInvoice('${x.id}')"><div class="r-left"><b>فروش ${this.invoiceNoLabel(x.invoiceNo)} — ${escapeHtml(x.customerName)}</b><span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--green)">+${fmt(x.paid)}</div></div>`;
+        const tag = x.status==='cancelled' ? ' <span class="badge gold">باطل</span>' : '';
+        return `<div class="row-item clickable" onclick="App.viewInvoice('${x.id}')"><div class="r-left"><b>فروش ${this.invoiceNoLabel(x.invoiceNo)} — ${escapeHtml(x.customerName)}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--green)">+${fmt(x.paid)}</div></div>`;
       } else if(x._type==='purchase'){
-        return `<div class="row-item"><div class="r-left"><b>خرید — ${escapeHtml(x.supplierName||'—')}</b><span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--red)">-${fmt(x.paid)}</div></div>`;
+        const tag = x.status==='cancelled' ? ' <span class="badge gold">باطل</span>' : '';
+        return `<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><div class="r-left"><b>خرید — ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--red)">-${fmt(x.paid)}</div></div>`;
       } else {
         return `<div class="row-item"><div class="r-left"><b>مصرف — ${escapeHtml(x.category)}</b><span class="sub">${x.date}${x.note?(' · '+escapeHtml(x.note)):''}</span></div><div class="r-right num" style="color:var(--red)">-${fmt(x.amount)}</div></div>`;
       }
@@ -530,8 +549,8 @@ const App = {
     const newSale = {
       id:uid(), ts:Date.now(), date, invoiceNo, customerId, customerName:customerNameFinal,
       customerPhone: custName?custPhone:'', customerAddress: custName?custAddress:'',
-      items:this.saleDraft.items, total, totalCost, profit: total-totalCost,
-      paid, remaining, note
+      items:this.saleDraft.items.map(it=>({...it,returnedQty:0})), total, totalCost, profit: total-totalCost,
+      paid, remaining, note, status:'active', returns:[], originalTotal: total
     };
     this.state.sales.push(newSale);
     this.resetSaleDraft();
@@ -557,6 +576,7 @@ const App = {
     lines.push(`${s.logoEmoji||''} ${s.businessName}`.trim());
     if(s.businessPhone) lines.push('تماس: '+s.businessPhone);
     lines.push('———————————————');
+    if(sale.status==='cancelled') lines.push('⚠️ این فاکتور باطل شده است');
     lines.push('فاکتور فروش '+this.invoiceNoLabel(sale.invoiceNo));
     lines.push('تاریخ: '+sale.date);
     lines.push('مشتری: '+sale.customerName);
@@ -564,12 +584,14 @@ const App = {
     if(sale.customerAddress) lines.push('آدرس: '+sale.customerAddress);
     lines.push('———————————————');
     sale.items.forEach((it,idx)=>{
-      lines.push(`${idx+1}. ${it.name} — ${it.qty} ${it.unit} × ${fmt(it.unitPrice)} = ${fmt(it.qty*it.unitPrice)}`);
+      const ret = it.returnedQty ? ` (مرجوعی: ${it.returnedQty})` : '';
+      lines.push(`${idx+1}. ${it.name} — ${it.qty} ${it.unit} × ${fmt(it.unitPrice)} = ${fmt(it.qty*it.unitPrice)}${ret}`);
     });
     lines.push('———————————————');
     lines.push('مجموع فاکتور: '+fmt(sale.total)+' '+s.currency);
     lines.push('پرداخت‌شده: '+fmt(sale.paid)+' '+s.currency);
-    if(sale.remaining>0.5) lines.push('باقیمانده (قرض): '+fmt(sale.remaining)+' '+s.currency);
+    if(sale.status==='cancelled') lines.push('وضعیت: باطل شده ❌');
+    else if(sale.remaining>0.5) lines.push('باقیمانده (قرض): '+fmt(sale.remaining)+' '+s.currency);
     else lines.push('وضعیت: تسویه‌شده ✅');
     if(sale.note) lines.push('یادداشت: '+sale.note);
     lines.push('———————————————');
@@ -590,14 +612,26 @@ const App = {
       return `<button class="back-btn" onclick="App.navigate('dashboard')">← بازگشت</button><div class="empty">فاکتور یافت نشد.</div>`;
     }
     const s=this.state.settings;
-    const itemsHtml = sale.items.map((it,idx)=>`
+    const cancelled = sale.status==='cancelled';
+    const itemsHtml = sale.items.map((it,idx)=>{
+      const returned = it.returnedQty||0;
+      return `
       <tr>
         <td>${idx+1}</td>
-        <td>${escapeHtml(it.name)}</td>
+        <td>${escapeHtml(it.name)}${returned>0?`<div class="sub" style="color:var(--red);">${returned} ${escapeHtml(it.unit)} مرجوعی</div>`:''}</td>
         <td class="num">${it.qty} ${escapeHtml(it.unit)}</td>
         <td class="num">${fmt(it.unitPrice)}</td>
         <td class="num">${fmt(it.qty*it.unitPrice)}</td>
-      </tr>`).join('');
+        <td class="no-print">${!cancelled?`
+          <span onclick="App.saleReturnItem('${sale.id}',${idx})" style="cursor:pointer;" title="مرجوعی">↩️</span>
+          <span onclick="App.saleIncreaseItemQty('${sale.id}',${idx})" style="cursor:pointer;" title="افزودن تعداد">➕</span>`:''}</td>
+      </tr>`;
+    }).join('');
+
+    const returnsHtml = sale.returns && sale.returns.length ? `
+      <h2 class="section-title">↩️ کالاهای مرجوعی</h2>
+      <div class="card no-print">${sale.returns.map(r=>`<div class="row-item"><div class="r-left"><b>${escapeHtml(r.name)}</b><span class="sub">${r.date} · ${r.qty} عدد</span></div><div class="r-right num" style="color:var(--red)">-${fmt(r.amount)}</div></div>`).join('')}</div>
+    ` : '';
 
     return `
     <div class="inv-actions no-print">
@@ -605,13 +639,19 @@ const App = {
       <button class="btn btn-primary" onclick="App.printInvoice()">🖨️ چاپ فاکتور</button>
       <button class="btn btn-wa" onclick="App.sendInvoiceWhatsApp('${sale.id}')">📲 ارسال واتساپ</button>
     </div>
+    ${!cancelled?`
+    <div class="inv-actions no-print">
+      <button class="btn btn-outline" onclick="App.saleAddItem('${sale.id}')">➕ افزودن قلم جدید</button>
+      <button class="btn btn-danger" onclick="App.cancelSale('${sale.id}')">❌ کنسل کامل فاکتور</button>
+    </div>`:''}
     <div id="invoice-print" class="card">
+      ${cancelled?`<div class="badge red num" style="font-size:14px;margin-bottom:8px;">❌ این فاکتور باطل شده است</div>`:''}
       <div class="inv-head">
         <div class="logo">${s.logoEmoji||'🏪'}</div>
         <div class="biz">${escapeHtml(s.businessName)}</div>
-        ${s.businessPhone?`<div class="sub">تماس: ${escapeHtml(s.businessPhone)}</div>`:''}
+        ${s.businessPhone?`<div class="sub" style="font-weight:700;font-size:13px;">📞 <a href="tel:${escapeHtml(s.businessPhone)}" class="num" style="color:inherit;text-decoration:none;">${escapeHtml(s.businessPhone)}</a></div>`:''}
         ${s.businessAddress?`<div class="sub">${escapeHtml(s.businessAddress)}</div>`:''}
-        <div class="sub" style="margin-top:6px;font-weight:700;color:var(--ink);">فاکتور فروش</div>
+        <div class="sub" style="margin-top:6px;font-weight:700;color:var(--ink);">فاکتور فروش${cancelled?' — باطل شده':''}</div>
       </div>
       <div class="inv-meta">
         <span>شماره فاکتور: <b class="num">${this.invoiceNoLabel(sale.invoiceNo)}</b></span>
@@ -623,13 +663,14 @@ const App = {
         ${sale.customerAddress?`<div>آدرس: ${escapeHtml(sale.customerAddress)}</div>`:''}
       </div>
       <table class="inv-table">
-        <thead><tr><th>#</th><th>شرح کالا</th><th>تعداد</th><th>فی واحد</th><th>مجموع</th></tr></thead>
+        <thead><tr><th>#</th><th>شرح کالا</th><th>تعداد</th><th>فی واحد</th><th>مجموع</th><th class="no-print"></th></tr></thead>
         <tbody>${itemsHtml}</tbody>
       </table>
       <div class="inv-totals">
-        <div class="row-item"><div class="r-left">مجموع فاکتور</div><div class="r-right num">${fmt(sale.total)} ${s.currency}</div></div>
+        ${sale.originalTotal!==undefined && Math.abs(sale.originalTotal-sale.total)>0.5?`<div class="row-item"><div class="r-left">مجموع اولیهٔ فاکتور</div><div class="r-right num">${fmt(sale.originalTotal)} ${s.currency}</div></div>`:''}
+        <div class="row-item"><div class="r-left">مجموع فعلی فاکتور</div><div class="r-right num">${fmt(sale.total)} ${s.currency}</div></div>
         <div class="row-item"><div class="r-left">مبلغ دریافت‌شده</div><div class="r-right num" style="color:var(--green)">${fmt(sale.paid)} ${s.currency}</div></div>
-        <div class="row-item"><div class="r-left"><b>${sale.remaining>0.5?'باقیمانده (قرض)':'وضعیت'}</b></div><div class="r-right num" style="color:${sale.remaining>0.5?'var(--red)':'var(--green)'}"><b>${sale.remaining>0.5?fmt(sale.remaining)+' '+s.currency:'تسویه‌شده ✅'}</b></div></div>
+        <div class="row-item"><div class="r-left"><b>${sale.remaining>0.5?'باقیمانده (قرض)':'وضعیت'}</b></div><div class="r-right num" style="color:${sale.remaining>0.5?'var(--red)':'var(--green)'}"><b>${cancelled?'باطل شده':(sale.remaining>0.5?fmt(sale.remaining)+' '+s.currency:'تسویه‌شده ✅')}</b></div></div>
       </div>
       ${sale.note?`<div class="field-note">یادداشت: ${escapeHtml(sale.note)}</div>`:''}
       <div class="inv-sign">
@@ -637,8 +678,10 @@ const App = {
       </div>
       <div class="inv-footer">با تشکر از خرید شما 🙏</div>
     </div>
+    ${returnsHtml}
     `;
   },
+
 
   renderSale(){
     const items = this.saleDraft.items;
@@ -758,14 +801,16 @@ const App = {
       }
     });
 
-    this.state.purchases.push({
+    const newPurchase = {
       id:uid(), ts:Date.now(), date, supplierId, supplierName:supplierNameFinal,
-      items:this.purchaseDraft.items, total, paid, remaining, note
-    });
+      items:this.purchaseDraft.items.map(it=>({...it,returnedQty:0})), total, paid, remaining, note,
+      status:'active', returns:[], originalTotal: total
+    };
+    this.state.purchases.push(newPurchase);
     this.resetPurchaseDraft();
     this.save();
-    alert('خرید با موفقیت ثبت شد ✅');
-    this.navigate('dashboard');
+    this.viewPurchaseId = newPurchase.id;
+    this.navigate('purchase-view');
   },
 
   renderPurchase(){
@@ -810,6 +855,291 @@ const App = {
       <button class="btn btn-primary" onclick="App.submitPurchase()">ثبت خرید</button>
     </div>
     `;
+  },
+
+  viewPurchase(id){ this.viewPurchaseId=id; this.navigate('purchase-view'); },
+  renderPurchaseView(){
+    const pur=this.state.purchases.find(x=>x.id===this.viewPurchaseId);
+    if(!pur){
+      return `<button class="back-btn" onclick="App.navigate('dashboard')">← بازگشت</button><div class="empty">بل خرید یافت نشد.</div>`;
+    }
+    const s=this.state.settings;
+    const cancelled = pur.status==='cancelled';
+    const itemsHtml = pur.items.map((it,idx)=>{
+      const returned = it.returnedQty||0;
+      return `
+      <tr>
+        <td>${idx+1}</td>
+        <td>${escapeHtml(it.name)}${returned>0?`<div class="sub" style="color:var(--red);">${returned} ${escapeHtml(it.unit)} واپس شده</div>`:''}</td>
+        <td class="num">${it.qty} ${escapeHtml(it.unit)}</td>
+        <td class="num">${fmt(it.unitCost)}</td>
+        <td class="num">${fmt(it.qty*it.unitCost)}</td>
+        <td class="no-print">${!cancelled?`
+          <span onclick="App.purchaseReturnItem('${pur.id}',${idx})" style="cursor:pointer;" title="واپس به فروشنده">↩️</span>
+          <span onclick="App.purchaseIncreaseItemQty('${pur.id}',${idx})" style="cursor:pointer;" title="افزودن تعداد">➕</span>`:''}</td>
+      </tr>`;
+    }).join('');
+
+    const returnsHtml = pur.returns && pur.returns.length ? `
+      <h2 class="section-title">↩️ کالاهای واپس‌شده به فروشنده</h2>
+      <div class="card no-print">${pur.returns.map(r=>`<div class="row-item"><div class="r-left"><b>${escapeHtml(r.name)}</b><span class="sub">${r.date} · ${r.qty} عدد</span></div><div class="r-right num" style="color:var(--red)">-${fmt(r.amount)}</div></div>`).join('')}</div>
+    ` : '';
+
+    return `
+    <div class="inv-actions no-print">
+      <button class="btn btn-outline" onclick="App.navigate('dashboard')">← داشبورد</button>
+      <button class="btn btn-primary" onclick="App.printInvoice()">🖨️ چاپ</button>
+    </div>
+    ${!cancelled?`
+    <div class="inv-actions no-print">
+      <button class="btn btn-outline" onclick="App.purchaseAddItem('${pur.id}')">➕ افزودن قلم جدید</button>
+      <button class="btn btn-danger" onclick="App.cancelPurchase('${pur.id}')">❌ کنسل کامل بل خرید</button>
+    </div>`:''}
+    <div id="invoice-print" class="card">
+      ${cancelled?`<div class="badge red num" style="font-size:14px;margin-bottom:8px;">❌ این بل خرید باطل شده است</div>`:''}
+      <div class="inv-head">
+        <div class="logo">${s.logoEmoji||'🏪'}</div>
+        <div class="biz">${escapeHtml(s.businessName)}</div>
+        <div class="sub" style="margin-top:6px;font-weight:700;color:var(--ink);">سند خرید${cancelled?' — باطل شده':''}</div>
+      </div>
+      <div class="inv-meta">
+        <span>تاریخ: <b class="num">${pur.date}</b></span>
+      </div>
+      <div class="inv-cust">
+        <div class="l1">شرکت / عمده‌فروش: ${escapeHtml(pur.supplierName||'—')}</div>
+      </div>
+      <table class="inv-table">
+        <thead><tr><th>#</th><th>شرح کالا</th><th>تعداد</th><th>فی واحد</th><th>مجموع</th><th class="no-print"></th></tr></thead>
+        <tbody>${itemsHtml}</tbody>
+      </table>
+      <div class="inv-totals">
+        ${pur.originalTotal!==undefined && Math.abs(pur.originalTotal-pur.total)>0.5?`<div class="row-item"><div class="r-left">مجموع اولیهٔ بل</div><div class="r-right num">${fmt(pur.originalTotal)} ${s.currency}</div></div>`:''}
+        <div class="row-item"><div class="r-left">مجموع فعلی بل</div><div class="r-right num">${fmt(pur.total)} ${s.currency}</div></div>
+        <div class="row-item"><div class="r-left">پرداخت‌شده</div><div class="r-right num" style="color:var(--green)">${fmt(pur.paid)} ${s.currency}</div></div>
+        <div class="row-item"><div class="r-left"><b>${pur.remaining>0.5?'باقیمانده (بدهی ما)':'وضعیت'}</b></div><div class="r-right num" style="color:${pur.remaining>0.5?'var(--red)':'var(--green)'}"><b>${cancelled?'باطل شده':(pur.remaining>0.5?fmt(pur.remaining)+' '+s.currency:'تسویه‌شده ✅')}</b></div></div>
+      </div>
+      ${pur.note?`<div class="field-note">یادداشت: ${escapeHtml(pur.note)}</div>`:''}
+    </div>
+    ${returnsHtml}
+    `;
+  },
+
+  /* ---------- Invoice adjustments: cancel / return / edit items (sales) ---------- */
+  saleReturnItem(saleId, idx){
+    const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
+    if(sale.status==='cancelled'){ alert('این فاکتور باطل شده است.'); return; }
+    const it=sale.items[idx]; if(!it) return;
+    const sellable = it.qty-(it.returnedQty||0);
+    if(sellable<=0){ alert('این قلم قبلاً بطور کامل مرجوعی خورده است.'); return; }
+    const qtyStr=prompt(`چند عدد از «${it.name}» مرجوعی می‌شود؟ (حداکثر ${sellable} ${it.unit})`, sellable);
+    if(qtyStr===null) return;
+    const qty=parseFloat(qtyStr);
+    if(!qty||qty<=0||qty>sellable){ alert('تعداد نامعتبر است.'); return; }
+    this._applySaleReturn(sale, idx, qty);
+    this.save(); this.render();
+  },
+  _applySaleReturn(sale, idx, qty){
+    const it=sale.items[idx];
+    const refund = qty*it.unitPrice;
+    const refundCost = qty*(it.cost||0);
+    const oldRemaining = sale.total-sale.paid;
+    const debtReduction = Math.min(refund, Math.max(0,oldRemaining));
+    const cashRefund = refund-debtReduction;
+    it.returnedQty=(it.returnedQty||0)+qty;
+    sale.total-=refund;
+    sale.totalCost-=refundCost;
+    sale.profit-=(refund-refundCost);
+    sale.paid-=cashRefund;
+    sale.remaining=sale.total-sale.paid;
+    if(sale.customerId){
+      const c=this.state.customers.find(x=>x.id===sale.customerId);
+      if(c) c.balance-=debtReduction;
+    }
+    const p=this.state.products.find(pp=>pp.id===it.productId);
+    if(p) p.stock+=qty;
+    sale.returns.push({id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, unitPrice:it.unitPrice, amount:refund});
+  },
+  cancelSale(saleId){
+    const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
+    if(sale.status==='cancelled'){ alert('این فاکتور قبلاً باطل شده است.'); return; }
+    if(!confirm('کل این فاکتور باطل شود؟ موجودی کالاها به انبار برمی‌گردد و بدهی مشتری اصلاح می‌شود.')) return;
+    sale.items.forEach((it,idx)=>{
+      const sellable=it.qty-(it.returnedQty||0);
+      if(sellable>0) this._applySaleReturn(sale, idx, sellable);
+    });
+    sale.status='cancelled';
+    this.save(); this.render();
+  },
+  saleIncreaseItemQty(saleId, idx){
+    const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
+    if(sale.status==='cancelled'){ alert('این فاکتور باطل شده است.'); return; }
+    const it=sale.items[idx]; if(!it) return;
+    const qtyStr=prompt(`چند عدد دیگر از «${it.name}» اضافه شود؟`,'1');
+    if(qtyStr===null) return;
+    const qty=parseFloat(qtyStr);
+    if(!qty||qty<=0){ alert('تعداد نامعتبر است.'); return; }
+    const p=this.state.products.find(pp=>pp.id===it.productId);
+    if(p && qty>p.stock){ if(!confirm('موجودی انبار کافی نیست ('+p.stock+' '+it.unit+' باقی‌مانده). ادامه می‌دهید؟')) return; }
+    const addAmount=qty*it.unitPrice;
+    const paidStr=prompt('مبلغ پرداختی نقدی برای همین اضافه (اگر نسیه است، صفر بگذارید):', addAmount);
+    if(paidStr===null) return;
+    let addPaid=parseFloat(paidStr); if(isNaN(addPaid)||addPaid<0) addPaid=0; if(addPaid>addAmount) addPaid=addAmount;
+    if(addPaid<addAmount && !sale.customerId){ alert('برای نسیه باید فاکتور برای یک مشتری مشخص باشد.'); return; }
+    it.qty+=qty;
+    if(p) p.stock-=qty;
+    sale.total+=addAmount; sale.originalTotal+=addAmount;
+    sale.totalCost+=qty*(it.cost||0); sale.profit=sale.total-sale.totalCost;
+    sale.paid+=addPaid;
+    sale.remaining=sale.total-sale.paid;
+    if(sale.customerId && addAmount-addPaid>0){
+      const c=this.state.customers.find(x=>x.id===sale.customerId);
+      if(c) c.balance+=(addAmount-addPaid);
+    }
+    this.save(); this.render();
+  },
+  saleAddItem(saleId){
+    const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
+    if(sale.status==='cancelled'){ alert('این فاکتور باطل شده است.'); return; }
+    const name=prompt('نام محصول جدید برای افزودن به این فاکتور:'); if(name===null) return;
+    const trimmed=name.trim(); if(!trimmed){ alert('نام را بنویسید'); return; }
+    let product=this.state.products.find(p=>p.name===trimmed);
+    const qtyStr=prompt('تعداد:','1'); if(qtyStr===null) return;
+    const qty=parseFloat(qtyStr); if(!qty||qty<=0){ alert('تعداد نامعتبر است.'); return; }
+    const priceStr=prompt('قیمت فروش هر واحد:', product?product.sellPrice:0); if(priceStr===null) return;
+    const price=parseFloat(priceStr); if(isNaN(price)||price<0){ alert('قیمت نامعتبر است.'); return; }
+    if(!product){ product=this.addProduct(trimmed,'عدد',0,0,price); }
+    if(qty>product.stock){ if(!confirm('موجودی انبار کافی نیست ('+product.stock+' '+product.unit+' باقی‌مانده). ادامه می‌دهید؟')) return; }
+    const addAmount=qty*price;
+    const paidStr=prompt('مبلغ پرداختی نقدی برای همین قلم (اگر نسیه است، صفر بگذارید):', addAmount);
+    if(paidStr===null) return;
+    let addPaid=parseFloat(paidStr); if(isNaN(addPaid)||addPaid<0) addPaid=0; if(addPaid>addAmount) addPaid=addAmount;
+    if(addPaid<addAmount && !sale.customerId){ alert('برای نسیه باید فاکتور برای یک مشتری مشخص باشد.'); return; }
+    sale.items.push({productId:product.id,name:product.name,unit:product.unit,qty,unitPrice:price,cost:product.avgCost,returnedQty:0});
+    product.stock-=qty;
+    sale.total+=addAmount; sale.originalTotal+=addAmount;
+    sale.totalCost+=qty*product.avgCost;
+    sale.profit=sale.total-sale.totalCost;
+    sale.paid+=addPaid;
+    sale.remaining=sale.total-sale.paid;
+    if(sale.customerId && addAmount-addPaid>0){
+      const c=this.state.customers.find(x=>x.id===sale.customerId);
+      if(c) c.balance+=(addAmount-addPaid);
+    }
+    this.save(); this.render();
+  },
+
+  /* ---------- Invoice adjustments: cancel / return / edit items (purchases) ---------- */
+  purchaseReturnItem(purchaseId, idx){
+    const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
+    if(pur.status==='cancelled'){ alert('این بل خرید باطل شده است.'); return; }
+    const it=pur.items[idx]; if(!it) return;
+    const returnable = it.qty-(it.returnedQty||0);
+    if(returnable<=0){ alert('این قلم قبلاً بطور کامل واپس شده است.'); return; }
+    const qtyStr=prompt(`چند عدد از «${it.name}» به فروشنده واپس شود؟ (حداکثر ${returnable} ${it.unit})`, returnable);
+    if(qtyStr===null) return;
+    const qty=parseFloat(qtyStr);
+    if(!qty||qty<=0||qty>returnable){ alert('تعداد نامعتبر است.'); return; }
+    const p=this.state.products.find(pp=>pp.id===it.productId);
+    if(p && qty>p.stock){ if(!confirm('موجودی فعلی انبار کمتر از این مقدار است ('+p.stock+' '+it.unit+' موجود). آیا مطمئن هستید؟')) return; }
+    this._applyPurchaseReturn(pur, idx, qty);
+    this.save(); this.render();
+  },
+  _applyPurchaseReturn(pur, idx, qty){
+    const it=pur.items[idx];
+    const refund=qty*it.unitCost;
+    const oldRemaining=pur.total-pur.paid;
+    const debtReduction=Math.min(refund, Math.max(0,oldRemaining));
+    const cashRefund=refund-debtReduction;
+    it.returnedQty=(it.returnedQty||0)+qty;
+    pur.total-=refund;
+    pur.paid-=cashRefund;
+    pur.remaining=pur.total-pur.paid;
+    if(pur.supplierId){
+      const sp=this.state.suppliers.find(x=>x.id===pur.supplierId);
+      if(sp) sp.balance-=debtReduction;
+    }
+    const p=this.state.products.find(pp=>pp.id===it.productId);
+    if(p) p.stock-=qty;
+    pur.returns.push({id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, unitCost:it.unitCost, amount:refund});
+  },
+  cancelPurchase(purchaseId){
+    const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
+    if(pur.status==='cancelled'){ alert('این بل قبلاً باطل شده است.'); return; }
+    if(!confirm('کل این بل خرید باطل شود؟ کالاها از انبار کم می‌شود و بدهی به فروشنده اصلاح می‌شود.')) return;
+    let ok=true;
+    pur.items.forEach((it,idx)=>{
+      const returnable=it.qty-(it.returnedQty||0);
+      if(returnable>0){
+        const p=this.state.products.find(pp=>pp.id===it.productId);
+        if(p && returnable>p.stock){ ok=false; }
+      }
+    });
+    if(!ok && !confirm('موجودی فعلی بعضی کالاها کمتر از مقدار خریداری‌شده است (احتمالاً فروخته شده‌اند). آیا باز هم باطل شود؟ (موجودی ممکن است منفی شود)')) return;
+    pur.items.forEach((it,idx)=>{
+      const returnable=it.qty-(it.returnedQty||0);
+      if(returnable>0) this._applyPurchaseReturn(pur, idx, returnable);
+    });
+    pur.status='cancelled';
+    this.save(); this.render();
+  },
+  purchaseIncreaseItemQty(purchaseId, idx){
+    const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
+    if(pur.status==='cancelled'){ alert('این بل باطل شده است.'); return; }
+    const it=pur.items[idx]; if(!it) return;
+    const qtyStr=prompt(`چند عدد دیگر از «${it.name}» اضافه شود؟`,'1');
+    if(qtyStr===null) return;
+    const qty=parseFloat(qtyStr);
+    if(!qty||qty<=0){ alert('تعداد نامعتبر است.'); return; }
+    const addAmount=qty*it.unitCost;
+    const paidStr=prompt('مبلغ پرداختی نقدی برای همین اضافه (اگر نسیه است، صفر بگذارید):', addAmount);
+    if(paidStr===null) return;
+    let addPaid=parseFloat(paidStr); if(isNaN(addPaid)||addPaid<0) addPaid=0; if(addPaid>addAmount) addPaid=addAmount;
+    if(addPaid<addAmount && !pur.supplierId){ alert('برای نسیه باید بل برای یک فروشنده/شرکت مشخص باشد.'); return; }
+    const p=this.state.products.find(pp=>pp.id===it.productId);
+    it.qty+=qty;
+    if(p){
+      const newStock=p.stock+qty;
+      p.avgCost = newStock>0 ? ((p.stock*p.avgCost)+(qty*it.unitCost))/newStock : it.unitCost;
+      p.stock=newStock;
+    }
+    pur.total+=addAmount; pur.originalTotal+=addAmount;
+    pur.paid+=addPaid;
+    pur.remaining=pur.total-pur.paid;
+    if(pur.supplierId && addAmount-addPaid>0){
+      const sp=this.state.suppliers.find(x=>x.id===pur.supplierId);
+      if(sp) sp.balance+=(addAmount-addPaid);
+    }
+    this.save(); this.render();
+  },
+  purchaseAddItem(purchaseId){
+    const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
+    if(pur.status==='cancelled'){ alert('این بل باطل شده است.'); return; }
+    const name=prompt('نام محصول جدید برای افزودن به این بل خرید:'); if(name===null) return;
+    const trimmed=name.trim(); if(!trimmed){ alert('نام را بنویسید'); return; }
+    let product=this.state.products.find(p=>p.name===trimmed);
+    const qtyStr=prompt('تعداد:','1'); if(qtyStr===null) return;
+    const qty=parseFloat(qtyStr); if(!qty||qty<=0){ alert('تعداد نامعتبر است.'); return; }
+    const costStr=prompt('قیمت خرید هر واحد:', product?product.avgCost:0); if(costStr===null) return;
+    const cost=parseFloat(costStr); if(isNaN(cost)||cost<0){ alert('قیمت نامعتبر است.'); return; }
+    if(!product){ product=this.addProduct(trimmed,'عدد',0,0,0); }
+    const addAmount=qty*cost;
+    const paidStr=prompt('مبلغ پرداختی نقدی برای همین قلم (اگر نسیه است، صفر بگذارید):', addAmount);
+    if(paidStr===null) return;
+    let addPaid=parseFloat(paidStr); if(isNaN(addPaid)||addPaid<0) addPaid=0; if(addPaid>addAmount) addPaid=addAmount;
+    if(addPaid<addAmount && !pur.supplierId){ alert('برای نسیه باید بل برای یک فروشنده/شرکت مشخص باشد.'); return; }
+    pur.items.push({productId:product.id,name:product.name,unit:product.unit,qty,unitCost:cost,returnedQty:0});
+    const newStock=product.stock+qty;
+    product.avgCost = newStock>0 ? ((product.stock*product.avgCost)+(qty*cost))/newStock : cost;
+    product.stock=newStock;
+    if(!product.sellPrice) product.sellPrice=Math.round(cost*1.15);
+    pur.total+=addAmount; pur.originalTotal+=addAmount;
+    pur.paid+=addPaid;
+    pur.remaining=pur.total-pur.paid;
+    if(pur.supplierId && addAmount-addPaid>0){
+      const sp=this.state.suppliers.find(x=>x.id===pur.supplierId);
+      if(sp) sp.balance+=(addAmount-addPaid);
+    }
+    this.save(); this.render();
   },
 
   /* ---------- Customers / Suppliers (debts) ---------- */
@@ -858,9 +1188,9 @@ const App = {
     if(!p){ this.detailId=null; return this.renderCustomers(); }
     let history=[];
     if(type==='customers'){
-      history = this.state.sales.filter(s=>s.customerId===p.id).map(s=>({date:s.date,ts:s.ts,label:'فروش '+this.invoiceNoLabel(s.invoiceNo),amount:s.total,paid:s.paid,saleId:s.id}));
+      history = this.state.sales.filter(s=>s.customerId===p.id).map(s=>({date:s.date,ts:s.ts,label:'فروش '+this.invoiceNoLabel(s.invoiceNo),amount:s.total,paid:s.paid,saleId:s.id,status:s.status}));
     } else {
-      history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید',amount:s.total,paid:s.paid}));
+      history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید',amount:s.total,paid:s.paid,purchaseId:s.id,status:s.status}));
     }
     const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:x.type==='receive'?'دریافت پول':'پرداخت پول',amount:x.amount,paid:null,isPayment:true}));
     history = [...history,...pays].sort((a,b)=>(b.ts||0)-(a.ts||0));
@@ -870,8 +1200,9 @@ const App = {
         const color = (type==='customers') ? 'var(--green)' : 'var(--red)';
         return `<div class="row-item"><div class="r-left"><b>${h.label}</b><span class="sub">${h.date}</span></div><div class="r-right num" style="color:${color}">${fmt(h.amount)}</div></div>`;
       }
-      const clickAttr = h.saleId ? ` onclick="App.viewInvoice('${h.saleId}')" style="cursor:pointer;"` : '';
-      return `<div class="row-item"${clickAttr}><div class="r-left"><b>${h.label} — مجموع ${fmt(h.amount)}</b><span class="sub">${h.date} · پرداخت‌شده: ${fmt(h.paid)}</span></div><div class="r-right num" style="color:var(--red)">${fmt(h.amount-h.paid)}</div></div>`;
+      const clickAttr = h.saleId ? ` onclick="App.viewInvoice('${h.saleId}')" style="cursor:pointer;"` : (h.purchaseId ? ` onclick="App.viewPurchase('${h.purchaseId}')" style="cursor:pointer;"` : '');
+      const cancelledTag = h.status==='cancelled' ? ' <span class="badge gold">باطل شده</span>' : '';
+      return `<div class="row-item"${clickAttr}><div class="r-left"><b>${h.label} — مجموع ${fmt(h.amount)}</b>${cancelledTag}<span class="sub">${h.date} · پرداخت‌شده: ${fmt(h.paid)}</span></div><div class="r-right num" style="color:var(--red)">${fmt(h.amount-h.paid)}</div></div>`;
     }).join('') : `<div class="empty">هنوز معامله‌ای نیست.</div>`;
 
     const actionLabel = type==='customers' ? 'دریافت پول از مشتری' : 'پرداخت پول به عمده‌فروش';
@@ -923,9 +1254,17 @@ const App = {
     const arr = type==='customers' ? this.state.customers : this.state.suppliers;
     const p=arr.find(x=>x.id===id); if(!p) return;
     const name=prompt('نام:',p.name); if(name===null) return;
+    const trimmed=name.trim();
+    if(!trimmed){ alert('نام نمی‌تواند خالی باشد'); return; }
+    if(arr.find(x=>x.name===trimmed && x.id!==id)){ alert('طرف‌حساب دیگری با همین نام موجود است.'); return; }
     const phone=prompt('شماره تماس:',p.phone||''); if(phone===null) return;
     const address=prompt('آدرس:',p.address||''); if(address===null) return;
-    p.name=name.trim()||p.name; p.phone=phone.trim(); p.address=address.trim();
+    p.name=trimmed; p.phone=phone.trim(); p.address=address.trim();
+    if(type==='customers'){
+      this.state.sales.forEach(s=>{ if(s.customerId===id) s.customerName=p.name; });
+    } else {
+      this.state.purchases.forEach(s=>{ if(s.supplierId===id) s.supplierName=p.name; });
+    }
     this.save();
     this.render();
   },
@@ -1131,7 +1470,8 @@ const App = {
     </div>
     <div class="card">
       <div class="row-item"><div class="r-left">مجموع خرید در این بازه</div><div class="r-right num">${fmt(purchTotal)}</div></div>
-      <div class="row-item"><div class="r-left">تعداد فاکتور فروش</div><div class="r-right num">${sales.length}</div></div>
+      <div class="row-item"><div class="r-left">تعداد فاکتور فروش (فعال)</div><div class="r-right num">${sales.filter(s=>s.status!=='cancelled').length}</div></div>
+      ${sales.some(s=>s.status==='cancelled')?`<div class="row-item"><div class="r-left">فاکتورهای باطل‌شده در این بازه</div><div class="r-right num" style="color:var(--red)">${sales.filter(s=>s.status==='cancelled').length}</div></div>`:''}
     </div>
     <h2 class="section-title">مصارف بر اساس نوع</h2>
     <div class="card">${catRows}</div>
@@ -1170,12 +1510,7 @@ const App = {
         const parsed=JSON.parse(e.target.result);
         if(!confirm('بازیابی از فایل پشتیبان، تمام اطلاعات فعلی را جایگزین می‌کند. ادامه می‌دهید؟')) return;
         this.state=parsed;
-        if(!this.state.suppliers) this.state.suppliers=[];
-        if(!this.state.payments) this.state.payments=[];
-        if(this.state.settings.invoiceCounter===undefined) this.state.settings.invoiceCounter=0;
-        if(this.state.settings.businessPhone===undefined) this.state.settings.businessPhone='';
-        if(this.state.settings.businessAddress===undefined) this.state.settings.businessAddress='';
-        if(this.state.settings.logoEmoji===undefined) this.state.settings.logoEmoji='🏪';
+        migrateState(this.state);
         this.save();
         alert('بازیابی موفقانه انجام شد ✅');
         this.navigate('dashboard');
