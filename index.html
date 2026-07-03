@@ -6,6 +6,10 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#1B2430">
+<link rel="manifest" href="./manifest.json">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png">
 <title>حساب‌داری پخش موتر</title>
 <style>
   :root{
@@ -142,6 +146,37 @@
   .period-btns{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;}
   .period-btns button{padding:8px 12px;border-radius:20px;border:1px solid var(--border);background:#fff;font-size:12.5px;cursor:pointer;}
   .period-btns button.active{background:var(--gold);color:#fff;border-color:var(--gold);}
+
+  /* ---------- Invoice / Print ---------- */
+  .inv-actions{display:flex;gap:8px;margin-bottom:14px;}
+  .inv-actions .btn{margin-top:0;}
+  .inv-actions .btn-wa{background:#25D366;color:#fff;}
+  .inv-head{text-align:center;padding:10px 0 16px;border-bottom:2px dashed var(--border);margin-bottom:14px;}
+  .inv-head .logo{font-size:38px;line-height:1;margin-bottom:4px;}
+  .inv-head .biz{font-size:19px;font-weight:800;color:var(--ink);}
+  .inv-head .sub{font-size:12px;color:var(--muted);margin-top:2px;}
+  .inv-meta{display:flex;justify-content:space-between;font-size:13px;margin-bottom:10px;background:var(--paper);border-radius:10px;padding:10px 12px;}
+  .inv-meta b{color:var(--gold-d);}
+  .inv-cust{font-size:13.5px;background:var(--paper);border-radius:10px;padding:10px 12px;margin-bottom:14px;}
+  .inv-cust .l1{font-weight:700;margin-bottom:2px;}
+  table.inv-table{width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:10px;}
+  table.inv-table th{background:var(--ink);color:#fff;padding:7px 5px;font-size:11.5px;}
+  table.inv-table td{padding:7px 5px;border-bottom:1px solid var(--border);text-align:center;}
+  table.inv-table td:nth-child(2){text-align:right;}
+  .inv-totals{margin-top:8px;}
+  .inv-totals .row-item{font-size:13.5px;}
+  .inv-footer{margin-top:18px;text-align:center;font-size:12px;color:var(--muted);}
+  .inv-sign{display:flex;justify-content:space-between;margin-top:34px;font-size:12px;color:var(--muted);}
+  .inv-sign .line{border-top:1px solid var(--muted);width:110px;padding-top:4px;text-align:center;}
+  .row-item.clickable{cursor:pointer;}
+  @media print{
+    body *{visibility:hidden;}
+    header.topbar, nav.bottomnav{display:none !important;}
+    #invoice-print, #invoice-print *{visibility:visible;}
+    #invoice-print{position:absolute;top:0;right:0;left:0;width:100%;padding:12px;}
+    .no-print{display:none !important;}
+    body{padding-bottom:0;background:#fff;}
+  }
 </style>
 </head>
 <body>
@@ -204,7 +239,8 @@ function startOfMonth(d){ return d.slice(0,7)+'-01'; }
 /* ---------- Default state ---------- */
 function defaultState(){
   return {
-    settings:{ businessName:'پخش موتر من', currency:'افغانی', openingCash:0 },
+    settings:{ businessName:'پخش موتر من', currency:'افغانی', openingCash:0,
+      invoiceCounter:0, businessPhone:'', businessAddress:'', logoEmoji:'🏪' },
     products:[], customers:[], suppliers:[],
     sales:[], purchases:[], expenses:[], payments:[]
   };
@@ -251,6 +287,10 @@ const App = {
         this.state = snap.data();
         if(!this.state.suppliers) this.state.suppliers=[];
         if(!this.state.payments) this.state.payments=[];
+        if(this.state.settings.invoiceCounter===undefined) this.state.settings.invoiceCounter=0;
+        if(this.state.settings.businessPhone===undefined) this.state.settings.businessPhone='';
+        if(this.state.settings.businessAddress===undefined) this.state.settings.businessAddress='';
+        if(this.state.settings.logoEmoji===undefined) this.state.settings.logoEmoji='🏪';
       } else {
         this.state = defaultState();
         try{ await setDoc(stateDocRef, this.state); }catch(e){}
@@ -308,6 +348,13 @@ const App = {
     }
   },
   resetSaleDraft(){ this.saleDraft = { items:[] }; },
+  onSaleCustomerNameChange(){
+    const name=(document.getElementById('sale-customer-name').value||'').trim();
+    const c=this.state.customers.find(x=>x.name===name);
+    const phoneEl=document.getElementById('sale-customer-phone');
+    const addrEl=document.getElementById('sale-customer-address');
+    if(c){ phoneEl.value=c.phone||''; addrEl.value=c.address||''; }
+  },
   resetPurchaseDraft(){ this.purchaseDraft = { items:[] }; },
 
   navigate(tab,sub){ this.tab=tab; this.sub=sub||null; this.renderNav(); this.render(); window.scrollTo(0,0); },
@@ -336,6 +383,7 @@ const App = {
       case 'purchase': html=this.renderPurchase(); break;
       case 'customers': html=this.renderCustomers(); break;
       case 'more': html=this.renderMore(); break;
+      case 'invoice': html=this.renderInvoiceView(); break;
       default: html=this.renderDashboard();
     }
     s.innerHTML = html;
@@ -383,7 +431,7 @@ const App = {
 
     const recentHtml = recent.length ? recent.map(x=>{
       if(x._type==='sale'){
-        return `<div class="row-item"><div class="r-left"><b>فروش — ${escapeHtml(x.customerName)}</b><span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--green)">+${fmt(x.paid)}</div></div>`;
+        return `<div class="row-item clickable" onclick="App.viewInvoice('${x.id}')"><div class="r-left"><b>فروش ${this.invoiceNoLabel(x.invoiceNo)} — ${escapeHtml(x.customerName)}</b><span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--green)">+${fmt(x.paid)}</div></div>`;
       } else if(x._type==='purchase'){
         return `<div class="row-item"><div class="r-left"><b>خرید — ${escapeHtml(x.supplierName||'—')}</b><span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--red)">-${fmt(x.paid)}</div></div>`;
       } else {
@@ -449,6 +497,8 @@ const App = {
     if(paid>total) paid=total;
     if(paid<0) paid=0;
     const custName = (document.getElementById('sale-customer-name').value||'').trim();
+    const custPhone = (document.getElementById('sale-customer-phone').value||'').trim();
+    const custAddress = (document.getElementById('sale-customer-address').value||'').trim();
     const date = document.getElementById('sale-date').value || todayISO();
     const note = (document.getElementById('sale-note').value||'').trim();
     const remaining = total-paid;
@@ -456,7 +506,13 @@ const App = {
     let customerId=null, customerNameFinal='مشتری نقدی';
     if(custName){
       let customer=this.state.customers.find(c=>c.name===custName);
-      if(!customer){ customer={id:uid(),name:custName,phone:'',balance:0}; this.state.customers.push(customer); }
+      if(!customer){
+        customer={id:uid(),name:custName,phone:custPhone,address:custAddress,balance:0};
+        this.state.customers.push(customer);
+      } else {
+        if(custPhone && !customer.phone) customer.phone=custPhone;
+        if(custAddress && !customer.address) customer.address=custAddress;
+      }
       customer.balance += remaining;
       customerId=customer.id; customerNameFinal=customer.name;
     } else if(remaining>0.001){
@@ -468,15 +524,115 @@ const App = {
       if(p) p.stock -= it.qty;
     });
 
-    this.state.sales.push({
-      id:uid(), ts:Date.now(), date, customerId, customerName:customerNameFinal,
+    const invoiceNo = (Number(this.state.settings.invoiceCounter)||0) + 1;
+    this.state.settings.invoiceCounter = invoiceNo;
+
+    const newSale = {
+      id:uid(), ts:Date.now(), date, invoiceNo, customerId, customerName:customerNameFinal,
+      customerPhone: custName?custPhone:'', customerAddress: custName?custAddress:'',
       items:this.saleDraft.items, total, totalCost, profit: total-totalCost,
       paid, remaining, note
-    });
+    };
+    this.state.sales.push(newSale);
     this.resetSaleDraft();
     this.save();
-    alert('فروش با موفقیت ثبت شد ✅');
-    this.navigate('dashboard');
+    this.viewInvoiceId = newSale.id;
+    this.navigate('invoice');
+  },
+
+  /* ---------- Invoice view / print / whatsapp ---------- */
+  viewInvoice(id){ this.viewInvoiceId=id; this.navigate('invoice'); },
+  printInvoice(){ window.print(); },
+  invoiceNoLabel(n){ return '#'+String(n||0).padStart(5,'0'); },
+  waPhoneDigits(phone){ return (phone||'').replace(/[^0-9]/g,''); },
+  buildInvoiceText(sale){
+    const s=this.state.settings;
+    let lines=[];
+    lines.push(`${s.logoEmoji||''} ${s.businessName}`.trim());
+    if(s.businessPhone) lines.push('تماس: '+s.businessPhone);
+    lines.push('———————————————');
+    lines.push('فاکتور فروش '+this.invoiceNoLabel(sale.invoiceNo));
+    lines.push('تاریخ: '+sale.date);
+    lines.push('مشتری: '+sale.customerName);
+    if(sale.customerPhone) lines.push('تماس مشتری: '+sale.customerPhone);
+    if(sale.customerAddress) lines.push('آدرس: '+sale.customerAddress);
+    lines.push('———————————————');
+    sale.items.forEach((it,idx)=>{
+      lines.push(`${idx+1}. ${it.name} — ${it.qty} ${it.unit} × ${fmt(it.unitPrice)} = ${fmt(it.qty*it.unitPrice)}`);
+    });
+    lines.push('———————————————');
+    lines.push('مجموع فاکتور: '+fmt(sale.total)+' '+s.currency);
+    lines.push('پرداخت‌شده: '+fmt(sale.paid)+' '+s.currency);
+    if(sale.remaining>0.5) lines.push('باقیمانده (قرض): '+fmt(sale.remaining)+' '+s.currency);
+    else lines.push('وضعیت: تسویه‌شده ✅');
+    if(sale.note) lines.push('یادداشت: '+sale.note);
+    lines.push('———————————————');
+    lines.push('با تشکر از خرید شما 🙏');
+    return lines.join('\n');
+  },
+  sendInvoiceWhatsApp(id){
+    const sale=this.state.sales.find(x=>x.id===id);
+    if(!sale) return;
+    const text=encodeURIComponent(this.buildInvoiceText(sale));
+    const digits=this.waPhoneDigits(sale.customerPhone);
+    const url = digits ? `https://wa.me/${digits}?text=${text}` : `https://wa.me/?text=${text}`;
+    window.open(url,'_blank');
+  },
+  renderInvoiceView(){
+    const sale=this.state.sales.find(x=>x.id===this.viewInvoiceId);
+    if(!sale){
+      return `<button class="back-btn" onclick="App.navigate('dashboard')">← بازگشت</button><div class="empty">فاکتور یافت نشد.</div>`;
+    }
+    const s=this.state.settings;
+    const itemsHtml = sale.items.map((it,idx)=>`
+      <tr>
+        <td>${idx+1}</td>
+        <td>${escapeHtml(it.name)}</td>
+        <td class="num">${it.qty} ${escapeHtml(it.unit)}</td>
+        <td class="num">${fmt(it.unitPrice)}</td>
+        <td class="num">${fmt(it.qty*it.unitPrice)}</td>
+      </tr>`).join('');
+
+    return `
+    <div class="inv-actions no-print">
+      <button class="btn btn-outline" onclick="App.navigate('dashboard')">← داشبورد</button>
+      <button class="btn btn-primary" onclick="App.printInvoice()">🖨️ چاپ فاکتور</button>
+      <button class="btn btn-wa" onclick="App.sendInvoiceWhatsApp('${sale.id}')">📲 ارسال واتساپ</button>
+    </div>
+    <div id="invoice-print" class="card">
+      <div class="inv-head">
+        <div class="logo">${s.logoEmoji||'🏪'}</div>
+        <div class="biz">${escapeHtml(s.businessName)}</div>
+        ${s.businessPhone?`<div class="sub">تماس: ${escapeHtml(s.businessPhone)}</div>`:''}
+        ${s.businessAddress?`<div class="sub">${escapeHtml(s.businessAddress)}</div>`:''}
+        <div class="sub" style="margin-top:6px;font-weight:700;color:var(--ink);">فاکتور فروش</div>
+      </div>
+      <div class="inv-meta">
+        <span>شماره فاکتور: <b class="num">${this.invoiceNoLabel(sale.invoiceNo)}</b></span>
+        <span>تاریخ: <b class="num">${sale.date}</b></span>
+      </div>
+      <div class="inv-cust">
+        <div class="l1">مشتری: ${escapeHtml(sale.customerName)}</div>
+        ${sale.customerPhone?`<div>تماس: <span class="num">${escapeHtml(sale.customerPhone)}</span></div>`:''}
+        ${sale.customerAddress?`<div>آدرس: ${escapeHtml(sale.customerAddress)}</div>`:''}
+      </div>
+      <table class="inv-table">
+        <thead><tr><th>#</th><th>شرح کالا</th><th>تعداد</th><th>فی واحد</th><th>مجموع</th></tr></thead>
+        <tbody>${itemsHtml}</tbody>
+      </table>
+      <div class="inv-totals">
+        <div class="row-item"><div class="r-left">مجموع فاکتور</div><div class="r-right num">${fmt(sale.total)} ${s.currency}</div></div>
+        <div class="row-item"><div class="r-left">مبلغ دریافت‌شده</div><div class="r-right num" style="color:var(--green)">${fmt(sale.paid)} ${s.currency}</div></div>
+        <div class="row-item"><div class="r-left"><b>${sale.remaining>0.5?'باقیمانده (قرض)':'وضعیت'}</b></div><div class="r-right num" style="color:${sale.remaining>0.5?'var(--red)':'var(--green)'}"><b>${sale.remaining>0.5?fmt(sale.remaining)+' '+s.currency:'تسویه‌شده ✅'}</b></div></div>
+      </div>
+      ${sale.note?`<div class="field-note">یادداشت: ${escapeHtml(sale.note)}</div>`:''}
+      <div class="inv-sign">
+        <div class="line">امضای فروشنده</div>
+        <div class="line">امضای مشتری</div>
+      </div>
+      <div class="inv-footer">با تشکر از خرید شما 🙏</div>
+    </div>
+    `;
   },
 
   renderSale(){
@@ -508,8 +664,13 @@ const App = {
       <div class="total-line"><span>مجموع فاکتور</span><span class="num">${fmt(total)} ${this.state.settings.currency}</span></div>
 
       <label>نام مشتری (خالی = فروش نقدی)</label>
-      <input id="sale-customer-name" list="customers-list" placeholder="مثلاً دوکان احمد">
+      <input id="sale-customer-name" list="customers-list" placeholder="مثلاً دوکان احمد" oninput="App.onSaleCustomerNameChange()">
       <datalist id="customers-list">${this.state.customers.map(c=>`<option value="${escapeHtml(c.name)}">`).join('')}</datalist>
+
+      <div class="grid2">
+        <div><label>شماره تماس مشتری (اختیاری)</label><input id="sale-customer-phone" type="tel" placeholder="07xxxxxxxx"></div>
+        <div><label>آدرس مشتری (اختیاری)</label><input id="sale-customer-address" placeholder="مثلاً ناحیه ۳، سوپرمارکت..."></div>
+      </div>
 
       <div class="grid2">
         <div><label>مبلغ دریافت‌شده (نقد)</label><input id="sale-paid" type="number" inputmode="decimal" value="${total?Math.round(total):''}"></div>
@@ -686,7 +847,7 @@ const App = {
     if(!p){ this.detailId=null; return this.renderCustomers(); }
     let history=[];
     if(type==='customers'){
-      history = this.state.sales.filter(s=>s.customerId===p.id).map(s=>({date:s.date,ts:s.ts,label:'فروش',amount:s.total,paid:s.paid}));
+      history = this.state.sales.filter(s=>s.customerId===p.id).map(s=>({date:s.date,ts:s.ts,label:'فروش '+this.invoiceNoLabel(s.invoiceNo),amount:s.total,paid:s.paid,saleId:s.id}));
     } else {
       history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید',amount:s.total,paid:s.paid}));
     }
@@ -698,7 +859,8 @@ const App = {
         const color = (type==='customers') ? 'var(--green)' : 'var(--red)';
         return `<div class="row-item"><div class="r-left"><b>${h.label}</b><span class="sub">${h.date}</span></div><div class="r-right num" style="color:${color}">${fmt(h.amount)}</div></div>`;
       }
-      return `<div class="row-item"><div class="r-left"><b>${h.label} — مجموع ${fmt(h.amount)}</b><span class="sub">${h.date} · پرداخت‌شده: ${fmt(h.paid)}</span></div><div class="r-right num" style="color:var(--red)">${fmt(h.amount-h.paid)}</div></div>`;
+      const clickAttr = h.saleId ? ` onclick="App.viewInvoice('${h.saleId}')" style="cursor:pointer;"` : '';
+      return `<div class="row-item"${clickAttr}><div class="r-left"><b>${h.label} — مجموع ${fmt(h.amount)}</b><span class="sub">${h.date} · پرداخت‌شده: ${fmt(h.paid)}</span></div><div class="r-right num" style="color:var(--red)">${fmt(h.amount-h.paid)}</div></div>`;
     }).join('') : `<div class="empty">هنوز معامله‌ای نیست.</div>`;
 
     const actionLabel = type==='customers' ? 'دریافت پول از مشتری' : 'پرداخت پول به عمده‌فروش';
@@ -931,6 +1093,9 @@ const App = {
     this.state.settings.businessName=(document.getElementById('set-name').value||'').trim()||'پخش موتر من';
     this.state.settings.currency=(document.getElementById('set-currency').value||'').trim()||'افغانی';
     this.state.settings.openingCash=parseFloat(document.getElementById('set-cash').value)||0;
+    this.state.settings.logoEmoji=(document.getElementById('set-logo').value||'').trim()||'🏪';
+    this.state.settings.businessPhone=(document.getElementById('set-phone').value||'').trim();
+    this.state.settings.businessAddress=(document.getElementById('set-address').value||'').trim();
     this.save();
     document.getElementById('biz-name').textContent=this.state.settings.businessName;
     alert('تنظیمات ذخیره شد ✅');
@@ -957,6 +1122,10 @@ const App = {
         this.state=parsed;
         if(!this.state.suppliers) this.state.suppliers=[];
         if(!this.state.payments) this.state.payments=[];
+        if(this.state.settings.invoiceCounter===undefined) this.state.settings.invoiceCounter=0;
+        if(this.state.settings.businessPhone===undefined) this.state.settings.businessPhone='';
+        if(this.state.settings.businessAddress===undefined) this.state.settings.businessAddress='';
+        if(this.state.settings.logoEmoji===undefined) this.state.settings.logoEmoji='🏪';
         this.save();
         alert('بازیابی موفقانه انجام شد ✅');
         this.navigate('dashboard');
@@ -987,6 +1156,14 @@ const App = {
       </select>
       <label>موجودی نقد آغازین صندوق</label>
       <input id="set-cash" type="number" value="${s.openingCash}">
+      <hr class="divider">
+      <div class="field-note">این اطلاعات در بالای فاکتور فروش چاپ می‌شود.</div>
+      <label>لوگو / آیکن فروشگاه (ایموجی)</label>
+      <input id="set-logo" value="${escapeHtml(s.logoEmoji||'🏪')}" placeholder="🏪">
+      <label>شماره تماس فروشگاه</label>
+      <input id="set-phone" value="${escapeHtml(s.businessPhone||'')}" placeholder="07xxxxxxxx">
+      <label>آدرس فروشگاه</label>
+      <input id="set-address" value="${escapeHtml(s.businessAddress||'')}" placeholder="مثلاً کابل، شهرنو">
       <button class="btn btn-primary" onclick="App.saveSettings()">ذخیره تنظیمات</button>
     </div>
     <h2 class="section-title">پشتیبان‌گیری و سینک دستی</h2>
@@ -1006,6 +1183,14 @@ const App = {
 
 window.App = App;
 App.init();
+</script>
+
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js').catch(err => console.warn('SW register failed', err));
+    });
+  }
 </script>
 </body>
 </html>
