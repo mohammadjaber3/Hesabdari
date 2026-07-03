@@ -10,7 +10,7 @@
 <link rel="manifest" href="./manifest.json">
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
 <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png">
-<title>حساب‌داری پخش موتر</title>
+<title>حساب‌داری فروشگاه صانع</title>
 <style>
   :root{
     --ink:#1B2430;
@@ -181,7 +181,7 @@
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><b id="biz-name">پخش موتر</b><span id="biz-date"></span></div>
+  <div class="brand"><b id="biz-name">فروشگاه صانع</b><span id="biz-date"></span></div>
   <button onclick="App.navigate('more','settings')">⚙️</button>
 </header>
 <main id="screen"></main>
@@ -239,7 +239,7 @@ function startOfMonth(d){ return d.slice(0,7)+'-01'; }
 /* ---------- Default state ---------- */
 function defaultState(){
   return {
-    settings:{ businessName:'پخش موتر من', currency:'افغانی', openingCash:0,
+    settings:{ businessName:'فروشگاه صانع', currency:'افغانی', openingCash:0,
       invoiceCounter:0, businessPhone:'', businessAddress:'', logoEmoji:'🏪' },
     products:[], customers:[], suppliers:[],
     sales:[], purchases:[], expenses:[], payments:[]
@@ -268,7 +268,7 @@ const App = {
 
   renderLoading(){
     document.getElementById('bottomnav').innerHTML='';
-    document.getElementById('biz-name').textContent='پخش موتر';
+    document.getElementById('biz-name').textContent='فروشگاه صانع';
     document.getElementById('biz-date').textContent='';
     document.getElementById('screen').innerHTML = `
     <div class="card" style="margin-top:40px;text-align:center;color:#c9c4b6;">
@@ -296,7 +296,7 @@ const App = {
         try{ await setDoc(stateDocRef, this.state); }catch(e){}
       }
       this.dataReady = true;
-      document.getElementById('biz-name').textContent = this.state.settings.businessName || 'پخش موتر';
+      document.getElementById('biz-name').textContent = this.state.settings.businessName || 'فروشگاه صانع';
       document.getElementById('biz-date').textContent = dateLabel(todayISO());
       this.renderNav();
       this.render();
@@ -449,7 +449,7 @@ const App = {
       <div class="chip"><div class="t">فروش امروز</div><div class="v num">${fmt(sum(todaySales,'total'))}</div></div>
       <div class="chip"><div class="t">مصرف امروز</div><div class="v num">${fmt(sum(todayExpenses,'amount'))}</div></div>
       <div class="chip"><div class="t">طلب از مشتریان</div><div class="v num">${fmt(this.totalReceivable())}</div></div>
-      <div class="chip"><div class="t">قرض به عمده‌فروش</div><div class="v num">${fmt(this.totalPayable())}</div></div>
+      <div class="chip"><div class="t">قرض از عمده‌فروش</div><div class="v num">${fmt(this.totalPayable())}</div></div>
     </div>
     <div class="quick-actions">
       <div class="qa-btn" onclick="App.navigate('sale')"><span class="ic">🧾</span>فروش جدید</div>
@@ -567,7 +567,7 @@ const App = {
     else lines.push('وضعیت: تسویه‌شده ✅');
     if(sale.note) lines.push('یادداشت: '+sale.note);
     lines.push('———————————————');
-    lines.push('با تشکر از خرید شما 🙏');
+    lines.push('سند هذا بدون مهر و امضا اعتبار ندارد، جنس فروخته شده واپس گرفته نمی شود');
     return lines.join('\n');
   },
   sendInvoiceWhatsApp(id){
@@ -628,7 +628,6 @@ const App = {
       ${sale.note?`<div class="field-note">یادداشت: ${escapeHtml(sale.note)}</div>`:''}
       <div class="inv-sign">
         <div class="line">امضای فروشنده</div>
-        <div class="line">امضای مشتری</div>
       </div>
       <div class="inv-footer">با تشکر از خرید شما 🙏</div>
     </div>
