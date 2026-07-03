@@ -544,7 +544,13 @@ const App = {
   viewInvoice(id){ this.viewInvoiceId=id; this.navigate('invoice'); },
   printInvoice(){ window.print(); },
   invoiceNoLabel(n){ return '#'+String(n||0).padStart(5,'0'); },
-  waPhoneDigits(phone){ return (phone||'').replace(/[^0-9]/g,''); },
+  waPhoneDigits(phone){
+    let d=(phone||'').replace(/[^0-9]/g,'');
+    if(!d) return '';
+    if(d.startsWith('0')) d='93'+d.slice(1);        // شماره محلی با صفر → +93
+    else if(!d.startsWith('93') && d.length<=10) d='93'+d; // بدون کد کشور و بدون صفر
+    return d;
+  },
   buildInvoiceText(sale){
     const s=this.state.settings;
     let lines=[];
