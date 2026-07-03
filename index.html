@@ -741,7 +741,7 @@ const App = {
     let supplierId=null, supplierNameFinal=supName||'—';
     if(supName){
       let supplier=this.state.suppliers.find(c=>c.name===supName);
-      if(!supplier){ supplier={id:uid(),name:supName,balance:0}; this.state.suppliers.push(supplier); }
+      if(!supplier){ supplier={id:uid(),name:supName,phone:'',address:'',balance:0}; this.state.suppliers.push(supplier); }
       supplier.balance += remaining;
       supplierId=supplier.id; supplierNameFinal=supplier.name;
     } else if(remaining>0.001){
@@ -824,20 +824,26 @@ const App = {
     const rows = sorted.length ? sorted.map(c=>{
       const bal=c.balance;
       const badge = bal>0.5 ? `<span class="badge red num">${fmt(bal)}</span>` : (bal<-0.5? `<span class="badge green num">${fmt(-bal)}- طلب شما</span>` : `<span class="badge gold">تسویه</span>`);
-      return `<div class="row-item" onclick="App.openParty('${sub}','${c.id}')" style="cursor:pointer;">
-        <div class="r-left"><b>${escapeHtml(c.name)}</b>${c.phone?`<span class="sub">${escapeHtml(c.phone)}</span>`:''}</div>
-        <div class="r-right">${badge}</div>
+      return `<div class="row-item">
+        <div class="r-left" onclick="App.openParty('${sub}','${c.id}')" style="cursor:pointer;">
+          <b>${escapeHtml(c.name)}</b>${c.phone?`<span class="sub">${escapeHtml(c.phone)}</span>`:''}${c.address?`<span class="sub">${escapeHtml(c.address)}</span>`:''}
+        </div>
+        <div class="r-right" style="display:flex;align-items:center;gap:10px;">
+          ${badge}
+          <span onclick="event.stopPropagation(); App.editParty('${sub}','${c.id}')" style="cursor:pointer;">✏️</span>
+        </div>
       </div>`;
-    }).join('') : `<div class="empty">${sub==='customers'?'هنوز مشتری بدهکار ثبت نشده.':'هنوز عمده‌فروش بدهکار ثبت نشده.'}</div>`;
+    }).join('') : `<div class="empty">${sub==='customers'?'هنوز مشتری‌ای ثبت نشده.':'هنوز عمده‌فروش/شرکتی ثبت نشده.'}</div>`;
 
     return `
-    <h2 class="section-title">👥 مدیریت بدهی‌ها</h2>
+    <h2 class="section-title">👥 مشتریان و فروشندگان</h2>
     <div class="tabbar-sub">
-      <button class="${sub==='customers'?'active':''}" onclick="App.navigate('customers','customers')">بدهی مشتریان (طلب من)</button>
-      <button class="${sub==='suppliers'?'active':''}" onclick="App.navigate('customers','suppliers')">بدهی به عمده‌فروش</button>
+      <button class="${sub==='customers'?'active':''}" onclick="App.navigate('customers','customers')">مشتریان</button>
+      <button class="${sub==='suppliers'?'active':''}" onclick="App.navigate('customers','suppliers')">شرکت‌ها / عمده‌فروشان</button>
     </div>
-    <div class="card" style="text-align:center;">
-      <div class="field-note">مجموع</div>
+    <button class="btn btn-outline" onclick="App.addPartyManual('${sub}')">+ افزودن ${sub==='customers'?'مشتری':'شرکت/عمده‌فروش'} جدید</button>
+    <div class="card" style="text-align:center;margin-top:12px;">
+      <div class="field-note">مجموع ${sub==='customers'?'طلب از مشتریان':'بدهی به عمده‌فروشان'}</div>
       <div class="num" style="font-size:20px;font-weight:800;color:${sub==='customers'?'var(--green)':'var(--red)'}">${fmt(totalKey)} ${this.state.settings.currency}</div>
     </div>
     <div class="card">${rows}</div>
@@ -877,9 +883,15 @@ const App = {
         <b style="font-size:16px;">${escapeHtml(p.name)}</b>
         <span class="badge ${p.balance>0.5?'red':'green'} num">${fmt(Math.abs(p.balance))} ${p.balance>0.5?'بدهکار':(p.balance<-0.5?'طلبکار':'تسویه')}</span>
       </div>
+      ${p.phone?`<div class="sub" style="margin-top:6px;">📞 ${escapeHtml(p.phone)}</div>`:''}
+      ${p.address?`<div class="sub">📍 ${escapeHtml(p.address)}</div>`:''}
+      <div class="grid2" style="margin-top:12px;">
+        <button class="btn btn-outline" style="margin-top:0;" onclick="App.editParty('${type}','${p.id}')">✏️ ویرایش اطلاعات</button>
+        <button class="btn btn-danger" style="margin-top:0;" onclick="App.deleteParty('${type}','${p.id}')">🗑️ حذف</button>
+      </div>
       <button class="btn btn-green" onclick="App.recordPartyPayment('${type}','${p.id}')">${actionLabel}</button>
     </div>
-    <h2 class="section-title">سابقهٔ معاملات</h2>
+    <h2 class="section-title">سابقهٔ معاملات (${history.length})</h2>
     <div class="card">${rows}</div>
     `;
   },
@@ -892,6 +904,39 @@ const App = {
     if(type==='customers'){ p.balance -= amt; }
     else { p.balance -= amt; }
     this.state.payments.push({id:uid(), ts:Date.now(), date:todayISO(), type: type==='customers'?'receive':'pay', partyType:type==='customers'?'customer':'supplier', partyId:id, partyName:p.name, amount:amt});
+    this.save();
+    this.render();
+  },
+  addPartyManual(type){
+    const name=(prompt(type==='customers'?'نام مشتری جدید:':'نام شرکت/عمده‌فروش جدید:')||'').trim();
+    if(!name) return;
+    const arr = type==='customers' ? this.state.customers : this.state.suppliers;
+    if(arr.find(x=>x.name===name)){ alert('این نام قبلاً ثبت شده است.'); return; }
+    const phone=(prompt('شماره تماس (اختیاری):')||'').trim();
+    const address=(prompt('آدرس (اختیاری):')||'').trim();
+    const p={id:uid(), name, phone, address, balance:0};
+    arr.push(p);
+    this.save();
+    this.render();
+  },
+  editParty(type,id){
+    const arr = type==='customers' ? this.state.customers : this.state.suppliers;
+    const p=arr.find(x=>x.id===id); if(!p) return;
+    const name=prompt('نام:',p.name); if(name===null) return;
+    const phone=prompt('شماره تماس:',p.phone||''); if(phone===null) return;
+    const address=prompt('آدرس:',p.address||''); if(address===null) return;
+    p.name=name.trim()||p.name; p.phone=phone.trim(); p.address=address.trim();
+    this.save();
+    this.render();
+  },
+  deleteParty(type,id){
+    const arr = type==='customers' ? this.state.customers : this.state.suppliers;
+    const p=arr.find(x=>x.id===id); if(!p) return;
+    if(Math.abs(p.balance)>0.5){ alert('این مشتری/فروشنده هنوز بدهی یا طلب دارد؛ ابتدا حساب را تسویه کنید.'); return; }
+    if(!confirm('این مورد از فهرست حذف شود؟ سابقهٔ فاکتورهای قبلی آن باقی می‌ماند.')) return;
+    if(type==='customers') this.state.customers=this.state.customers.filter(x=>x.id!==id);
+    else this.state.suppliers=this.state.suppliers.filter(x=>x.id!==id);
+    this.detailId=null;
     this.save();
     this.render();
   },
