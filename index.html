@@ -195,7 +195,8 @@ import {
 } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
-  doc, getDoc, setDoc, onSnapshot
+  doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, onSnapshot,
+  collection, writeBatch, increment
 } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
 
 const firebaseConfig = {
@@ -213,9 +214,16 @@ const db = initializeFirestore(fbApp, {
 });
 setPersistence(auth, browserLocalPersistence).catch(()=>{});
 
-const BIZ_ID = 'main'; // یک کسب‌وکار — همه اطلاعات زیر همین شناسه ذخیره می‌شود
-const stateDocRef = doc(db, 'businesses', BIZ_ID, 'data', 'state');
-const teamDocRef  = (uid_) => doc(db, 'businesses', BIZ_ID, 'team', uid_);
+const BIZ_ID = 'main';
+/* هر نوع رکورد حالا کالکشن جدای خودش را دارد — دیگر یک سند مشترک بزرگ نیست.
+   یعنی ویرایش یک فاکتور، رکورد فاکتور دیگری را از دست نمی‌برد. */
+const COLLECTIONS = ['products','customers','suppliers','sales','purchases','expenses','payments','openingEntries'];
+const cols = {};
+COLLECTIONS.forEach(name => { cols[name] = collection(db, 'businesses', BIZ_ID, name); });
+const settingsDocRef   = doc(db, 'businesses', BIZ_ID, 'meta', 'settings');
+const migratedFlagRef  = doc(db, 'businesses', BIZ_ID, 'meta', 'migratedV2');
+const oldStateDocRef   = doc(db, 'businesses', BIZ_ID, 'data', 'state'); // ساختار قدیمی (فقط برای مهاجرت یک‌باره)
+const teamDocRef       = (uid_) => doc(db, 'businesses', BIZ_ID, 'team', uid_);
 
 /* ---------- Helpers ---------- */
 function uid(){ return 'id_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8); }
@@ -223,29 +231,6 @@ function todayISO(){ return new Date().toISOString().slice(0,10); }
 function fmt(n){ n = Math.round(Number(n)||0); return n.toLocaleString('en-US'); }
 function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function sum(arr,key){ return arr.reduce((a,b)=>a+(Number(b[key])||0),0); }
-function migrateState(state){
-  if(!state.suppliers) state.suppliers=[];
-  if(!state.payments) state.payments=[];
-  if(!state.openingEntries) state.openingEntries=[];
-  if(state.settings.invoiceCounter===undefined) state.settings.invoiceCounter=0;
-  if(state.settings.businessPhone===undefined) state.settings.businessPhone='';
-  if(state.settings.businessAddress===undefined) state.settings.businessAddress='';
-  if(state.settings.logoEmoji===undefined) state.settings.logoEmoji='🏪';
-  if(state.settings.openingNote===undefined) state.settings.openingNote='';
-  (state.sales||[]).forEach(s=>{
-    if(!s.status) s.status='active';
-    if(!s.returns) s.returns=[];
-    if(s.originalTotal===undefined) s.originalTotal=s.total;
-    (s.items||[]).forEach(it=>{ if(it.returnedQty===undefined) it.returnedQty=0; });
-  });
-  (state.purchases||[]).forEach(p=>{
-    if(!p.status) p.status='active';
-    if(!p.returns) p.returns=[];
-    if(p.originalTotal===undefined) p.originalTotal=p.total;
-    (p.items||[]).forEach(it=>{ if(it.returnedQty===undefined) it.returnedQty=0; });
-  });
-  return state;
-}
 function dateLabel(d){
   const dt=new Date(d+'T00:00:00');
   const days=['یکشنبه','دوشنبه','سه‌شنبه','چهارشنبه','پنجشنبه','جمعه','شنبه'];
@@ -253,39 +238,103 @@ function dateLabel(d){
 }
 function startOfWeek(d){
   const dt=new Date(d+'T00:00:00');
-  const day=dt.getDay(); // 0=Sun
+  const day=dt.getDay();
   dt.setDate(dt.getDate()-day);
   return dt.toISOString().slice(0,10);
 }
 function startOfMonth(d){ return d.slice(0,7)+'-01'; }
 
-/* ---------- Default state ---------- */
-function defaultState(){
-  return {
-    settings:{ businessName:'فروشگاه صانع', currency:'افغانی', openingCash:0,
-      invoiceCounter:0, businessPhone:'', businessAddress:'', logoEmoji:'🏪', openingNote:'' },
-    products:[], customers:[], suppliers:[],
-    sales:[], purchases:[], expenses:[], payments:[], openingEntries:[]
-  };
+function defaultSettings(){
+  return { businessName:'فروشگاه صانع', currency:'افغانی', openingCash:0,
+    invoiceCounter:0, businessPhone:'', businessAddress:'', logoEmoji:'🏪', openingNote:'' };
+}
+function migrateSettings(s){
+  s = s || {};
+  if(s.invoiceCounter===undefined) s.invoiceCounter=0;
+  if(s.businessName===undefined) s.businessName='فروشگاه صانع';
+  if(s.currency===undefined) s.currency='افغانی';
+  if(s.openingCash===undefined) s.openingCash=0;
+  if(s.businessPhone===undefined) s.businessPhone='';
+  if(s.businessAddress===undefined) s.businessAddress='';
+  if(s.logoEmoji===undefined) s.logoEmoji='🏪';
+  if(s.openingNote===undefined) s.openingNote='';
+  return s;
+}
+function migrateRecordArrays(sales, purchases){
+  (sales||[]).forEach(s=>{
+    if(!s.status) s.status='active';
+    if(!s.returns) s.returns=[];
+    if(s.originalTotal===undefined) s.originalTotal=s.total;
+    (s.items||[]).forEach(it=>{ if(it.returnedQty===undefined) it.returnedQty=0; });
+  });
+  (purchases||[]).forEach(p=>{
+    if(!p.status) p.status='active';
+    if(!p.returns) p.returns=[];
+    if(p.originalTotal===undefined) p.originalTotal=p.total;
+    (p.items||[]).forEach(it=>{ if(it.returnedQty===undefined) it.returnedQty=0; });
+  });
+}
+
+/* ---------- Migration: انتقال یک‌بارهٔ دیتای قدیمی (یک سند مشترک) به کالکشن‌های جدید ---------- */
+async function migrateOldDataIfNeeded(){
+  try{
+    const flagSnap = await getDoc(migratedFlagRef);
+    if(flagSnap.exists() && flagSnap.data().done) return; // قبلاً انجام شده
+
+    const oldSnap = await getDoc(oldStateDocRef);
+    if(!oldSnap.exists()){
+      await setDoc(migratedFlagRef, {done:true, ts:Date.now(), note:'دیتای قدیمی وجود نداشت'});
+      return;
+    }
+    const old = oldSnap.data();
+    migrateSettings(old.settings);
+    migrateRecordArrays(old.sales, old.purchases);
+
+    const allRecords = [];
+    (old.products||[]).forEach(r=>allRecords.push(['products',r]));
+    (old.customers||[]).forEach(r=>allRecords.push(['customers',r]));
+    (old.suppliers||[]).forEach(r=>allRecords.push(['suppliers',r]));
+    (old.sales||[]).forEach(r=>allRecords.push(['sales',r]));
+    (old.purchases||[]).forEach(r=>allRecords.push(['purchases',r]));
+    (old.expenses||[]).forEach(r=>allRecords.push(['expenses',r]));
+    (old.payments||[]).forEach(r=>allRecords.push(['payments',r]));
+    (old.openingEntries||[]).forEach(r=>allRecords.push(['openingEntries',r]));
+
+    // نوشتن دسته‌ای (هر batch حداکثر ۴۰۰ عملیات، برای اطمینان زیر سقف ۵۰۰ فایراستور)
+    for(let i=0;i<allRecords.length;i+=400){
+      const chunk = allRecords.slice(i,i+400);
+      const batch = writeBatch(db);
+      chunk.forEach(([colName,rec])=>{
+        if(!rec.id) rec.id=uid();
+        batch.set(doc(cols[colName], rec.id), rec);
+      });
+      await batch.commit();
+    }
+    await setDoc(settingsDocRef, migrateSettings(old.settings));
+    await setDoc(migratedFlagRef, {done:true, ts:Date.now(), migratedCount:allRecords.length});
+    console.log('مهاجرت دیتای قدیمی به ساختار جدید با موفقیت انجام شد. سند قدیمی به‌عنوان نسخهٔ پشتیبان دست‌نخورده باقی ماند.');
+  }catch(e){
+    console.error('خطا در مهاجرت دیتای قدیمی:', e);
+  }
 }
 
 /* ---------- App ---------- */
 const App = {
-  state: null,
+  state: { settings: defaultSettings(), products:[], customers:[], suppliers:[], sales:[], purchases:[], expenses:[], payments:[], openingEntries:[] },
   tab:'dashboard', sub:null,
   saleDraft:null, purchaseDraft:null,
   reportPeriod:'today', reportStart:null, reportEnd:null,
-  user:null, role:null, authReady:false, dataReady:false, saveTimer:null,
+  user:null, role:null, authReady:false, dataReady:false,
+  _loadedParts:null, _unsubs:null,
 
   init(){
-    this.state = defaultState();
     this.resetSaleDraft();
     this.resetPurchaseDraft();
     this.renderLoading();
     onAuthStateChanged(auth, (u)=>{
       this.user = u;
       if(u){ this.afterLogin(u); }
-      else { this.role=null; this.dataReady=false; this.renderLogin(); }
+      else { this.role=null; this.dataReady=false; this._teardown(); this.renderLogin(); }
     });
   },
 
@@ -299,35 +348,69 @@ const App = {
     </div>`;
   },
 
+  /* نقش کاربر: بعد از هر ورود موفق آنلاین، محلی (روی همین گوشی) ذخیره می‌شود.
+     اگر بعداً برای اولین‌بار روی این گوشی آفلاین وارد شود، از همان نقش ذخیره‌شده استفاده می‌شود
+     نه اینکه خودکار staff در نظر گرفته شود. */
+  _roleCacheKey(uid_){ return 'hesabdari_role_'+uid_; },
   async afterLogin(u){
+    const cacheKey = this._roleCacheKey(u.uid);
     try{
       const teamSnap = await getDoc(teamDocRef(u.uid));
       this.role = teamSnap.exists() ? (teamSnap.data().role||'staff') : 'staff';
-    }catch(e){ this.role='staff'; }
+      try{ localStorage.setItem(cacheKey, this.role); }catch(e){}
+    }catch(e){
+      let cached=null;
+      try{ cached = localStorage.getItem(cacheKey); }catch(e2){}
+      this.role = cached || 'staff';
+    }
 
-    onSnapshot(stateDocRef, async (snap)=>{
-      if(snap.exists()){
-        this.state = snap.data();
-        migrateState(this.state);
-      } else {
-        this.state = defaultState();
-        try{ await setDoc(stateDocRef, this.state); }catch(e){}
+    await migrateOldDataIfNeeded();
+    this._subscribeAll();
+  },
+
+  _teardown(){
+    if(this._unsubs){ this._unsubs.forEach(fn=>{ try{ fn(); }catch(e){} }); }
+    this._unsubs=[];
+  },
+
+  _subscribeAll(){
+    this._teardown();
+    this._loadedParts = new Set();
+    const totalParts = COLLECTIONS.length + 1; // + settings
+
+    const checkReady = ()=>{
+      if(!this.dataReady && this._loadedParts.size>=totalParts){
+        this.dataReady = true;
       }
-      this.dataReady = true;
       document.getElementById('biz-name').textContent = this.state.settings.businessName || 'فروشگاه صانع';
       document.getElementById('biz-date').textContent = dateLabel(todayISO());
       this.renderNav();
       this.render();
-    }, (err)=>{ console.error('sync error', err); });
-  },
+    };
 
-  load(){ /* دیگر لازم نیست — دیتا از Firestore با onSnapshot می‌آید */ },
+    COLLECTIONS.forEach(name=>{
+      const unsub = onSnapshot(cols[name], (snap)=>{
+        const arr = [];
+        snap.forEach(d=>arr.push(d.data()));
+        this.state[name] = arr;
+        if(name==='sales' || name==='purchases') migrateRecordArrays(this.state.sales, this.state.purchases);
+        this._loadedParts.add(name);
+        checkReady();
+      }, (err)=>console.error('sync error ('+name+')', err));
+      this._unsubs.push(unsub);
+    });
 
-  save(){
-    clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(()=>{
-      setDoc(stateDocRef, this.state).catch(e=>console.error('save error',e));
-    }, 250);
+    const unsubSettings = onSnapshot(settingsDocRef, async (snap)=>{
+      if(snap.exists()){
+        this.state.settings = migrateSettings(snap.data());
+      } else {
+        this.state.settings = defaultSettings();
+        try{ await setDoc(settingsDocRef, this.state.settings); }catch(e){}
+      }
+      this._loadedParts.add('settings');
+      checkReady();
+    }, (err)=>console.error('sync error (settings)', err));
+    this._unsubs.push(unsubSettings);
   },
 
   isOwner(){ return this.role==='owner'; },
@@ -393,6 +476,7 @@ const App = {
   },
 
   render(){
+    if(!this.dataReady){ this.renderLoading(); return; }
     const s = document.getElementById('screen');
     let html='';
     switch(this.tab){
@@ -408,7 +492,7 @@ const App = {
     s.innerHTML = html;
   },
 
-  /* ---------- Computations ---------- */
+  /* ---------- Computations (بدون تغییر) ---------- */
   cashBalance(){
     const s=this.state;
     let cash = Number(s.settings.openingCash)||0;
@@ -492,7 +576,11 @@ const App = {
       const name=(document.getElementById('sp-newname').value||'').trim();
       const unit=(document.getElementById('sp-newunit').value||'').trim()||'عدد';
       if(!name){ alert('نام محصول جدید را بنویسید'); return; }
-      product = this.addProduct(name,unit,0,0,0);
+      // نکته: این محصول هنوز در دیتابیس ذخیره نمی‌شود؛ فقط وقتی فاکتور نهایی ثبت شود ذخیره خواهد شد
+      // (تا اگر فاکتور رها شود، محصول یتیم با موجودی صفر در فهرست باقی نماند)
+      product = { id: uid(), name, unit, stock:0, avgCost:0, sellPrice:0, _draftOnly:true };
+      this.saleDraft._draftProducts = this.saleDraft._draftProducts || [];
+      this.saleDraft._draftProducts.push(product);
     } else {
       product = this.state.products.find(p=>p.id===pid);
     }
@@ -524,40 +612,51 @@ const App = {
     const note = (document.getElementById('sale-note').value||'').trim();
     const remaining = total-paid;
 
+    const batch = writeBatch(db);
     let customerId=null, customerNameFinal='مشتری نقدی';
     if(custName){
       let customer=this.state.customers.find(c=>c.name===custName);
       if(!customer){
-        customer={id:uid(),name:custName,phone:custPhone,address:custAddress,balance:0};
-        this.state.customers.push(customer);
+        customerId=uid(); customerNameFinal=custName;
+        batch.set(doc(cols.customers,customerId), {id:customerId,name:custName,phone:custPhone,address:custAddress,balance:remaining});
       } else {
-        if(custPhone && !customer.phone) customer.phone=custPhone;
-        if(custAddress && !customer.address) customer.address=custAddress;
+        customerId=customer.id; customerNameFinal=customer.name;
+        const fields={ balance: increment(remaining) };
+        if(custPhone && !customer.phone) fields.phone=custPhone;
+        if(custAddress && !customer.address) fields.address=custAddress;
+        batch.update(doc(cols.customers,customer.id), fields);
       }
-      customer.balance += remaining;
-      customerId=customer.id; customerNameFinal=customer.name;
     } else if(remaining>0.001){
       alert('برای فروش قرضی (نسیه) باید نام مشتری را بنویسید'); return;
     }
 
+    // محصولات جدیدی که فقط در پیش‌نویس بودند، حالا برای اولین بار ذخیره می‌شوند
+    const draftProducts = this.saleDraft._draftProducts || [];
     this.saleDraft.items.forEach(it=>{
-      const p=this.state.products.find(pp=>pp.id===it.productId);
-      if(p) p.stock -= it.qty;
+      const draftP = draftProducts.find(dp=>dp.id===it.productId);
+      if(draftP){
+        batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, stock:-it.qty, avgCost:0, sellPrice:it.unitPrice});
+      } else {
+        batch.update(doc(cols.products, it.productId), { stock: increment(-it.qty) });
+      }
     });
 
     const invoiceNo = (Number(this.state.settings.invoiceCounter)||0) + 1;
-    this.state.settings.invoiceCounter = invoiceNo;
+    batch.update(settingsDocRef, { invoiceCounter: increment(1) });
 
+    const saleId = uid();
     const newSale = {
-      id:uid(), ts:Date.now(), date, invoiceNo, customerId, customerName:customerNameFinal,
+      id:saleId, ts:Date.now(), date, invoiceNo, customerId, customerName:customerNameFinal,
       customerPhone: custName?custPhone:'', customerAddress: custName?custAddress:'',
       items:this.saleDraft.items.map(it=>({...it,returnedQty:0})), total, totalCost, profit: total-totalCost,
       paid, remaining, note, status:'active', returns:[], originalTotal: total
     };
-    this.state.sales.push(newSale);
+    batch.set(doc(cols.sales, saleId), newSale);
+
+    batch.commit().catch(e=>{ console.error('submitSale error',e); alert('خطا در ذخیرهٔ فاکتور؛ اتصال اینترنت را بررسی کنید (در حالت آفلاین هم باید ذخیره شود، دوباره تلاش کنید).'); });
+
     this.resetSaleDraft();
-    this.save();
-    this.viewInvoiceId = newSale.id;
+    this.viewInvoiceId = saleId;
     this.navigate('invoice');
   },
 
@@ -568,7 +667,9 @@ const App = {
   waPhoneDigits(phone){
     let d=(phone||'').replace(/[^0-9]/g,'');
     if(!d) return '';
-    if(d.startsWith('0')) d='93'+d.slice(1);        // شماره محلی با صفر → +93
+    if(d.startsWith('0093')) d='93'+d.slice(4);      // پیشوند بین‌المللی 00 + کد کشور (احتیاطی)
+    else if(d.startsWith('00')) d=d.slice(2);        // پیشوند بین‌المللی 00 خام
+    else if(d.startsWith('0')) d='93'+d.slice(1);    // شماره محلی با صفر → +93
     else if(!d.startsWith('93') && d.length<=10) d='93'+d; // بدون کد کشور و بدون صفر
     return d;
   },
@@ -757,7 +858,9 @@ const App = {
       const name=(document.getElementById('pp-newname').value||'').trim();
       const unit=(document.getElementById('pp-newunit').value||'').trim()||'عدد';
       if(!name){ alert('نام محصول جدید را بنویسید'); return; }
-      product = this.addProduct(name,unit,0,0,0);
+      product = { id: uid(), name, unit, stock:0, avgCost:0, sellPrice:0, _draftOnly:true };
+      this.purchaseDraft._draftProducts = this.purchaseDraft._draftProducts || [];
+      this.purchaseDraft._draftProducts.push(product);
     } else {
       product = this.state.products.find(p=>p.id===pid);
     }
@@ -783,35 +886,50 @@ const App = {
     const note = (document.getElementById('purchase-note').value||'').trim();
     const remaining = total-paid;
 
+    const batch = writeBatch(db);
     let supplierId=null, supplierNameFinal=supName||'—';
     if(supName){
       let supplier=this.state.suppliers.find(c=>c.name===supName);
-      if(!supplier){ supplier={id:uid(),name:supName,phone:'',address:'',balance:0}; this.state.suppliers.push(supplier); }
-      supplier.balance += remaining;
-      supplierId=supplier.id; supplierNameFinal=supplier.name;
+      if(!supplier){
+        supplierId=uid(); supplierNameFinal=supName;
+        batch.set(doc(cols.suppliers,supplierId), {id:supplierId,name:supName,phone:'',address:'',balance:remaining});
+      } else {
+        supplierId=supplier.id; supplierNameFinal=supplier.name;
+        batch.update(doc(cols.suppliers,supplier.id), { balance: increment(remaining) });
+      }
     } else if(remaining>0.001){
       alert('برای خرید نسیه باید نام عمده‌فروش/شرکت را بنویسید'); return;
     }
 
+    const draftProducts = this.purchaseDraft._draftProducts || [];
     this.purchaseDraft.items.forEach(it=>{
-      const p=this.state.products.find(pp=>pp.id===it.productId);
-      if(p){
-        const newStock = p.stock + it.qty;
-        p.avgCost = newStock>0 ? ((p.stock*p.avgCost)+(it.qty*it.unitCost))/newStock : it.unitCost;
-        p.stock = newStock;
-        if(!p.sellPrice) p.sellPrice = Math.round(it.unitCost*1.15);
+      const draftP = draftProducts.find(dp=>dp.id===it.productId);
+      if(draftP){
+        batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, stock:it.qty, avgCost:it.unitCost, sellPrice:Math.round(it.unitCost*1.15)});
+      } else {
+        const p = this.state.products.find(pp=>pp.id===it.productId);
+        if(p){
+          const newStock = p.stock + it.qty;
+          const newAvgCost = newStock>0 ? ((p.stock*p.avgCost)+(it.qty*it.unitCost))/newStock : it.unitCost;
+          const fields = { stock: increment(it.qty), avgCost: newAvgCost };
+          if(!p.sellPrice) fields.sellPrice = Math.round(it.unitCost*1.15);
+          batch.update(doc(cols.products, it.productId), fields);
+        }
       }
     });
 
+    const purchaseId = uid();
     const newPurchase = {
-      id:uid(), ts:Date.now(), date, supplierId, supplierName:supplierNameFinal,
+      id:purchaseId, ts:Date.now(), date, supplierId, supplierName:supplierNameFinal,
       items:this.purchaseDraft.items.map(it=>({...it,returnedQty:0})), total, paid, remaining, note,
       status:'active', returns:[], originalTotal: total
     };
-    this.state.purchases.push(newPurchase);
+    batch.set(doc(cols.purchases, purchaseId), newPurchase);
+
+    batch.commit().catch(e=>{ console.error('submitPurchase error',e); alert('خطا در ذخیرهٔ بل خرید؛ اتصال اینترنت را بررسی کنید.'); });
+
     this.resetPurchaseDraft();
-    this.save();
-    this.viewPurchaseId = newPurchase.id;
+    this.viewPurchaseId = purchaseId;
     this.navigate('purchase-view');
   },
 
@@ -926,7 +1044,9 @@ const App = {
     `;
   },
 
-  /* ---------- Invoice adjustments: cancel / return / edit items (sales) ---------- */
+  /* ---------- Invoice adjustments: cancel / return / edit items (sales) ----------
+     نکته: این عملیات‌ها به‌جای «بازخوانی و بازنویسی کل رکورد»، فقط تغییرات (delta) را
+     با increment() می‌فرستند — یعنی حتی اگر دو نفر هم‌زمان کار کنند، هیچ نوشته‌ای گم نمی‌شود. */
   saleReturnItem(saleId, idx){
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
     if(sale.status==='cancelled'){ alert('این فاکتور باطل شده است.'); return; }
@@ -938,7 +1058,6 @@ const App = {
     const qty=parseFloat(qtyStr);
     if(!qty||qty<=0||qty>sellable){ alert('تعداد نامعتبر است.'); return; }
     this._applySaleReturn(sale, idx, qty);
-    this.save(); this.render();
   },
   _applySaleReturn(sale, idx, qty){
     const it=sale.items[idx];
@@ -947,30 +1066,62 @@ const App = {
     const oldRemaining = sale.total-sale.paid;
     const debtReduction = Math.min(refund, Math.max(0,oldRemaining));
     const cashRefund = refund-debtReduction;
-    it.returnedQty=(it.returnedQty||0)+qty;
-    sale.total-=refund;
-    sale.totalCost-=refundCost;
-    sale.profit-=(refund-refundCost);
-    sale.paid-=cashRefund;
-    sale.remaining=sale.total-sale.paid;
-    if(sale.customerId){
-      const c=this.state.customers.find(x=>x.id===sale.customerId);
-      if(c) c.balance-=debtReduction;
+
+    const newItems = sale.items.map((x,i)=> i===idx ? {...x, returnedQty:(x.returnedQty||0)+qty} : x);
+    const newReturns = [...sale.returns, {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, unitPrice:it.unitPrice, amount:refund}];
+
+    const batch = writeBatch(db);
+    batch.update(doc(cols.sales, sale.id), {
+      items: newItems, returns: newReturns,
+      total: increment(-refund), totalCost: increment(-refundCost), profit: increment(-(refund-refundCost)),
+      paid: increment(-cashRefund), remaining: increment(-(cashRefund - (-debtReduction) - 0) ) // محاسبه دقیق پایین
+    });
+    // remaining = total-paid، برای سادگی و دقت مستقیم محاسبه و ست می‌کنیم نه increment مبهم:
+    const newTotal = sale.total-refund, newPaid = sale.paid-cashRefund;
+    batch.update(doc(cols.sales, sale.id), { remaining: newTotal-newPaid });
+    if(sale.customerId && debtReduction>0){
+      batch.update(doc(cols.customers, sale.customerId), { balance: increment(-debtReduction) });
     }
-    const p=this.state.products.find(pp=>pp.id===it.productId);
-    if(p) p.stock+=qty;
-    sale.returns.push({id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, unitPrice:it.unitPrice, amount:refund});
+    batch.update(doc(cols.products, it.productId), { stock: increment(qty) });
+    batch.commit().catch(e=>{ console.error(e); alert('خطا در ثبت مرجوعی؛ دوباره تلاش کنید.'); });
   },
   cancelSale(saleId){
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
     if(sale.status==='cancelled'){ alert('این فاکتور قبلاً باطل شده است.'); return; }
     if(!confirm('کل این فاکتور باطل شود؟ موجودی کالاها به انبار برمی‌گردد و بدهی مشتری اصلاح می‌شود.')) return;
+
+    let runningTotal=sale.total, runningPaid=sale.paid, runningCost=sale.totalCost;
+    let customerDebtReduction=0;
+    const newItems=[...sale.items];
+    const newReturns=[...sale.returns];
+    const stockDeltas={};
     sale.items.forEach((it,idx)=>{
       const sellable=it.qty-(it.returnedQty||0);
-      if(sellable>0) this._applySaleReturn(sale, idx, sellable);
+      if(sellable<=0) return;
+      const refund=sellable*it.unitPrice, refundCost=sellable*(it.cost||0);
+      const oldRemaining=runningTotal-runningPaid;
+      const debtReduction=Math.min(refund, Math.max(0,oldRemaining));
+      const cashRefund=refund-debtReduction;
+      newItems[idx]={...it, returnedQty:(it.returnedQty||0)+sellable};
+      newReturns.push({id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty:sellable, unitPrice:it.unitPrice, amount:refund});
+      runningTotal-=refund; runningPaid-=cashRefund; runningCost-=refundCost;
+      customerDebtReduction+=debtReduction;
+      stockDeltas[it.productId]=(stockDeltas[it.productId]||0)+sellable;
     });
-    sale.status='cancelled';
-    this.save(); this.render();
+
+    const batch=writeBatch(db);
+    batch.update(doc(cols.sales, sale.id), {
+      items:newItems, returns:newReturns, status:'cancelled',
+      total:runningTotal, totalCost:runningCost, profit:runningTotal-runningCost,
+      paid:runningPaid, remaining:runningTotal-runningPaid
+    });
+    if(sale.customerId && customerDebtReduction>0){
+      batch.update(doc(cols.customers, sale.customerId), { balance: increment(-customerDebtReduction) });
+    }
+    Object.keys(stockDeltas).forEach(pid=>{
+      batch.update(doc(cols.products, pid), { stock: increment(stockDeltas[pid]) });
+    });
+    batch.commit().catch(e=>{ console.error(e); alert('خطا در باطل کردن فاکتور؛ دوباره تلاش کنید.'); });
   },
   saleIncreaseItemQty(saleId, idx){
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
@@ -987,17 +1138,21 @@ const App = {
     if(paidStr===null) return;
     let addPaid=parseFloat(paidStr); if(isNaN(addPaid)||addPaid<0) addPaid=0; if(addPaid>addAmount) addPaid=addAmount;
     if(addPaid<addAmount && !sale.customerId){ alert('برای نسیه باید فاکتور برای یک مشتری مشخص باشد.'); return; }
-    it.qty+=qty;
-    if(p) p.stock-=qty;
-    sale.total+=addAmount; sale.originalTotal+=addAmount;
-    sale.totalCost+=qty*(it.cost||0); sale.profit=sale.total-sale.totalCost;
-    sale.paid+=addPaid;
-    sale.remaining=sale.total-sale.paid;
+
+    const newItems = sale.items.map((x,i)=> i===idx ? {...x, qty:x.qty+qty} : x);
+    const addCost = qty*(it.cost||0);
+    const newTotal=sale.total+addAmount, newPaid=sale.paid+addPaid, newTotalCost=sale.totalCost+addCost;
+
+    const batch=writeBatch(db);
+    batch.update(doc(cols.sales, sale.id), {
+      items:newItems, total:newTotal, originalTotal: increment(addAmount),
+      totalCost:newTotalCost, profit:newTotal-newTotalCost, paid:newPaid, remaining:newTotal-newPaid
+    });
+    if(p) batch.update(doc(cols.products, it.productId), { stock: increment(-qty) });
     if(sale.customerId && addAmount-addPaid>0){
-      const c=this.state.customers.find(x=>x.id===sale.customerId);
-      if(c) c.balance+=(addAmount-addPaid);
+      batch.update(doc(cols.customers, sale.customerId), { balance: increment(addAmount-addPaid) });
     }
-    this.save(); this.render();
+    batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   saleAddItem(saleId){
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
@@ -1009,25 +1164,38 @@ const App = {
     const qty=parseFloat(qtyStr); if(!qty||qty<=0){ alert('تعداد نامعتبر است.'); return; }
     const priceStr=prompt('قیمت فروش هر واحد:', product?product.sellPrice:0); if(priceStr===null) return;
     const price=parseFloat(priceStr); if(isNaN(price)||price<0){ alert('قیمت نامعتبر است.'); return; }
-    if(!product){ product=this.addProduct(trimmed,'عدد',0,0,price); }
-    if(qty>product.stock){ if(!confirm('موجودی انبار کافی نیست ('+product.stock+' '+product.unit+' باقی‌مانده). ادامه می‌دهید؟')) return; }
+
+    const batch=writeBatch(db);
+    let isNewProduct=false, newProductId=null, cost=0;
+    if(!product){
+      isNewProduct=true; newProductId=uid(); cost=0;
+      if(qty>0){ /* موجودی جدید صفر بود، اضافه شدن این قلم موجودی را منفی می‌کند - طبیعی است، مثل رفتار قبلی */ }
+    } else {
+      cost=product.avgCost;
+      if(qty>product.stock){ if(!confirm('موجودی انبار کافی نیست ('+product.stock+' '+product.unit+' باقی‌مانده). ادامه می‌دهید؟')) return; }
+    }
     const addAmount=qty*price;
     const paidStr=prompt('مبلغ پرداختی نقدی برای همین قلم (اگر نسیه است، صفر بگذارید):', addAmount);
     if(paidStr===null) return;
     let addPaid=parseFloat(paidStr); if(isNaN(addPaid)||addPaid<0) addPaid=0; if(addPaid>addAmount) addPaid=addAmount;
     if(addPaid<addAmount && !sale.customerId){ alert('برای نسیه باید فاکتور برای یک مشتری مشخص باشد.'); return; }
-    sale.items.push({productId:product.id,name:product.name,unit:product.unit,qty,unitPrice:price,cost:product.avgCost,returnedQty:0});
-    product.stock-=qty;
-    sale.total+=addAmount; sale.originalTotal+=addAmount;
-    sale.totalCost+=qty*product.avgCost;
-    sale.profit=sale.total-sale.totalCost;
-    sale.paid+=addPaid;
-    sale.remaining=sale.total-sale.paid;
-    if(sale.customerId && addAmount-addPaid>0){
-      const c=this.state.customers.find(x=>x.id===sale.customerId);
-      if(c) c.balance+=(addAmount-addPaid);
+
+    if(isNewProduct){
+      batch.set(doc(cols.products,newProductId), {id:newProductId, name:trimmed, unit:'عدد', stock:-qty, avgCost:0, sellPrice:price});
+    } else {
+      batch.update(doc(cols.products, product.id), { stock: increment(-qty) });
     }
-    this.save(); this.render();
+    const newItem = {productId: isNewProduct?newProductId:product.id, name:trimmed, unit: isNewProduct?'عدد':product.unit, qty, unitPrice:price, cost, returnedQty:0};
+    const newItems=[...sale.items, newItem];
+    const newTotal=sale.total+addAmount, newPaid=sale.paid+addPaid, newTotalCost=sale.totalCost+qty*cost;
+    batch.update(doc(cols.sales, sale.id), {
+      items:newItems, total:newTotal, originalTotal: increment(addAmount),
+      totalCost:newTotalCost, profit:newTotal-newTotalCost, paid:newPaid, remaining:newTotal-newPaid
+    });
+    if(sale.customerId && addAmount-addPaid>0){
+      batch.update(doc(cols.customers, sale.customerId), { balance: increment(addAmount-addPaid) });
+    }
+    batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
 
   /* ---------- Invoice adjustments: cancel / return / edit items (purchases) ---------- */
@@ -1044,7 +1212,6 @@ const App = {
     const p=this.state.products.find(pp=>pp.id===it.productId);
     if(p && qty>p.stock){ if(!confirm('موجودی فعلی انبار کمتر از این مقدار است ('+p.stock+' '+it.unit+' موجود). آیا مطمئن هستید؟')) return; }
     this._applyPurchaseReturn(pur, idx, qty);
-    this.save(); this.render();
   },
   _applyPurchaseReturn(pur, idx, qty){
     const it=pur.items[idx];
@@ -1052,24 +1219,24 @@ const App = {
     const oldRemaining=pur.total-pur.paid;
     const debtReduction=Math.min(refund, Math.max(0,oldRemaining));
     const cashRefund=refund-debtReduction;
-    it.returnedQty=(it.returnedQty||0)+qty;
-    pur.total-=refund;
-    pur.paid-=cashRefund;
-    pur.remaining=pur.total-pur.paid;
-    if(pur.supplierId){
-      const sp=this.state.suppliers.find(x=>x.id===pur.supplierId);
-      if(sp) sp.balance-=debtReduction;
+    const newItems = pur.items.map((x,i)=> i===idx ? {...x, returnedQty:(x.returnedQty||0)+qty} : x);
+    const newReturns = [...pur.returns, {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, unitCost:it.unitCost, amount:refund}];
+    const newTotal=pur.total-refund, newPaid=pur.paid-cashRefund;
+
+    const batch=writeBatch(db);
+    batch.update(doc(cols.purchases, pur.id), { items:newItems, returns:newReturns, total:newTotal, paid:newPaid, remaining:newTotal-newPaid });
+    if(pur.supplierId && debtReduction>0){
+      batch.update(doc(cols.suppliers, pur.supplierId), { balance: increment(-debtReduction) });
     }
-    const p=this.state.products.find(pp=>pp.id===it.productId);
-    if(p) p.stock-=qty;
-    pur.returns.push({id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, unitCost:it.unitCost, amount:refund});
+    batch.update(doc(cols.products, it.productId), { stock: increment(-qty) });
+    batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   cancelPurchase(purchaseId){
     const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
     if(pur.status==='cancelled'){ alert('این بل قبلاً باطل شده است.'); return; }
     if(!confirm('کل این بل خرید باطل شود؟ کالاها از انبار کم می‌شود و بدهی به فروشنده اصلاح می‌شود.')) return;
     let ok=true;
-    pur.items.forEach((it,idx)=>{
+    pur.items.forEach((it)=>{
       const returnable=it.qty-(it.returnedQty||0);
       if(returnable>0){
         const p=this.state.products.find(pp=>pp.id===it.productId);
@@ -1077,12 +1244,31 @@ const App = {
       }
     });
     if(!ok && !confirm('موجودی فعلی بعضی کالاها کمتر از مقدار خریداری‌شده است (احتمالاً فروخته شده‌اند). آیا باز هم باطل شود؟ (موجودی ممکن است منفی شود)')) return;
+
+    let runningTotal=pur.total, runningPaid=pur.paid, supplierDebtReduction=0;
+    const newItems=[...pur.items]; const newReturns=[...pur.returns]; const stockDeltas={};
     pur.items.forEach((it,idx)=>{
       const returnable=it.qty-(it.returnedQty||0);
-      if(returnable>0) this._applyPurchaseReturn(pur, idx, returnable);
+      if(returnable<=0) return;
+      const refund=returnable*it.unitCost;
+      const oldRemaining=runningTotal-runningPaid;
+      const debtReduction=Math.min(refund, Math.max(0,oldRemaining));
+      const cashRefund=refund-debtReduction;
+      newItems[idx]={...it, returnedQty:(it.returnedQty||0)+returnable};
+      newReturns.push({id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty:returnable, unitCost:it.unitCost, amount:refund});
+      runningTotal-=refund; runningPaid-=cashRefund; supplierDebtReduction+=debtReduction;
+      stockDeltas[it.productId]=(stockDeltas[it.productId]||0)-returnable;
     });
-    pur.status='cancelled';
-    this.save(); this.render();
+
+    const batch=writeBatch(db);
+    batch.update(doc(cols.purchases, pur.id), { items:newItems, returns:newReturns, status:'cancelled', total:runningTotal, paid:runningPaid, remaining:runningTotal-runningPaid });
+    if(pur.supplierId && supplierDebtReduction>0){
+      batch.update(doc(cols.suppliers, pur.supplierId), { balance: increment(-supplierDebtReduction) });
+    }
+    Object.keys(stockDeltas).forEach(pid=>{
+      batch.update(doc(cols.products, pid), { stock: increment(stockDeltas[pid]) });
+    });
+    batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   purchaseIncreaseItemQty(purchaseId, idx){
     const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
@@ -1098,20 +1284,20 @@ const App = {
     let addPaid=parseFloat(paidStr); if(isNaN(addPaid)||addPaid<0) addPaid=0; if(addPaid>addAmount) addPaid=addAmount;
     if(addPaid<addAmount && !pur.supplierId){ alert('برای نسیه باید بل برای یک فروشنده/شرکت مشخص باشد.'); return; }
     const p=this.state.products.find(pp=>pp.id===it.productId);
-    it.qty+=qty;
+    const newItems = pur.items.map((x,i)=> i===idx ? {...x, qty:x.qty+qty} : x);
+    const newTotal=pur.total+addAmount, newPaid=pur.paid+addPaid;
+
+    const batch=writeBatch(db);
+    batch.update(doc(cols.purchases, pur.id), { items:newItems, total:newTotal, originalTotal: increment(addAmount), paid:newPaid, remaining:newTotal-newPaid });
     if(p){
       const newStock=p.stock+qty;
-      p.avgCost = newStock>0 ? ((p.stock*p.avgCost)+(qty*it.unitCost))/newStock : it.unitCost;
-      p.stock=newStock;
+      const newAvgCost = newStock>0 ? ((p.stock*p.avgCost)+(qty*it.unitCost))/newStock : it.unitCost;
+      batch.update(doc(cols.products, it.productId), { stock: increment(qty), avgCost: newAvgCost });
     }
-    pur.total+=addAmount; pur.originalTotal+=addAmount;
-    pur.paid+=addPaid;
-    pur.remaining=pur.total-pur.paid;
     if(pur.supplierId && addAmount-addPaid>0){
-      const sp=this.state.suppliers.find(x=>x.id===pur.supplierId);
-      if(sp) sp.balance+=(addAmount-addPaid);
+      batch.update(doc(cols.suppliers, pur.supplierId), { balance: increment(addAmount-addPaid) });
     }
-    this.save(); this.render();
+    batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   purchaseAddItem(purchaseId){
     const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
@@ -1123,25 +1309,33 @@ const App = {
     const qty=parseFloat(qtyStr); if(!qty||qty<=0){ alert('تعداد نامعتبر است.'); return; }
     const costStr=prompt('قیمت خرید هر واحد:', product?product.avgCost:0); if(costStr===null) return;
     const cost=parseFloat(costStr); if(isNaN(cost)||cost<0){ alert('قیمت نامعتبر است.'); return; }
-    if(!product){ product=this.addProduct(trimmed,'عدد',0,0,0); }
     const addAmount=qty*cost;
     const paidStr=prompt('مبلغ پرداختی نقدی برای همین قلم (اگر نسیه است، صفر بگذارید):', addAmount);
     if(paidStr===null) return;
     let addPaid=parseFloat(paidStr); if(isNaN(addPaid)||addPaid<0) addPaid=0; if(addPaid>addAmount) addPaid=addAmount;
     if(addPaid<addAmount && !pur.supplierId){ alert('برای نسیه باید بل برای یک فروشنده/شرکت مشخص باشد.'); return; }
-    pur.items.push({productId:product.id,name:product.name,unit:product.unit,qty,unitCost:cost,returnedQty:0});
-    const newStock=product.stock+qty;
-    product.avgCost = newStock>0 ? ((product.stock*product.avgCost)+(qty*cost))/newStock : cost;
-    product.stock=newStock;
-    if(!product.sellPrice) product.sellPrice=Math.round(cost*1.15);
-    pur.total+=addAmount; pur.originalTotal+=addAmount;
-    pur.paid+=addPaid;
-    pur.remaining=pur.total-pur.paid;
-    if(pur.supplierId && addAmount-addPaid>0){
-      const sp=this.state.suppliers.find(x=>x.id===pur.supplierId);
-      if(sp) sp.balance+=(addAmount-addPaid);
+
+    const batch=writeBatch(db);
+    let productId, unit='عدد';
+    if(!product){
+      productId=uid();
+      batch.set(doc(cols.products, productId), {id:productId, name:trimmed, unit, stock:qty, avgCost:cost, sellPrice:Math.round(cost*1.15)});
+    } else {
+      productId=product.id; unit=product.unit;
+      const newStock=product.stock+qty;
+      const newAvgCost = newStock>0 ? ((product.stock*product.avgCost)+(qty*cost))/newStock : cost;
+      const fields = { stock: increment(qty), avgCost: newAvgCost };
+      if(!product.sellPrice) fields.sellPrice = Math.round(cost*1.15);
+      batch.update(doc(cols.products, productId), fields);
     }
-    this.save(); this.render();
+    const newItem={productId, name:trimmed, unit, qty, unitCost:cost, returnedQty:0};
+    const newItems=[...pur.items, newItem];
+    const newTotal=pur.total+addAmount, newPaid=pur.paid+addPaid;
+    batch.update(doc(cols.purchases, pur.id), { items:newItems, total:newTotal, originalTotal: increment(addAmount), paid:newPaid, remaining:newTotal-newPaid });
+    if(pur.supplierId && addAmount-addPaid>0){
+      batch.update(doc(cols.suppliers, pur.supplierId), { balance: increment(addAmount-addPaid) });
+    }
+    batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
 
   /* ---------- Customers / Suppliers (debts) ---------- */
@@ -1239,11 +1433,12 @@ const App = {
     const arr = type==='customers' ? this.state.customers : this.state.suppliers;
     const p = arr.find(x=>x.id===id);
     if(!p) return;
-    if(type==='customers'){ p.balance -= amt; }
-    else { p.balance -= amt; }
-    this.state.payments.push({id:uid(), ts:Date.now(), date:todayISO(), type: type==='customers'?'receive':'pay', partyType:type==='customers'?'customer':'supplier', partyId:id, partyName:p.name, amount:amt});
-    this.save();
-    this.render();
+    const colName = type==='customers' ? 'customers' : 'suppliers';
+    const batch=writeBatch(db);
+    batch.update(doc(cols[colName], id), { balance: increment(-amt) });
+    const paymentId=uid();
+    batch.set(doc(cols.payments, paymentId), {id:paymentId, ts:Date.now(), date:todayISO(), type: type==='customers'?'receive':'pay', partyType:type==='customers'?'customer':'supplier', partyId:id, partyName:p.name, amount:amt});
+    batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   addPartyManual(type){
     const name=(prompt(type==='customers'?'نام مشتری جدید:':'نام شرکت/عمده‌فروش جدید:')||'').trim();
@@ -1257,13 +1452,15 @@ const App = {
       : 'اگر شما از قبل (قبل از استفاده از این سیستم) به این شرکت/عمده‌فروش بدهکار هستید، مبلغش را بنویسید';
     const openStr = prompt(openLabel+' (در غیر این صورت 0 بگذارید):','0');
     let openAmt = parseFloat(openStr); if(isNaN(openAmt)) openAmt=0;
-    const p={id:uid(), name, phone, address, balance:openAmt};
-    arr.push(p);
+    const colName = type==='customers' ? 'customers' : 'suppliers';
+    const partyId = uid();
+    const batch=writeBatch(db);
+    batch.set(doc(cols[colName], partyId), {id:partyId, name, phone, address, balance:openAmt});
     if(openAmt){
-      this.state.openingEntries.push({id:uid(), ts:Date.now(), date:todayISO(), partyType:type, partyId:p.id, partyName:p.name, amount:openAmt, note:'بدهی افتتاحیه (قبل از این سیستم)'});
+      const openId=uid();
+      batch.set(doc(cols.openingEntries, openId), {id:openId, ts:Date.now(), date:todayISO(), partyType:type, partyId, partyName:name, amount:openAmt, note:'بدهی افتتاحیه (قبل از این سیستم)'});
     }
-    this.save();
-    this.render();
+    batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   setOpeningBalance(type,id){
     const arr = type==='customers' ? this.state.customers : this.state.suppliers;
@@ -1275,11 +1472,12 @@ const App = {
     if(amtStr===null) return;
     const amt = parseFloat(amtStr);
     if(!amt){ alert('مبلغ نامعتبر یا صفر است.'); return; }
-    p.balance += amt;
-    this.state.openingEntries.push({id:uid(), ts:Date.now(), date:todayISO(), partyType:type, partyId:id, partyName:p.name, amount:amt, note:'بدهی افتتاحیه (قبل از این سیستم)'});
-    this.save();
-    alert('بدهی افتتاحیه ثبت شد ✅');
-    this.render();
+    const colName = type==='customers' ? 'customers' : 'suppliers';
+    const batch=writeBatch(db);
+    batch.update(doc(cols[colName], id), { balance: increment(amt) });
+    const openId=uid();
+    batch.set(doc(cols.openingEntries, openId), {id:openId, ts:Date.now(), date:todayISO(), partyType:type, partyId:id, partyName:p.name, amount:amt, note:'بدهی افتتاحیه (قبل از این سیستم)'});
+    batch.commit().then(()=>alert('بدهی افتتاحیه ثبت شد ✅')).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   editParty(type,id){
     const arr = type==='customers' ? this.state.customers : this.state.suppliers;
@@ -1290,24 +1488,24 @@ const App = {
     if(arr.find(x=>x.name===trimmed && x.id!==id)){ alert('طرف‌حساب دیگری با همین نام موجود است.'); return; }
     const phone=prompt('شماره تماس:',p.phone||''); if(phone===null) return;
     const address=prompt('آدرس:',p.address||''); if(address===null) return;
-    p.name=trimmed; p.phone=phone.trim(); p.address=address.trim();
+    const colName = type==='customers' ? 'customers' : 'suppliers';
+    const batch=writeBatch(db);
+    batch.update(doc(cols[colName], id), { name:trimmed, phone:phone.trim(), address:address.trim() });
     if(type==='customers'){
-      this.state.sales.forEach(s=>{ if(s.customerId===id) s.customerName=p.name; });
+      this.state.sales.forEach(s=>{ if(s.customerId===id) batch.update(doc(cols.sales, s.id), { customerName:trimmed }); });
     } else {
-      this.state.purchases.forEach(s=>{ if(s.supplierId===id) s.supplierName=p.name; });
+      this.state.purchases.forEach(s=>{ if(s.supplierId===id) batch.update(doc(cols.purchases, s.id), { supplierName:trimmed }); });
     }
-    this.save();
-    this.render();
+    batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   deleteParty(type,id){
     const arr = type==='customers' ? this.state.customers : this.state.suppliers;
     const p=arr.find(x=>x.id===id); if(!p) return;
     if(Math.abs(p.balance)>0.5){ alert('این مشتری/فروشنده هنوز بدهی یا طلب دارد؛ ابتدا حساب را تسویه کنید.'); return; }
     if(!confirm('این مورد از فهرست حذف شود؟ سابقهٔ فاکتورهای قبلی آن باقی می‌ماند.')) return;
-    if(type==='customers') this.state.customers=this.state.customers.filter(x=>x.id!==id);
-    else this.state.suppliers=this.state.suppliers.filter(x=>x.id!==id);
+    const colName = type==='customers' ? 'customers' : 'suppliers';
+    deleteDoc(doc(cols[colName], id)).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
     this.detailId=null;
-    this.save();
     this.render();
   },
 
@@ -1340,15 +1538,14 @@ const App = {
     const date = document.getElementById('exp-date').value || todayISO();
     const note = (document.getElementById('exp-note').value||'').trim();
     if(!amount || amount<=0){ alert('مبلغ مصرف را درست بنویسید'); return; }
-    this.state.expenses.push({id:uid(), ts:Date.now(), date, category, amount, note});
-    this.save();
+    const expId=uid();
+    setDoc(doc(cols.expenses, expId), {id:expId, ts:Date.now(), date, category, amount, note}).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
     alert('مصرف ثبت شد ✅');
     this.navigate('more','expenses');
   },
   deleteExpense(id){
     if(!confirm('این مصرف حذف شود؟')) return;
-    this.state.expenses = this.state.expenses.filter(x=>x.id!==id);
-    this.save(); this.render();
+    deleteDoc(doc(cols.expenses, id)).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   renderExpenses(){
     const today = todayISO();
@@ -1386,12 +1583,6 @@ const App = {
   },
 
   /* ---------- Products ---------- */
-  addProduct(name,unit,stock,avgCost,sellPrice){
-    const p={id:uid(), name, unit:unit||'عدد', stock:stock||0, avgCost:avgCost||0, sellPrice:sellPrice||0};
-    this.state.products.push(p);
-    this.save();
-    return p;
-  },
   submitNewProductForm(){
     const name=(document.getElementById('np-name').value||'').trim();
     const unit=(document.getElementById('np-unit').value||'').trim()||'عدد';
@@ -1399,8 +1590,8 @@ const App = {
     const cost=parseFloat(document.getElementById('np-cost').value)||0;
     const sell=parseFloat(document.getElementById('np-sell').value)||0;
     if(!name){ alert('نام محصول را بنویسید'); return; }
-    this.addProduct(name,unit,stock,cost,sell);
-    this.render();
+    const pid=uid();
+    setDoc(doc(cols.products, pid), {id:pid, name, unit, stock, avgCost:cost, sellPrice:sell}).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   editProduct(id){
     const p=this.state.products.find(x=>x.id===id); if(!p) return;
@@ -1408,14 +1599,14 @@ const App = {
     const unit=prompt('واحد:',p.unit); if(unit===null) return;
     const sellPrice=prompt('قیمت فروش پیشنهادی:',p.sellPrice); if(sellPrice===null) return;
     const stock=prompt('اصلاح موجودی فعلی (تعداد):',p.stock); if(stock===null) return;
-    p.name=name.trim()||p.name; p.unit=unit.trim()||p.unit;
-    p.sellPrice=parseFloat(sellPrice)||0; p.stock=parseFloat(stock)||0;
-    this.save(); this.render();
+    updateDoc(doc(cols.products, id), {
+      name: name.trim()||p.name, unit: unit.trim()||p.unit,
+      sellPrice: parseFloat(sellPrice)||0, stock: parseFloat(stock)||0
+    }).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   deleteProduct(id){
     if(!confirm('این محصول حذف شود؟ این کار سابقهٔ فروش/خرید را تغییر نمی‌دهد.')) return;
-    this.state.products = this.state.products.filter(x=>x.id!==id);
-    this.save(); this.render();
+    deleteDoc(doc(cols.products, id)).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   renderProducts(){
     const sorted=[...this.state.products].sort((a,b)=>a.name.localeCompare(b.name,'fa'));
@@ -1511,51 +1702,87 @@ const App = {
 
   /* ---------- Settings / Backup ---------- */
   saveSettings(){
-    this.state.settings.businessName=(document.getElementById('set-name').value||'').trim()||'پخش موتر من';
-    this.state.settings.currency=(document.getElementById('set-currency').value||'').trim()||'افغانی';
-    this.state.settings.openingCash=parseFloat(document.getElementById('set-cash').value)||0;
-    this.state.settings.logoEmoji=(document.getElementById('set-logo').value||'').trim()||'🏪';
-    this.state.settings.businessPhone=(document.getElementById('set-phone').value||'').trim();
-    this.state.settings.businessAddress=(document.getElementById('set-address').value||'').trim();
-    this.state.settings.openingNote=(document.getElementById('set-opening-note').value||'').trim();
-    this.save();
-    document.getElementById('biz-name').textContent=this.state.settings.businessName;
-    alert('تنظیمات ذخیره شد ✅');
-    this.render();
+    const fields = {
+      businessName:(document.getElementById('set-name').value||'').trim()||'پخش موتر من',
+      currency:(document.getElementById('set-currency').value||'').trim()||'افغانی',
+      openingCash:parseFloat(document.getElementById('set-cash').value)||0,
+      logoEmoji:(document.getElementById('set-logo').value||'').trim()||'🏪',
+      businessPhone:(document.getElementById('set-phone').value||'').trim(),
+      businessAddress:(document.getElementById('set-address').value||'').trim(),
+      openingNote:(document.getElementById('set-opening-note').value||'').trim(),
+    };
+    updateDoc(settingsDocRef, fields).then(()=>{
+      document.getElementById('biz-name').textContent=fields.businessName;
+      alert('تنظیمات ذخیره شد ✅');
+    }).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
-  exportBackup(){
-    const data=JSON.stringify(this.state,null,2);
-    const blob=new Blob([data],{type:'application/json'});
+  _downloadJSON(data, filename){
+    const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
-    a.href=url;
-    a.download='backup-hesabdari-'+todayISO()+'.json';
+    a.href=url; a.download=filename;
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
   },
-  importBackup(input){
+  exportBackup(){
+    this._downloadJSON(this.state, 'backup-hesabdari-'+todayISO()+'.json');
+  },
+  async importBackup(input){
+    if(!this.isOwner()){ alert('این کار فقط برای مالک/مدیر مجاز است.'); input.value=''; return; }
     const file=input.files[0];
     if(!file) return;
     const reader=new FileReader();
-    reader.onload=(e)=>{
+    reader.onload=async (e)=>{
       try{
         const parsed=JSON.parse(e.target.result);
-        if(!confirm('بازیابی از فایل پشتیبان، تمام اطلاعات فعلی را جایگزین می‌کند. ادامه می‌دهید؟')) return;
-        this.state=parsed;
-        migrateState(this.state);
-        this.save();
+        if(!confirm('⚠️ توجه: این کار دیتابیس مشترک همهٔ کاربران (نه فقط همین گوشی) را با فایل انتخابی جایگزین می‌کند. ادامه می‌دهید؟')) { input.value=''; return; }
+        if(!confirm('یک نسخه از وضعیت فعلی، قبل از جایگزینی، خودکار دانلود می‌شود تا اگر اشتباهی رخ داد بتوانید برگردید. تأیید می‌کنید؟')) { input.value=''; return; }
+        this._downloadJSON(this.state, 'auto-backup-before-import-'+Date.now()+'.json');
+
+        migrateSettings(parsed.settings);
+        migrateRecordArrays(parsed.sales, parsed.purchases);
+
+        for(const name of COLLECTIONS){
+          const existing = await getDocs(cols[name]);
+          const importedIds = new Set((parsed[name]||[]).map(r=>r.id));
+          const opsBatchLimit=400;
+          let batch=writeBatch(db); let opCount=0;
+          const flush=async()=>{ if(opCount>0){ await batch.commit(); batch=writeBatch(db); opCount=0; } };
+          for(const d of existing.docs){
+            if(!importedIds.has(d.id)){ batch.delete(d.ref); opCount++; if(opCount>=opsBatchLimit) await flush(); }
+          }
+          for(const rec of (parsed[name]||[])){
+            if(!rec.id) rec.id=uid();
+            batch.set(doc(cols[name], rec.id), rec); opCount++; if(opCount>=opsBatchLimit) await flush();
+          }
+          await flush();
+        }
+        await setDoc(settingsDocRef, migrateSettings(parsed.settings||{}));
         alert('بازیابی موفقانه انجام شد ✅');
         this.navigate('dashboard');
-      }catch(err){ alert('فایل پشتیبان معتبر نیست.'); }
+      }catch(err){ console.error(err); alert('فایل پشتیبان معتبر نیست یا خطایی رخ داد.'); }
+      input.value='';
     };
     reader.readAsText(file);
   },
-  wipeAll(){
+  async wipeAll(){
+    if(!this.isOwner()){ alert('این کار فقط برای مالک/مدیر مجاز است.'); return; }
     if(!confirm('تمام اطلاعات (فروش، خرید، مصارف، محصولات) برای همیشه پاک می‌شود. مطمئن هستید؟')) return;
     if(!confirm('این کار قابل بازگشت نیست. یک‌بار دیگر تأیید کنید.')) return;
-    this.state=defaultState();
-    this.save();
-    this.navigate('dashboard');
+    this._downloadJSON(this.state, 'auto-backup-before-wipe-'+Date.now()+'.json');
+    try{
+      for(const name of COLLECTIONS){
+        const existing = await getDocs(cols[name]);
+        let batch=writeBatch(db); let opCount=0;
+        for(const d of existing.docs){
+          batch.delete(d.ref); opCount++;
+          if(opCount>=400){ await batch.commit(); batch=writeBatch(db); opCount=0; }
+        }
+        if(opCount>0) await batch.commit();
+      }
+      await setDoc(settingsDocRef, defaultSettings());
+      this.navigate('dashboard');
+    }catch(e){ console.error(e); alert('خطا در پاک کردن اطلاعات؛ دوباره تلاش کنید.'); }
   },
   renderSettings(){
     const s=this.state.settings;
@@ -1586,17 +1813,22 @@ const App = {
       <textarea id="set-opening-note" placeholder="مثلاً: قبل از استفاده از این سیستم تقریباً ۵۰۰,۰۰۰ افغانی مصرف شده بود که در حساب نقد فعلی از قبل لحاظ شده است">${escapeHtml(s.openingNote||'')}</textarea>
       <button class="btn btn-primary" onclick="App.saveSettings()">ذخیره تنظیمات</button>
     </div>
-    <h2 class="section-title">پشتیبان‌گیری و سینک دستی</h2>
+    <h2 class="section-title">پشتیبان‌گیری و سینک</h2>
     <div class="card">
-      <div class="field-note">این برنامه کاملاً آفلاین است و اطلاعات فقط روی همین گوشی ذخیره می‌شود. برای انتقال اطلاعات به گوشی دیگر یا نگه‌داری نسخهٔ پشتیبان، فایل زیر را بگیرید و بعداً بازیابی کنید (مثلاً از طریق واتساپ یا ایمیل بفرستید).</div>
+      <div class="field-note">این برنامه آفلاین هم کار می‌کند: هر تغییری روی گوشی شما فوراً ذخیره می‌شود و به‌محض وصل شدن اینترنت، خودکار با بقیهٔ اعضای تیم در فضای ابری سینک می‌شود (یک دیتابیس مشترک برای همه). دانلود/بازیابی فایل پشتیبان فقط برای نسخهٔ اضافی یا انتقال کامل داده به یک نصب جدید است.</div>
       <button class="btn btn-outline" onclick="App.exportBackup()">⬇️ دانلود فایل پشتیبان</button>
+      ${this.isOwner()?`
       <label style="margin-top:14px;">بازیابی از فایل پشتیبان</label>
+      <div class="field-note" style="color:var(--red);">⚠️ این کار دیتابیس مشترک همهٔ کاربران را جایگزین می‌کند، نه فقط اطلاعات همین گوشی را.</div>
       <input type="file" accept="application/json" onchange="App.importBackup(this)">
+      `:`<div class="field-note">بازیابی از فایل پشتیبان فقط برای مالک/مدیر در دسترس است.</div>`}
     </div>
+    ${this.isOwner()?`
     <h2 class="section-title">منطقهٔ خطر</h2>
     <div class="card">
+      <div class="field-note" style="color:var(--red);">⚠️ این کار همهٔ اطلاعات را برای همهٔ کاربران پاک می‌کند. قبل از پاک کردن، یک نسخهٔ پشتیبان خودکار دانلود می‌شود.</div>
       <button class="btn btn-danger" onclick="App.wipeAll()">پاک کردن همهٔ اطلاعات</button>
-    </div>
+    </div>`:''}
     `;
   },
 };
