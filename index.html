@@ -169,12 +169,16 @@
   .inv-sign{display:flex;justify-content:space-between;margin-top:34px;font-size:12px;color:var(--muted);}
   .inv-sign .line{border-top:1px solid var(--muted);width:110px;padding-top:4px;text-align:center;}
   .row-item.clickable{cursor:pointer;}
+  .bill-thumb{max-width:120px;max-height:120px;border-radius:8px;border:1px solid var(--border);cursor:pointer;display:block;}
+  .img-viewer-overlay{position:fixed;inset:0;background:rgba(0,0,0,.86);z-index:9999;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;padding:20px;}
+  .img-viewer-overlay img{max-width:92vw;max-height:76vh;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5);}
+  .img-viewer-close{background:#fff;border:none;border-radius:20px;padding:9px 20px;font-size:14px;font-weight:700;cursor:pointer;}
   @media print{
     body *{visibility:hidden;}
     header.topbar, nav.bottomnav{display:none !important;}
     #invoice-print, #invoice-print *{visibility:visible;}
     #invoice-print{position:absolute;top:0;right:0;left:0;width:100%;padding:12px;}
-    .no-print{display:none !important;}
+    .no-print, .img-viewer-overlay{display:none !important;}
     body{padding-bottom:0;background:#fff;}
   }
 </style>
@@ -231,6 +235,45 @@ function todayISO(){ return new Date().toISOString().slice(0,10); }
 function fmt(n){ n = Math.round(Number(n)||0); return n.toLocaleString('en-US'); }
 function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function sum(arr,key){ return arr.reduce((a,b)=>a+(Number(b[key])||0),0); }
+/* ---------- فشرده‌سازی عکس (بل شرکت / رسید پرداخت) ----------
+   عکس‌ها به‌صورت JPEG فشرده و base64 مستقیم داخل سند Firestore ذخیره می‌شوند
+   (نه Firebase Storage) تا کاملاً با ذخیره‌سازی آفلاین فایراستور سازگار بمانند
+   و بدون اتصال اینترنت هم ثبت و بعداً خودکار سینک شوند. سقف سند فایراستور ۱ مگابایت
+   است، پس عکس تا حد امن (~700 کیلوبایت base64) فشرده می‌شود. */
+function _loadImageFromFile(file){
+  return new Promise((resolve,reject)=>{
+    const reader = new FileReader();
+    reader.onerror = ()=>reject(new Error('خواندن فایل عکس ناکام شد'));
+    reader.onload = (e)=>{
+      const img = new Image();
+      img.onerror = ()=>reject(new Error('این فایل یک عکس معتبر نیست'));
+      img.onload = ()=>resolve(img);
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+function _resizeImageToDataUrl(img, maxDim, quality){
+  let w=img.width, h=img.height;
+  if(w>=h && w>maxDim){ h=Math.round(h*maxDim/w); w=maxDim; }
+  else if(h>w && h>maxDim){ w=Math.round(w*maxDim/h); h=maxDim; }
+  const canvas=document.createElement('canvas');
+  canvas.width=w; canvas.height=h;
+  canvas.getContext('2d').drawImage(img,0,0,w,h);
+  return canvas.toDataURL('image/jpeg', quality);
+}
+async function compressImageForStorage(file){
+  if(!file || !file.type || file.type.indexOf('image/')!==0){ throw new Error('لطفاً یک فایل عکس انتخاب کنید'); }
+  const img = await _loadImageFromFile(file);
+  const attempts = [[1100,0.62],[850,0.5],[650,0.4],[500,0.32]];
+  let lastUrl=null;
+  for(const [dim,q] of attempts){
+    lastUrl = _resizeImageToDataUrl(img, dim, q);
+    if(lastUrl.length < 700000) return lastUrl; // ~500KB باینری، امن زیر سقف ۱ مگابایتی سند
+  }
+  if(lastUrl.length < 950000) return lastUrl;
+  throw new Error('حجم عکس بعد از فشرده‌سازی هنوز زیاد است؛ لطفاً با نور بهتر یا نزدیک‌تر دوباره عکس بگیرید.');
+}
 function dateLabel(d){
   const dt=new Date(d+'T00:00:00');
   const days=['یکشنبه','دوشنبه','سه‌شنبه','چهارشنبه','پنجشنبه','جمعه','شنبه'];
@@ -324,7 +367,7 @@ const App = {
   tab:'dashboard', sub:null,
   saleDraft:null, purchaseDraft:null,
   reportPeriod:'today', reportStart:null, reportEnd:null,
-  user:null, role:null, authReady:false, dataReady:false,
+  user:null, role:null, authReady:false, dataReady:false, imageViewerSrc:null, payFormOpen:false,
   _loadedParts:null, _unsubs:null,
 
   init(){
@@ -489,8 +532,17 @@ const App = {
       case 'purchase-view': html=this.renderPurchaseView(); break;
       default: html=this.renderDashboard();
     }
-    s.innerHTML = html;
+    s.innerHTML = html + this.renderImageViewer();
   },
+  renderImageViewer(){
+    if(!this.imageViewerSrc) return '';
+    return `<div class="img-viewer-overlay" onclick="App.closeImageViewer()">
+      <img src="${this.imageViewerSrc}" onclick="event.stopPropagation()">
+      <button class="img-viewer-close" onclick="App.closeImageViewer()">✕ بستن</button>
+    </div>`;
+  },
+  viewImage(src){ if(!src) return; this.imageViewerSrc=src; this.render(); },
+  closeImageViewer(){ this.imageViewerSrc=null; this.render(); },
 
   /* ---------- Computations (بدون تغییر) ---------- */
   cashBalance(){
@@ -535,7 +587,7 @@ const App = {
     const recentHtml = recent.length ? recent.map(x=>{
       if(x._type==='sale'){
         const tag = x.status==='cancelled' ? ' <span class="badge gold">باطل</span>' : '';
-        return `<div class="row-item clickable" onclick="App.viewInvoice('${x.id}')"><div class="r-left"><b>فروش ${this.invoiceNoLabel(x.invoiceNo)} — ${escapeHtml(x.customerName)}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--green)">+${fmt(x.paid)}</div></div>`;
+        return `<div class="row-item clickable" onclick="App.viewInvoice('${x.id}')"><div class="r-left"><b>فروش ${this.invoiceNoLabel(x.id)} — ${escapeHtml(x.customerName)}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--green)">+${fmt(x.paid)}</div></div>`;
       } else if(x._type==='purchase'){
         const tag = x.status==='cancelled' ? ' <span class="badge gold">باطل</span>' : '';
         return `<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><div class="r-left"><b>خرید — ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--red)">-${fmt(x.paid)}</div></div>`;
@@ -641,12 +693,9 @@ const App = {
       }
     });
 
-    const invoiceNo = (Number(this.state.settings.invoiceCounter)||0) + 1;
-    batch.update(settingsDocRef, { invoiceCounter: increment(1) });
-
     const saleId = uid();
     const newSale = {
-      id:saleId, ts:Date.now(), date, invoiceNo, customerId, customerName:customerNameFinal,
+      id:saleId, ts:Date.now(), date, customerId, customerName:customerNameFinal,
       customerPhone: custName?custPhone:'', customerAddress: custName?custAddress:'',
       items:this.saleDraft.items.map(it=>({...it,returnedQty:0})), total, totalCost, profit: total-totalCost,
       paid, remaining, note, status:'active', returns:[], originalTotal: total
@@ -663,7 +712,16 @@ const App = {
   /* ---------- Invoice view / print / whatsapp ---------- */
   viewInvoice(id){ this.viewInvoiceId=id; this.navigate('invoice'); },
   printInvoice(){ window.print(); },
-  invoiceNoLabel(n){ return '#'+String(n||0).padStart(5,'0'); },
+  // شمارهٔ فاکتور دیگر یک شمارندهٔ مشترک نیست (که در حالت آفلاین/هم‌زمان می‌توانست
+  // برای دو فاکتور مختلف یک عدد تکراری بسازد)، بلکه از ترتیب زمانی خود فاکتورها
+  // محاسبه می‌شود. چون هر فاکتور یک id یکتا دارد، هیچ‌وقت دو فاکتور شمارهٔ یکسان نمی‌گیرند،
+  // حتی اگر چند نفر هم‌زمان و آفلاین فاکتور ثبت کرده باشند.
+  saleSeqNo(saleId){
+    const sorted = [...this.state.sales].sort((a,b)=> (a.ts||0)-(b.ts||0) || (a.id<b.id?-1:1));
+    const idx = sorted.findIndex(s=>s.id===saleId);
+    return idx>=0 ? idx+1 : 0;
+  },
+  invoiceNoLabel(saleId){ return '#'+String(this.saleSeqNo(saleId)).padStart(5,'0'); },
   waPhoneDigits(phone){
     let d=(phone||'').replace(/[^0-9]/g,'');
     if(!d) return '';
@@ -680,7 +738,7 @@ const App = {
     if(s.businessPhone) lines.push('تماس: '+s.businessPhone);
     lines.push('———————————————');
     if(sale.status==='cancelled') lines.push('⚠️ این فاکتور باطل شده است');
-    lines.push('فاکتور فروش '+this.invoiceNoLabel(sale.invoiceNo));
+    lines.push('فاکتور فروش '+this.invoiceNoLabel(sale.id));
     lines.push('تاریخ: '+sale.date);
     lines.push('مشتری: '+sale.customerName);
     if(sale.customerPhone) lines.push('تماس مشتری: '+sale.customerPhone);
@@ -757,7 +815,7 @@ const App = {
         <div class="sub" style="margin-top:6px;font-weight:700;color:var(--ink);">فاکتور فروش${cancelled?' — باطل شده':''}</div>
       </div>
       <div class="inv-meta">
-        <span>شماره فاکتور: <b class="num">${this.invoiceNoLabel(sale.invoiceNo)}</b></span>
+        <span>شماره فاکتور: <b class="num">${this.invoiceNoLabel(sale.id)}</b></span>
         <span>تاریخ: <b class="num">${sale.date}</b></span>
       </div>
       <div class="inv-cust">
@@ -874,7 +932,7 @@ const App = {
   },
   removePurchaseItem(idx){ this.purchaseDraft.items.splice(idx,1); this.render(); },
 
-  submitPurchase(){
+  async submitPurchase(){
     if(this.purchaseDraft.items.length===0){ alert('حداقل یک محصول اضافه کنید'); return; }
     const total = this.purchaseDraft.items.reduce((a,i)=>a+i.qty*i.unitCost,0);
     let paid = parseFloat(document.getElementById('purchase-paid').value);
@@ -918,12 +976,21 @@ const App = {
       }
     });
 
+    const photoInput = document.getElementById('purchase-bill-photo');
+    const photoFile = photoInput && photoInput.files[0];
+    let billImage = null;
+    if(photoFile){
+      try{ billImage = await compressImageForStorage(photoFile); }
+      catch(err){ alert(err.message||'خطا در پردازش عکس بل'); return; }
+    }
+
     const purchaseId = uid();
     const newPurchase = {
       id:purchaseId, ts:Date.now(), date, supplierId, supplierName:supplierNameFinal,
       items:this.purchaseDraft.items.map(it=>({...it,returnedQty:0})), total, paid, remaining, note,
       status:'active', returns:[], originalTotal: total
     };
+    if(billImage) newPurchase.billImage = billImage;
     batch.set(doc(cols.purchases, purchaseId), newPurchase);
 
     batch.commit().catch(e=>{ console.error('submitPurchase error',e); alert('خطا در ذخیرهٔ بل خرید؛ اتصال اینترنت را بررسی کنید.'); });
@@ -972,6 +1039,9 @@ const App = {
       <div class="field-note">اگر مبلغ پرداختی کمتر از مجموع باشد، باقیمانده به عنوان بدهی شما به آن شرکت/عمده‌فروش ثبت می‌شود.</div>
       <label>یادداشت (اختیاری)</label>
       <input id="purchase-note" placeholder="مثلاً فاکتور شماره ۱۲">
+      <label>📷 عکس بل/فاکتور شرکت (اختیاری)</label>
+      <input id="purchase-bill-photo" type="file" accept="image/*" capture="environment">
+      <div class="field-note">اگر از یک شرکت یا عمده‌فروش خرید کردید، عکس بل آن‌ها را اینجا ضمیمه کنید تا همیشه همراه این خرید ذخیره و قابل مشاهده باشد.</div>
       <button class="btn btn-primary" onclick="App.submitPurchase()">ثبت خرید</button>
     </div>
     `;
@@ -1015,6 +1085,13 @@ const App = {
       <button class="btn btn-outline" onclick="App.purchaseAddItem('${pur.id}')">➕ افزودن قلم جدید</button>
       <button class="btn btn-danger" onclick="App.cancelPurchase('${pur.id}')">❌ کنسل کامل بل خرید</button>
     </div>`:''}
+    <div class="card no-print">
+      <b style="font-size:13.5px;">📷 عکس بل/فاکتور شرکت</b>
+      ${pur.billImage
+        ? `<img src="${pur.billImage}" class="bill-thumb" style="margin-top:10px;" onclick="App.viewPurchaseBillImage('${pur.id}')">`
+        : `<div class="field-note">هنوز عکسی برای این خرید ثبت نشده.</div>`}
+      <button class="btn btn-outline" style="margin-top:10px;" onclick="App.addPurchaseBillPhoto('${pur.id}')">📷 ${pur.billImage?'تغییر عکس بل':'افزودن عکس بل شرکت'}</button>
+    </div>
     <div id="invoice-print" class="card">
       ${cancelled?`<div class="badge red num" style="font-size:14px;margin-bottom:8px;">❌ این بل خرید باطل شده است</div>`:''}
       <div class="inv-head">
@@ -1299,6 +1376,22 @@ const App = {
     }
     batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
+  viewPurchaseBillImage(purchaseId){
+    const pur=this.state.purchases.find(x=>x.id===purchaseId);
+    if(pur && pur.billImage) this.viewImage(pur.billImage);
+  },
+  addPurchaseBillPhoto(purchaseId){
+    const input=document.createElement('input');
+    input.type='file'; input.accept='image/*'; input.capture='environment';
+    input.onchange=async ()=>{
+      const file=input.files[0]; if(!file) return;
+      try{
+        const dataUrl=await compressImageForStorage(file);
+        await updateDoc(doc(cols.purchases, purchaseId), { billImage: dataUrl });
+      }catch(err){ alert(err.message||'خطا در ذخیرهٔ عکس'); }
+    };
+    input.click();
+  },
   purchaseAddItem(purchaseId){
     const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
     if(pur.status==='cancelled'){ alert('این بل باطل شده است.'); return; }
@@ -1375,8 +1468,8 @@ const App = {
     <div class="card">${rows}</div>
     `;
   },
-  openParty(type,id){ this.sub=type; this.detailId=id; this.render(); },
-  closeParty(){ this.detailId=null; this.render(); },
+  openParty(type,id){ this.sub=type; this.detailId=id; this.payFormOpen=false; this.render(); },
+  closeParty(){ this.detailId=null; this.payFormOpen=false; this.render(); },
   renderPartyDetail(){
     const type=this.sub;
     const arr = type==='customers' ? this.state.customers : this.state.suppliers;
@@ -1384,18 +1477,21 @@ const App = {
     if(!p){ this.detailId=null; return this.renderCustomers(); }
     let history=[];
     if(type==='customers'){
-      history = this.state.sales.filter(s=>s.customerId===p.id).map(s=>({date:s.date,ts:s.ts,label:'فروش '+this.invoiceNoLabel(s.invoiceNo),amount:s.total,paid:s.paid,saleId:s.id,status:s.status}));
+      history = this.state.sales.filter(s=>s.customerId===p.id).map(s=>({date:s.date,ts:s.ts,label:'فروش '+this.invoiceNoLabel(s.id),amount:s.total,paid:s.paid,saleId:s.id,status:s.status}));
     } else {
       history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید',amount:s.total,paid:s.paid,purchaseId:s.id,status:s.status}));
     }
-    const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:x.type==='receive'?'دریافت پول':'پرداخت پول',amount:x.amount,paid:null,isPayment:true}));
+    const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:x.type==='receive'?'دریافت پول':'پرداخت پول',amount:x.amount,paid:null,isPayment:true,paymentId:x.id,receiptImage:x.receiptImage||null}));
     const openings = (this.state.openingEntries||[]).filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:'📋 بدهی افتتاحیه (قبل از سیستم)',amount:x.amount,isOpening:true}));
     history = [...history,...pays,...openings].sort((a,b)=>(b.ts||0)-(a.ts||0));
 
     const rows = history.length ? history.map(h=>{
       if(h.isPayment){
         const color = (type==='customers') ? 'var(--green)' : 'var(--red)';
-        return `<div class="row-item"><div class="r-left"><b>${h.label}</b><span class="sub">${h.date}</span></div><div class="r-right num" style="color:${color}">${fmt(h.amount)}</div></div>`;
+        const photoBtn = h.receiptImage
+          ? `<span onclick="App.viewPaymentReceipt('${h.paymentId}')" style="cursor:pointer;margin-inline-start:6px;" title="مشاهده عکس رسید">🧾</span>`
+          : `<span onclick="App.addPaymentReceiptPhoto('${h.paymentId}')" style="cursor:pointer;margin-inline-start:6px;opacity:.55;" title="افزودن عکس رسید">📷</span>`;
+        return `<div class="row-item"><div class="r-left"><b>${h.label}</b>${photoBtn}<span class="sub">${h.date}</span></div><div class="r-right num" style="color:${color}">${fmt(h.amount)}</div></div>`;
       }
       if(h.isOpening){
         return `<div class="row-item"><div class="r-left"><b>${h.label}</b><span class="sub">${h.date}</span></div><div class="r-right num" style="color:var(--gold-d)">${fmt(h.amount)}</div></div>`;
@@ -1422,23 +1518,71 @@ const App = {
       </div>
       <button class="btn btn-green" onclick="App.recordPartyPayment('${type}','${p.id}')">${actionLabel}</button>
       <button class="btn btn-outline" onclick="App.setOpeningBalance('${type}','${p.id}')">📋 ثبت/اصلاح بدهی افتتاحیه (قبل از سیستم)</button>
+      ${this.payFormOpen ? `
+      <div class="card" style="margin-top:12px;padding:0;box-shadow:none;border:1px dashed var(--border);">
+        <div style="padding:12px;">
+          <label>${type==='customers'?'مبلغ دریافتی از مشتری':'مبلغ پرداختی به شرکت/عمده‌فروش'}</label>
+          <input id="pay-amount" type="number" inputmode="decimal" placeholder="0">
+          <label>تاریخ</label>
+          <input id="pay-date" type="date" value="${todayISO()}">
+          <label>📷 عکس رسید ${type==='suppliers'?'(پیشنهاد می‌شود ضمیمه کنید)':'(اختیاری)'}</label>
+          <input id="pay-photo" type="file" accept="image/*" capture="environment">
+          <div class="grid2" style="margin-top:10px;">
+            <button class="btn btn-outline" style="margin-top:0;" onclick="App.cancelPartyPaymentForm()">انصراف</button>
+            <button class="btn btn-primary" style="margin-top:0;" onclick="App.submitPartyPayment('${type}','${p.id}')">ثبت</button>
+          </div>
+        </div>
+      </div>` : ''}
     </div>
     <h2 class="section-title">سابقهٔ معاملات (${history.length})</h2>
     <div class="card">${rows}</div>
     `;
   },
   recordPartyPayment(type,id){
-    const amt = parseFloat(prompt(type==='customers'?'مبلغ دریافتی از مشتری را بنویسید:':'مبلغ پرداختی به عمده‌فروش را بنویسید:'));
-    if(!amt || amt<=0) return;
+    this.payFormOpen = true;
+    this.render();
+  },
+  cancelPartyPaymentForm(){ this.payFormOpen=false; this.render(); },
+  async submitPartyPayment(type,id){
+    const amt = parseFloat(document.getElementById('pay-amount').value);
+    if(!amt || amt<=0){ alert('مبلغ را درست بنویسید'); return; }
+    const date = document.getElementById('pay-date').value || todayISO();
     const arr = type==='customers' ? this.state.customers : this.state.suppliers;
     const p = arr.find(x=>x.id===id);
     if(!p) return;
+    const photoInput = document.getElementById('pay-photo');
+    const photoFile = photoInput && photoInput.files[0];
+    let receiptImage = null;
+    if(photoFile){
+      try{ receiptImage = await compressImageForStorage(photoFile); }
+      catch(err){ alert(err.message||'خطا در پردازش عکس رسید'); return; }
+    }
     const colName = type==='customers' ? 'customers' : 'suppliers';
     const batch=writeBatch(db);
     batch.update(doc(cols[colName], id), { balance: increment(-amt) });
     const paymentId=uid();
-    batch.set(doc(cols.payments, paymentId), {id:paymentId, ts:Date.now(), date:todayISO(), type: type==='customers'?'receive':'pay', partyType:type==='customers'?'customer':'supplier', partyId:id, partyName:p.name, amount:amt});
+    const paymentDoc = {id:paymentId, ts:Date.now(), date, type: type==='customers'?'receive':'pay', partyType:type==='customers'?'customer':'supplier', partyId:id, partyName:p.name, amount:amt};
+    if(receiptImage) paymentDoc.receiptImage = receiptImage;
+    batch.set(doc(cols.payments, paymentId), paymentDoc);
     batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
+    this.payFormOpen = false;
+    this.render();
+  },
+  viewPaymentReceipt(paymentId){
+    const pay = this.state.payments.find(x=>x.id===paymentId);
+    if(pay && pay.receiptImage) this.viewImage(pay.receiptImage);
+  },
+  addPaymentReceiptPhoto(paymentId){
+    const input=document.createElement('input');
+    input.type='file'; input.accept='image/*'; input.capture='environment';
+    input.onchange=async ()=>{
+      const file=input.files[0]; if(!file) return;
+      try{
+        const dataUrl=await compressImageForStorage(file);
+        await updateDoc(doc(cols.payments, paymentId), { receiptImage: dataUrl });
+      }catch(err){ alert(err.message||'خطا در ذخیرهٔ عکس'); }
+    };
+    input.click();
   },
   addPartyManual(type){
     const name=(prompt(type==='customers'?'نام مشتری جدید:':'نام شرکت/عمده‌فروش جدید:')||'').trim();
