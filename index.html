@@ -226,10 +226,12 @@ function sum(arr,key){ return arr.reduce((a,b)=>a+(Number(b[key])||0),0); }
 function migrateState(state){
   if(!state.suppliers) state.suppliers=[];
   if(!state.payments) state.payments=[];
+  if(!state.openingEntries) state.openingEntries=[];
   if(state.settings.invoiceCounter===undefined) state.settings.invoiceCounter=0;
   if(state.settings.businessPhone===undefined) state.settings.businessPhone='';
   if(state.settings.businessAddress===undefined) state.settings.businessAddress='';
   if(state.settings.logoEmoji===undefined) state.settings.logoEmoji='🏪';
+  if(state.settings.openingNote===undefined) state.settings.openingNote='';
   (state.sales||[]).forEach(s=>{
     if(!s.status) s.status='active';
     if(!s.returns) s.returns=[];
@@ -261,9 +263,9 @@ function startOfMonth(d){ return d.slice(0,7)+'-01'; }
 function defaultState(){
   return {
     settings:{ businessName:'فروشگاه صانع', currency:'افغانی', openingCash:0,
-      invoiceCounter:0, businessPhone:'', businessAddress:'', logoEmoji:'🏪' },
+      invoiceCounter:0, businessPhone:'', businessAddress:'', logoEmoji:'🏪', openingNote:'' },
     products:[], customers:[], suppliers:[],
-    sales:[], purchases:[], expenses:[], payments:[]
+    sales:[], purchases:[], expenses:[], payments:[], openingEntries:[]
   };
 }
 
@@ -1193,12 +1195,16 @@ const App = {
       history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید',amount:s.total,paid:s.paid,purchaseId:s.id,status:s.status}));
     }
     const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:x.type==='receive'?'دریافت پول':'پرداخت پول',amount:x.amount,paid:null,isPayment:true}));
-    history = [...history,...pays].sort((a,b)=>(b.ts||0)-(a.ts||0));
+    const openings = (this.state.openingEntries||[]).filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:'📋 بدهی افتتاحیه (قبل از سیستم)',amount:x.amount,isOpening:true}));
+    history = [...history,...pays,...openings].sort((a,b)=>(b.ts||0)-(a.ts||0));
 
     const rows = history.length ? history.map(h=>{
       if(h.isPayment){
         const color = (type==='customers') ? 'var(--green)' : 'var(--red)';
         return `<div class="row-item"><div class="r-left"><b>${h.label}</b><span class="sub">${h.date}</span></div><div class="r-right num" style="color:${color}">${fmt(h.amount)}</div></div>`;
+      }
+      if(h.isOpening){
+        return `<div class="row-item"><div class="r-left"><b>${h.label}</b><span class="sub">${h.date}</span></div><div class="r-right num" style="color:var(--gold-d)">${fmt(h.amount)}</div></div>`;
       }
       const clickAttr = h.saleId ? ` onclick="App.viewInvoice('${h.saleId}')" style="cursor:pointer;"` : (h.purchaseId ? ` onclick="App.viewPurchase('${h.purchaseId}')" style="cursor:pointer;"` : '');
       const cancelledTag = h.status==='cancelled' ? ' <span class="badge gold">باطل شده</span>' : '';
@@ -1221,6 +1227,7 @@ const App = {
         <button class="btn btn-danger" style="margin-top:0;" onclick="App.deleteParty('${type}','${p.id}')">🗑️ حذف</button>
       </div>
       <button class="btn btn-green" onclick="App.recordPartyPayment('${type}','${p.id}')">${actionLabel}</button>
+      <button class="btn btn-outline" onclick="App.setOpeningBalance('${type}','${p.id}')">📋 ثبت/اصلاح بدهی افتتاحیه (قبل از سیستم)</button>
     </div>
     <h2 class="section-title">سابقهٔ معاملات (${history.length})</h2>
     <div class="card">${rows}</div>
@@ -1245,9 +1252,33 @@ const App = {
     if(arr.find(x=>x.name===name)){ alert('این نام قبلاً ثبت شده است.'); return; }
     const phone=(prompt('شماره تماس (اختیاری):')||'').trim();
     const address=(prompt('آدرس (اختیاری):')||'').trim();
-    const p={id:uid(), name, phone, address, balance:0};
+    const openLabel = type==='customers'
+      ? 'اگر این مشتری از قبل به شما بدهکار است، مبلغش را بنویسید'
+      : 'اگر شما از قبل (قبل از استفاده از این سیستم) به این شرکت/عمده‌فروش بدهکار هستید، مبلغش را بنویسید';
+    const openStr = prompt(openLabel+' (در غیر این صورت 0 بگذارید):','0');
+    let openAmt = parseFloat(openStr); if(isNaN(openAmt)) openAmt=0;
+    const p={id:uid(), name, phone, address, balance:openAmt};
     arr.push(p);
+    if(openAmt){
+      this.state.openingEntries.push({id:uid(), ts:Date.now(), date:todayISO(), partyType:type, partyId:p.id, partyName:p.name, amount:openAmt, note:'بدهی افتتاحیه (قبل از این سیستم)'});
+    }
     this.save();
+    this.render();
+  },
+  setOpeningBalance(type,id){
+    const arr = type==='customers' ? this.state.customers : this.state.suppliers;
+    const p = arr.find(x=>x.id===id); if(!p) return;
+    const label = type==='customers'
+      ? 'مبلغی که این مشتری از قبل (قبل از این سیستم) به شما بدهکار است'
+      : 'مبلغی که شما از قبل (قبل از این سیستم) به این شرکت/عمده‌فروش بدهکار هستید';
+    const amtStr = prompt(label+':', '0');
+    if(amtStr===null) return;
+    const amt = parseFloat(amtStr);
+    if(!amt){ alert('مبلغ نامعتبر یا صفر است.'); return; }
+    p.balance += amt;
+    this.state.openingEntries.push({id:uid(), ts:Date.now(), date:todayISO(), partyType:type, partyId:id, partyName:p.name, amount:amt, note:'بدهی افتتاحیه (قبل از این سیستم)'});
+    this.save();
+    alert('بدهی افتتاحیه ثبت شد ✅');
     this.render();
   },
   editParty(type,id){
@@ -1486,6 +1517,7 @@ const App = {
     this.state.settings.logoEmoji=(document.getElementById('set-logo').value||'').trim()||'🏪';
     this.state.settings.businessPhone=(document.getElementById('set-phone').value||'').trim();
     this.state.settings.businessAddress=(document.getElementById('set-address').value||'').trim();
+    this.state.settings.openingNote=(document.getElementById('set-opening-note').value||'').trim();
     this.save();
     document.getElementById('biz-name').textContent=this.state.settings.businessName;
     alert('تنظیمات ذخیره شد ✅');
@@ -1549,6 +1581,9 @@ const App = {
       <input id="set-phone" value="${escapeHtml(s.businessPhone||'')}" placeholder="07xxxxxxxx">
       <label>آدرس فروشگاه</label>
       <input id="set-address" value="${escapeHtml(s.businessAddress||'')}" placeholder="مثلاً کابل، شهرنو">
+      <hr class="divider">
+      <label>یادداشت افتتاحیه (اختیاری — فقط یادداشت شماست، در هیچ محاسبه‌ای اثر ندارد)</label>
+      <textarea id="set-opening-note" placeholder="مثلاً: قبل از استفاده از این سیستم تقریباً ۵۰۰,۰۰۰ افغانی مصرف شده بود که در حساب نقد فعلی از قبل لحاظ شده است">${escapeHtml(s.openingNote||'')}</textarea>
       <button class="btn btn-primary" onclick="App.saveSettings()">ذخیره تنظیمات</button>
     </div>
     <h2 class="section-title">پشتیبان‌گیری و سینک دستی</h2>
