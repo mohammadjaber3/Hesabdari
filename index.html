@@ -289,7 +289,7 @@ function startOfMonth(d){ return d.slice(0,7)+'-01'; }
 
 function defaultSettings(){
   return { businessName:'فروشگاه صانع', currency:'افغانی', openingCash:0,
-    invoiceCounter:0, businessPhone:'', businessAddress:'', logoEmoji:'🏪', openingNote:'' };
+    invoiceCounter:0, businessPhone:'', businessAddress:'', logoEmoji:'🏪', openingNote:'', usdRate:0 };
 }
 function migrateSettings(s){
   s = s || {};
@@ -301,6 +301,7 @@ function migrateSettings(s){
   if(s.businessAddress===undefined) s.businessAddress='';
   if(s.logoEmoji===undefined) s.logoEmoji='🏪';
   if(s.openingNote===undefined) s.openingNote='';
+  if(s.usdRate===undefined) s.usdRate=0;
   return s;
 }
 function migrateRecordArrays(sales, purchases){
@@ -314,6 +315,8 @@ function migrateRecordArrays(sales, purchases){
     if(!p.status) p.status='active';
     if(!p.returns) p.returns=[];
     if(p.originalTotal===undefined) p.originalTotal=p.total;
+    if(!p.currency) p.currency='AFN';
+    if(p.rateAtPurchase===undefined) p.rateAtPurchase=0;
     (p.items||[]).forEach(it=>{ if(it.returnedQty===undefined) it.returnedQty=0; });
   });
 }
@@ -499,7 +502,7 @@ const App = {
     const addrEl=document.getElementById('sale-customer-address');
     if(c){ phoneEl.value=c.phone||''; addrEl.value=c.address||''; }
   },
-  resetPurchaseDraft(){ this.purchaseDraft = { items:[] }; },
+  resetPurchaseDraft(){ this.purchaseDraft = { items:[], currency:'AFN' }; },
 
   navigate(tab,sub){ this.tab=tab; this.sub=sub||null; this.renderNav(); this.render(); window.scrollTo(0,0); },
 
@@ -550,16 +553,35 @@ const App = {
     let cash = Number(s.settings.openingCash)||0;
     cash += sum(s.sales,'paid');
     cash += sum(s.payments.filter(p=>p.type==='receive'),'amount');
-    cash -= sum(s.purchases,'paid');
-    cash -= sum(s.payments.filter(p=>p.type==='pay'),'amount');
+    s.purchases.forEach(p=>{
+      const paidAFN = p.currency==='USD' ? (Number(p.paid)||0)*((Number(p.rateAtPurchase)||this.usdRate())||0) : (Number(p.paid)||0);
+      cash -= paidAFN;
+    });
+    s.payments.filter(p=>p.type==='pay').forEach(p=>{
+      const amtAFN = p.currency==='USD' ? (Number(p.amount)||0)*((Number(p.rate)||this.usdRate())||0) : (Number(p.amount)||0);
+      cash -= amtAFN;
+    });
     cash -= sum(s.expenses,'amount');
     return cash;
   },
   inventoryValue(){
     return this.state.products.reduce((a,p)=>a+(p.stock*p.avgCost),0);
   },
-  totalReceivable(){ return this.state.customers.reduce((a,c)=>a+Math.max(0,c.balance),0); },
-  totalPayable(){ return this.state.suppliers.reduce((a,c)=>a+Math.max(0,c.balance),0); },
+  totalReceivable(){ return this.state.customers.reduce((a,c)=>a+Math.max(0,c.balance||0),0); },
+  totalPayable(){ return this.state.suppliers.reduce((a,c)=>a+Math.max(0,c.balance||0),0); },
+  totalPayableUSD(){ return this.state.suppliers.reduce((a,c)=>a+Math.max(0,c.balanceUSD||0),0); },
+  usdRate(){ return Number(this.state.settings.usdRate)||0; },
+  totalPayableUSDInAFN(){ return this.totalPayableUSD() * this.usdRate(); },
+  totalPayableCombinedAFN(){ return this.totalPayable() + this.totalPayableUSDInAFN(); },
+  curLabel(code){ return code==='USD' ? 'دالر' : this.state.settings.currency; },
+  quickSetUsdRate(){
+    const cur = this.state.settings.usdRate || '';
+    const val = prompt('نرخ فعلی دالر را وارد کنید (۱ دالر = چند افغانی؟):', cur||'');
+    if(val===null) return;
+    const rate = parseFloat(val);
+    if(!rate || rate<=0){ alert('نرخ نامعتبر است.'); return; }
+    updateDoc(settingsDocRef, {usdRate:rate}).then(()=>{ this.render(); }).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
+  },
   salesInRange(start,end){
     return this.state.sales.filter(x=>x.date>=start && x.date<=end);
   },
@@ -589,8 +611,8 @@ const App = {
         const tag = x.status==='cancelled' ? ' <span class="badge gold">باطل</span>' : '';
         return `<div class="row-item clickable" onclick="App.viewInvoice('${x.id}')"><div class="r-left"><b>فروش ${this.invoiceNoLabel(x.id)} — ${escapeHtml(x.customerName)}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--green)">+${fmt(x.paid)}</div></div>`;
       } else if(x._type==='purchase'){
-        const tag = x.status==='cancelled' ? ' <span class="badge gold">باطل</span>' : '';
-        return `<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><div class="r-left"><b>خرید — ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--red)">-${fmt(x.paid)}</div></div>`;
+        const tag = x.status==='cancelled' ? ' <span class="badge gold">باطل</span>' : (x.currency==='USD' ? ' <span class="badge gold">دالر</span>' : '');
+        return `<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><div class="r-left"><b>خرید — ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--red)">-${fmt(x.paid)}${x.currency==='USD'?' $':''}</div></div>`;
       } else {
         return `<div class="row-item"><div class="r-left"><b>مصرف — ${escapeHtml(x.category)}</b><span class="sub">${x.date}${x.note?(' · '+escapeHtml(x.note)):''}</span></div><div class="r-right num" style="color:var(--red)">-${fmt(x.amount)}</div></div>`;
       }
@@ -606,7 +628,10 @@ const App = {
       <div class="chip"><div class="t">فروش امروز</div><div class="v num">${fmt(sum(todaySales,'total'))}</div></div>
       <div class="chip"><div class="t">مصرف امروز</div><div class="v num">${fmt(sum(todayExpenses,'amount'))}</div></div>
       <div class="chip"><div class="t">طلب از مشتریان</div><div class="v num">${fmt(this.totalReceivable())}</div></div>
-      <div class="chip"><div class="t">قرض از عمده‌فروش</div><div class="v num">${fmt(this.totalPayable())}</div></div>
+      <div class="chip"><div class="t">قرض از عمده‌فروش (${cur})</div><div class="v num">${fmt(this.totalPayable())}</div></div>
+      ${this.totalPayableUSD()!==0?`<div class="chip"><div class="t">قرض از عمده‌فروش (دالر)</div><div class="v num">$${fmt(this.totalPayableUSD())}</div></div>`:''}
+      ${this.totalPayableUSD()!==0 && this.usdRate()>0?`<div class="chip"><div class="t">مجموع کل قرض به ${cur}</div><div class="v num">${fmt(this.totalPayableCombinedAFN())}</div></div>`:''}
+      <div class="chip" onclick="App.quickSetUsdRate()" style="cursor:pointer;"><div class="t">✏️ نرخ دالر</div><div class="v num">${this.usdRate()>0?fmt(this.usdRate()):'تنظیم کنید'}</div></div>
     </div>
     <div class="quick-actions">
       <div class="qa-btn" onclick="App.navigate('sale')"><span class="ic">🧾</span>فروش جدید</div>
@@ -939,6 +964,13 @@ const App = {
     if(isNaN(paid)) paid=0;
     if(paid>total) paid=total;
     if(paid<0) paid=0;
+    const currency = (document.getElementById('purchase-currency') && document.getElementById('purchase-currency').value==='USD') ? 'USD' : 'AFN';
+    let rateAtPurchase = 1;
+    if(currency==='USD'){
+      rateAtPurchase = this.usdRate();
+      if(rateAtPurchase<=0){ alert('لطفاً ابتدا نرخ فعلی دالر را وارد کنید (دکمهٔ «نرخ دالر» بالای همین فرم).'); return; }
+    }
+    const balField = currency==='USD' ? 'balanceUSD' : 'balance';
     const supName = (document.getElementById('purchase-supplier-name').value||'').trim();
     const date = document.getElementById('purchase-date').value || todayISO();
     const note = (document.getElementById('purchase-note').value||'').trim();
@@ -950,10 +982,10 @@ const App = {
       let supplier=this.state.suppliers.find(c=>c.name===supName);
       if(!supplier){
         supplierId=uid(); supplierNameFinal=supName;
-        batch.set(doc(cols.suppliers,supplierId), {id:supplierId,name:supName,phone:'',address:'',balance:remaining});
+        batch.set(doc(cols.suppliers,supplierId), {id:supplierId,name:supName,phone:'',address:'',balance:currency==='AFN'?remaining:0,balanceUSD:currency==='USD'?remaining:0});
       } else {
         supplierId=supplier.id; supplierNameFinal=supplier.name;
-        batch.update(doc(cols.suppliers,supplier.id), { balance: increment(remaining) });
+        batch.update(doc(cols.suppliers,supplier.id), { [balField]: increment(remaining) });
       }
     } else if(remaining>0.001){
       alert('برای خرید نسیه باید نام عمده‌فروش/شرکت را بنویسید'); return;
@@ -961,16 +993,17 @@ const App = {
 
     const draftProducts = this.purchaseDraft._draftProducts || [];
     this.purchaseDraft.items.forEach(it=>{
+      const unitCostAFN = currency==='USD' ? it.unitCost*rateAtPurchase : it.unitCost;
       const draftP = draftProducts.find(dp=>dp.id===it.productId);
       if(draftP){
-        batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, stock:it.qty, avgCost:it.unitCost, sellPrice:Math.round(it.unitCost*1.15)});
+        batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, stock:it.qty, avgCost:unitCostAFN, sellPrice:Math.round(unitCostAFN*1.15)});
       } else {
         const p = this.state.products.find(pp=>pp.id===it.productId);
         if(p){
           const newStock = p.stock + it.qty;
-          const newAvgCost = newStock>0 ? ((p.stock*p.avgCost)+(it.qty*it.unitCost))/newStock : it.unitCost;
+          const newAvgCost = newStock>0 ? ((p.stock*p.avgCost)+(it.qty*unitCostAFN))/newStock : unitCostAFN;
           const fields = { stock: increment(it.qty), avgCost: newAvgCost };
-          if(!p.sellPrice) fields.sellPrice = Math.round(it.unitCost*1.15);
+          if(!p.sellPrice) fields.sellPrice = Math.round(unitCostAFN*1.15);
           batch.update(doc(cols.products, it.productId), fields);
         }
       }
@@ -986,7 +1019,7 @@ const App = {
 
     const purchaseId = uid();
     const newPurchase = {
-      id:purchaseId, ts:Date.now(), date, supplierId, supplierName:supplierNameFinal,
+      id:purchaseId, ts:Date.now(), date, supplierId, supplierName:supplierNameFinal, currency, rateAtPurchase,
       items:this.purchaseDraft.items.map(it=>({...it,returnedQty:0})), total, paid, remaining, note,
       status:'active', returns:[], originalTotal: total
     };
@@ -1003,6 +1036,8 @@ const App = {
   renderPurchase(){
     const items = this.purchaseDraft.items;
     const total = items.reduce((a,i)=>a+i.qty*i.unitCost,0);
+    const cur = this.purchaseDraft.currency || 'AFN';
+    const rate = this.usdRate();
     const itemsHtml = items.length ? items.map((it,idx)=>
       `<div class="item-row"><span>${escapeHtml(it.name)} — ${it.qty} ${escapeHtml(it.unit)} × <span class="num">${fmt(it.unitCost)}</span></span>
       <span style="display:flex;align-items:center;gap:8px;"><b class="num">${fmt(it.qty*it.unitCost)}</b><span class="x" onclick="App.removePurchaseItem(${idx})">✕</span></span></div>`
@@ -1011,6 +1046,19 @@ const App = {
     return `
     <h2 class="section-title">📦 ثبت خرید جدید</h2>
     <div class="card">
+      <label>ارز این معامله</label>
+      <select id="purchase-currency" onchange="App.purchaseDraft.currency=this.value; App.render();">
+        <option value="AFN" ${cur==='AFN'?'selected':''}>${this.state.settings.currency} (افغانی)</option>
+        <option value="USD" ${cur==='USD'?'selected':''}>دالر</option>
+      </select>
+      ${cur==='USD'?`
+      <div class="row-item" style="padding:10px 0;">
+        <div class="r-left"><b>نرخ فعلی دالر</b><span class="sub">${rate>0?('۱ دالر = '+fmt(rate)+' '+this.state.settings.currency):'هنوز تنظیم نشده'}</span></div>
+        <div class="r-right"><button class="btn btn-outline" style="margin-top:0;padding:8px 14px;" onclick="App.quickSetUsdRate()">✏️ نرخ دالر</button></div>
+      </div>
+      ${rate>0 && total>0?`<div class="field-note">معادل مجموع فاکتور به ${this.state.settings.currency} (به نرخ امروز): <b class="num">${fmt(total*rate)}</b></div>`:''}
+      <div class="field-note">قیمت میانگین و فروش کالاها خودکار بر اساس همین نرخ به ${this.state.settings.currency} محاسبه و ذخیره می‌شود.</div>
+      `:''}
       <label>محصول</label>
       <select id="pp-product" onchange="document.getElementById('pp-new-fields').style.display=this.value==='__new__'?'block':'none'">${this.productOptions()}</select>
       <div id="pp-new-fields" style="display:none;">
@@ -1021,22 +1069,22 @@ const App = {
       </div>
       <div class="grid2">
         <div><label>تعداد</label><input id="pp-qty" type="number" inputmode="decimal" placeholder="0"></div>
-        <div><label>قیمت خرید هر واحد</label><input id="pp-cost" type="number" inputmode="decimal" placeholder="0"></div>
+        <div><label>قیمت خرید هر واحد (${this.curLabel(cur)})</label><input id="pp-cost" type="number" inputmode="decimal" placeholder="0"></div>
       </div>
       <button class="btn btn-outline" onclick="App.addPurchaseItem()">+ افزودن به فاکتور</button>
       <hr class="divider">
       ${itemsHtml}
-      <div class="total-line"><span>مجموع فاکتور</span><span class="num">${fmt(total)} ${this.state.settings.currency}</span></div>
+      <div class="total-line"><span>مجموع فاکتور</span><span class="num">${fmt(total)} ${this.curLabel(cur)}</span></div>
 
       <label>نام شرکت / عمده‌فروش (خالی = خرید نقدی)</label>
       <input id="purchase-supplier-name" list="suppliers-list" placeholder="مثلاً شرکت البرز">
       <datalist id="suppliers-list">${this.state.suppliers.map(c=>`<option value="${escapeHtml(c.name)}">`).join('')}</datalist>
 
       <div class="grid2">
-        <div><label>مبلغ پرداخت‌شده (نقد)</label><input id="purchase-paid" type="number" inputmode="decimal" value="${total?Math.round(total):''}"></div>
+        <div><label>مبلغ پرداخت‌شده (نقد، ${this.curLabel(cur)})</label><input id="purchase-paid" type="number" inputmode="decimal" value="${total?Math.round(total):''}"></div>
         <div><label>تاریخ</label><input id="purchase-date" type="date" value="${todayISO()}"></div>
       </div>
-      <div class="field-note">اگر مبلغ پرداختی کمتر از مجموع باشد، باقیمانده به عنوان بدهی شما به آن شرکت/عمده‌فروش ثبت می‌شود.</div>
+      <div class="field-note">اگر مبلغ پرداختی کمتر از مجموع باشد، باقیمانده به عنوان بدهی شما به آن شرکت/عمده‌فروش به ${this.curLabel(cur)} ثبت می‌شود.</div>
       <label>یادداشت (اختیاری)</label>
       <input id="purchase-note" placeholder="مثلاً فاکتور شماره ۱۲">
       <label>📷 عکس بل/فاکتور شرکت (اختیاری)</label>
@@ -1055,6 +1103,7 @@ const App = {
     }
     const s=this.state.settings;
     const cancelled = pur.status==='cancelled';
+    const curLbl = this.curLabel(pur.currency);
     const itemsHtml = pur.items.map((it,idx)=>{
       const returned = it.returnedQty||0;
       return `
@@ -1094,6 +1143,7 @@ const App = {
     </div>
     <div id="invoice-print" class="card">
       ${cancelled?`<div class="badge red num" style="font-size:14px;margin-bottom:8px;">❌ این بل خرید باطل شده است</div>`:''}
+      ${!cancelled && pur.currency==='USD'?`<div class="badge gold" style="font-size:13px;margin-bottom:8px;">💵 این بل به دالر ثبت شده</div>`:''}
       <div class="inv-head">
         <div class="logo">${s.logoEmoji||'🏪'}</div>
         <div class="biz">${escapeHtml(s.businessName)}</div>
@@ -1110,10 +1160,12 @@ const App = {
         <tbody>${itemsHtml}</tbody>
       </table>
       <div class="inv-totals">
-        ${pur.originalTotal!==undefined && Math.abs(pur.originalTotal-pur.total)>0.5?`<div class="row-item"><div class="r-left">مجموع اولیهٔ بل</div><div class="r-right num">${fmt(pur.originalTotal)} ${s.currency}</div></div>`:''}
-        <div class="row-item"><div class="r-left">مجموع فعلی بل</div><div class="r-right num">${fmt(pur.total)} ${s.currency}</div></div>
-        <div class="row-item"><div class="r-left">پرداخت‌شده</div><div class="r-right num" style="color:var(--green)">${fmt(pur.paid)} ${s.currency}</div></div>
-        <div class="row-item"><div class="r-left"><b>${pur.remaining>0.5?'باقیمانده (بدهی ما)':'وضعیت'}</b></div><div class="r-right num" style="color:${pur.remaining>0.5?'var(--red)':'var(--green)'}"><b>${cancelled?'باطل شده':(pur.remaining>0.5?fmt(pur.remaining)+' '+s.currency:'تسویه‌شده ✅')}</b></div></div>
+        ${pur.currency==='USD'?`<div class="row-item"><div class="r-left">نرخ دالر در روز خرید</div><div class="r-right num">${fmt(pur.rateAtPurchase||this.usdRate()||0)} ${s.currency}</div></div>`:''}
+        ${pur.originalTotal!==undefined && Math.abs(pur.originalTotal-pur.total)>0.5?`<div class="row-item"><div class="r-left">مجموع اولیهٔ بل</div><div class="r-right num">${fmt(pur.originalTotal)} ${curLbl}</div></div>`:''}
+        <div class="row-item"><div class="r-left">مجموع فعلی بل</div><div class="r-right num">${fmt(pur.total)} ${curLbl}${pur.currency==='USD'?` (≈ ${fmt(pur.total*(pur.rateAtPurchase||this.usdRate()||0))} ${s.currency})`:''}</div></div>
+        <div class="row-item"><div class="r-left">پرداخت‌شده</div><div class="r-right num" style="color:var(--green)">${fmt(pur.paid)} ${curLbl}</div></div>
+        <div class="row-item"><div class="r-left"><b>${pur.remaining>0.5?'باقیمانده (بدهی ما)':'وضعیت'}</b></div><div class="r-right num" style="color:${pur.remaining>0.5?'var(--red)':'var(--green)'}"><b>${cancelled?'باطل شده':(pur.remaining>0.5?fmt(pur.remaining)+' '+curLbl:'تسویه‌شده ✅')}</b></div></div>
+        ${!cancelled && pur.currency==='USD' && pur.remaining>0.5 && this.usdRate()>0?`<div class="row-item"><div class="r-left">معادل باقیمانده به نرخ امروز</div><div class="r-right num" style="color:var(--red)">${fmt(pur.remaining*this.usdRate())} ${s.currency}</div></div>`:''}
       </div>
       ${pur.note?`<div class="field-note">یادداشت: ${escapeHtml(pur.note)}</div>`:''}
     </div>
@@ -1303,7 +1355,8 @@ const App = {
     const batch=writeBatch(db);
     batch.update(doc(cols.purchases, pur.id), { items:newItems, returns:newReturns, total:newTotal, paid:newPaid, remaining:newTotal-newPaid });
     if(pur.supplierId && debtReduction>0){
-      batch.update(doc(cols.suppliers, pur.supplierId), { balance: increment(-debtReduction) });
+      const balField = pur.currency==='USD' ? 'balanceUSD' : 'balance';
+      batch.update(doc(cols.suppliers, pur.supplierId), { [balField]: increment(-debtReduction) });
     }
     batch.update(doc(cols.products, it.productId), { stock: increment(-qty) });
     batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
@@ -1340,7 +1393,8 @@ const App = {
     const batch=writeBatch(db);
     batch.update(doc(cols.purchases, pur.id), { items:newItems, returns:newReturns, status:'cancelled', total:runningTotal, paid:runningPaid, remaining:runningTotal-runningPaid });
     if(pur.supplierId && supplierDebtReduction>0){
-      batch.update(doc(cols.suppliers, pur.supplierId), { balance: increment(-supplierDebtReduction) });
+      const balField = pur.currency==='USD' ? 'balanceUSD' : 'balance';
+      batch.update(doc(cols.suppliers, pur.supplierId), { [balField]: increment(-supplierDebtReduction) });
     }
     Object.keys(stockDeltas).forEach(pid=>{
       batch.update(doc(cols.products, pid), { stock: increment(stockDeltas[pid]) });
@@ -1367,12 +1421,14 @@ const App = {
     const batch=writeBatch(db);
     batch.update(doc(cols.purchases, pur.id), { items:newItems, total:newTotal, originalTotal: increment(addAmount), paid:newPaid, remaining:newTotal-newPaid });
     if(p){
+      const unitCostAFN = pur.currency==='USD' ? it.unitCost*((Number(pur.rateAtPurchase)||this.usdRate())||0) : it.unitCost;
       const newStock=p.stock+qty;
-      const newAvgCost = newStock>0 ? ((p.stock*p.avgCost)+(qty*it.unitCost))/newStock : it.unitCost;
+      const newAvgCost = newStock>0 ? ((p.stock*p.avgCost)+(qty*unitCostAFN))/newStock : unitCostAFN;
       batch.update(doc(cols.products, it.productId), { stock: increment(qty), avgCost: newAvgCost });
     }
     if(pur.supplierId && addAmount-addPaid>0){
-      batch.update(doc(cols.suppliers, pur.supplierId), { balance: increment(addAmount-addPaid) });
+      const balField = pur.currency==='USD' ? 'balanceUSD' : 'balance';
+      batch.update(doc(cols.suppliers, pur.supplierId), { [balField]: increment(addAmount-addPaid) });
     }
     batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
@@ -1400,7 +1456,7 @@ const App = {
     let product=this.state.products.find(p=>p.name===trimmed);
     const qtyStr=prompt('تعداد:','1'); if(qtyStr===null) return;
     const qty=parseFloat(qtyStr); if(!qty||qty<=0){ alert('تعداد نامعتبر است.'); return; }
-    const costStr=prompt('قیمت خرید هر واحد:', product?product.avgCost:0); if(costStr===null) return;
+    const costStr=prompt('قیمت خرید هر واحد ('+this.curLabel(pur.currency)+'):', product?product.avgCost:0); if(costStr===null) return;
     const cost=parseFloat(costStr); if(isNaN(cost)||cost<0){ alert('قیمت نامعتبر است.'); return; }
     const addAmount=qty*cost;
     const paidStr=prompt('مبلغ پرداختی نقدی برای همین قلم (اگر نسیه است، صفر بگذارید):', addAmount);
@@ -1410,15 +1466,16 @@ const App = {
 
     const batch=writeBatch(db);
     let productId, unit='عدد';
+    const unitCostAFN = pur.currency==='USD' ? cost*((Number(pur.rateAtPurchase)||this.usdRate())||0) : cost;
     if(!product){
       productId=uid();
-      batch.set(doc(cols.products, productId), {id:productId, name:trimmed, unit, stock:qty, avgCost:cost, sellPrice:Math.round(cost*1.15)});
+      batch.set(doc(cols.products, productId), {id:productId, name:trimmed, unit, stock:qty, avgCost:unitCostAFN, sellPrice:Math.round(unitCostAFN*1.15)});
     } else {
       productId=product.id; unit=product.unit;
       const newStock=product.stock+qty;
-      const newAvgCost = newStock>0 ? ((product.stock*product.avgCost)+(qty*cost))/newStock : cost;
+      const newAvgCost = newStock>0 ? ((product.stock*product.avgCost)+(qty*unitCostAFN))/newStock : unitCostAFN;
       const fields = { stock: increment(qty), avgCost: newAvgCost };
-      if(!product.sellPrice) fields.sellPrice = Math.round(cost*1.15);
+      if(!product.sellPrice) fields.sellPrice = Math.round(unitCostAFN*1.15);
       batch.update(doc(cols.products, productId), fields);
     }
     const newItem={productId, name:trimmed, unit, qty, unitCost:cost, returnedQty:0};
@@ -1426,7 +1483,8 @@ const App = {
     const newTotal=pur.total+addAmount, newPaid=pur.paid+addPaid;
     batch.update(doc(cols.purchases, pur.id), { items:newItems, total:newTotal, originalTotal: increment(addAmount), paid:newPaid, remaining:newTotal-newPaid });
     if(pur.supplierId && addAmount-addPaid>0){
-      batch.update(doc(cols.suppliers, pur.supplierId), { balance: increment(addAmount-addPaid) });
+      const balField = pur.currency==='USD' ? 'balanceUSD' : 'balance';
+      batch.update(doc(cols.suppliers, pur.supplierId), { [balField]: increment(addAmount-addPaid) });
     }
     batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
@@ -1438,11 +1496,20 @@ const App = {
       return this.renderPartyDetail();
     }
     const listArr = sub==='customers' ? this.state.customers : this.state.suppliers;
-    const sorted = [...listArr].sort((a,b)=>b.balance-a.balance);
+    const sorted = [...listArr].sort((a,b)=>(b.balance||0)-(a.balance||0));
     const totalKey = sub==='customers' ? this.totalReceivable() : this.totalPayable();
     const rows = sorted.length ? sorted.map(c=>{
-      const bal=c.balance;
-      const badge = bal>0.5 ? `<span class="badge red num">${fmt(bal)}</span>` : (bal<-0.5? `<span class="badge green num">${fmt(-bal)}- طلب شما</span>` : `<span class="badge gold">تسویه</span>`);
+      const bal=c.balance||0;
+      let badge;
+      if(sub==='suppliers'){
+        const balUSD=c.balanceUSD||0;
+        const parts=[];
+        if(Math.abs(bal)>0.5) parts.push(`<span class="badge ${bal>0.5?'red':'green'} num">${fmt(Math.abs(bal))}${bal<-0.5?' طلب شما':''}</span>`);
+        if(Math.abs(balUSD)>0.5) parts.push(`<span class="badge ${balUSD>0.5?'red':'green'} num">$${fmt(Math.abs(balUSD))}${balUSD<-0.5?' طلب شما':''}</span>`);
+        badge = parts.length ? parts.join(' ') : `<span class="badge gold">تسویه</span>`;
+      } else {
+        badge = bal>0.5 ? `<span class="badge red num">${fmt(bal)}</span>` : (bal<-0.5? `<span class="badge green num">${fmt(-bal)}- طلب شما</span>` : `<span class="badge gold">تسویه</span>`);
+      }
       return `<div class="row-item">
         <div class="r-left" onclick="App.openParty('${sub}','${c.id}')" style="cursor:pointer;">
           <b>${escapeHtml(c.name)}</b>${c.phone?`<span class="sub">${escapeHtml(c.phone)}</span>`:''}${c.address?`<span class="sub">${escapeHtml(c.address)}</span>`:''}
@@ -1462,8 +1529,13 @@ const App = {
     </div>
     <button class="btn btn-outline" onclick="App.addPartyManual('${sub}')">+ افزودن ${sub==='customers'?'مشتری':'شرکت/عمده‌فروش'} جدید</button>
     <div class="card" style="text-align:center;margin-top:12px;">
-      <div class="field-note">مجموع ${sub==='customers'?'طلب از مشتریان':'بدهی به عمده‌فروشان'}</div>
-      <div class="num" style="font-size:20px;font-weight:800;color:${sub==='customers'?'var(--green)':'var(--red)'}">${fmt(totalKey)} ${this.state.settings.currency}</div>
+      <div class="field-note">مجموع ${sub==='customers'?'طلب از مشتریان':'بدهی به عمده‌فروشان ('+this.state.settings.currency+')'}</div>
+      <div class="num" style="font-size:20px;font-weight:800;color:${sub==='customers'?'var(--green)':'var(--red)'}">${fmt(totalKey)} ${sub==='customers'?this.state.settings.currency:''}</div>
+      ${sub==='suppliers'?`<div class="field-note" style="margin-top:10px;">مجموع بدهی به عمده‌فروشان (دالر)</div>
+      <div class="num" style="font-size:20px;font-weight:800;color:var(--red)">$${fmt(this.totalPayableUSD())}</div>
+      ${this.totalPayableUSD()!==0?`<div class="field-note" style="margin-top:10px;">مجموع کل بدهی به ${this.state.settings.currency} (شامل تبدیل دالر به نرخ امروز)</div>
+      <div class="num" style="font-size:18px;font-weight:800;color:var(--gold-d);">${this.usdRate()>0?fmt(this.totalPayableCombinedAFN())+' '+this.state.settings.currency:'نرخ دالر تنظیم نشده'}</div>`:''}
+      <div class="field-note" style="margin-top:10px;">نرخ فعلی دالر: <b class="num">${this.usdRate()>0?fmt(this.usdRate()):'—'}</b> <span onclick="App.quickSetUsdRate()" style="cursor:pointer;color:var(--gold-d);text-decoration:underline;">✏️ ویرایش نرخ</span></div>`:''}
     </div>
     <div class="card">${rows}</div>
     `;
@@ -1479,10 +1551,10 @@ const App = {
     if(type==='customers'){
       history = this.state.sales.filter(s=>s.customerId===p.id).map(s=>({date:s.date,ts:s.ts,label:'فروش '+this.invoiceNoLabel(s.id),amount:s.total,paid:s.paid,saleId:s.id,status:s.status}));
     } else {
-      history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید',amount:s.total,paid:s.paid,purchaseId:s.id,status:s.status}));
+      history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید'+(s.currency==='USD'?' (دالر)':''),amount:s.total,paid:s.paid,purchaseId:s.id,status:s.status}));
     }
-    const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:x.type==='receive'?'دریافت پول':'پرداخت پول',amount:x.amount,paid:null,isPayment:true,paymentId:x.id,receiptImage:x.receiptImage||null}));
-    const openings = (this.state.openingEntries||[]).filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:'📋 بدهی افتتاحیه (قبل از سیستم)',amount:x.amount,isOpening:true}));
+    const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:(x.type==='receive'?'دریافت پول':'پرداخت پول')+(x.currency==='USD'?' (دالر)':''),amount:x.amount,paid:null,isPayment:true,paymentId:x.id,receiptImage:x.receiptImage||null}));
+    const openings = (this.state.openingEntries||[]).filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:'📋 بدهی افتتاحیه (قبل از سیستم)'+(x.currency==='USD'?' (دالر)':''),amount:x.amount,isOpening:true}));
     history = [...history,...pays,...openings].sort((a,b)=>(b.ts||0)-(a.ts||0));
 
     const rows = history.length ? history.map(h=>{
@@ -1508,8 +1580,9 @@ const App = {
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <b style="font-size:16px;">${escapeHtml(p.name)}</b>
-        <span class="badge ${p.balance>0.5?'red':'green'} num">${fmt(Math.abs(p.balance))} ${p.balance>0.5?'بدهکار':(p.balance<-0.5?'طلبکار':'تسویه')}</span>
+        <span class="badge ${p.balance>0.5?'red':'green'} num">${fmt(Math.abs(p.balance||0))} ${p.balance>0.5?'بدهکار':((p.balance||0)<-0.5?'طلبکار':'تسویه')}</span>
       </div>
+      ${type==='suppliers' && Math.abs(p.balanceUSD||0)>0.5 ? `<div style="margin-top:6px;text-align:left;"><span class="badge ${p.balanceUSD>0.5?'red':'green'} num">$${fmt(Math.abs(p.balanceUSD))} ${p.balanceUSD>0.5?'بدهکار (دالر)':'طلبکار (دالر)'}</span>${this.usdRate()>0?`<div class="sub" style="margin-top:2px;">معادل امروز: ${fmt(Math.abs(p.balanceUSD)*this.usdRate())} ${this.state.settings.currency} (به نرخ ${fmt(this.usdRate())})</div>`:`<div class="sub" style="margin-top:2px;color:var(--red);">نرخ دالر تنظیم نشده — <span onclick="App.quickSetUsdRate()" style="cursor:pointer;text-decoration:underline;">تنظیم کنید</span></div>`}</div>` : ''}
       ${p.phone?`<div class="sub" style="margin-top:6px;">📞 ${escapeHtml(p.phone)}</div>`:''}
       ${p.address?`<div class="sub">📍 ${escapeHtml(p.address)}</div>`:''}
       <div class="grid2" style="margin-top:12px;">
@@ -1521,6 +1594,12 @@ const App = {
       ${this.payFormOpen ? `
       <div class="card" style="margin-top:12px;padding:0;box-shadow:none;border:1px dashed var(--border);">
         <div style="padding:12px;">
+          ${type==='suppliers' ? `<label>ارز پرداخت</label>
+          <select id="pay-currency">
+            <option value="AFN">${this.state.settings.currency} (افغانی)</option>
+            <option value="USD">دالر</option>
+          </select>
+          <div class="field-note">نرخ فعلی دالر: <b class="num">${this.usdRate()>0?fmt(this.usdRate()):'تنظیم نشده'}</b> <span onclick="App.quickSetUsdRate()" style="cursor:pointer;color:var(--gold-d);">✏️ ویرایش</span></div>` : ''}
           <label>${type==='customers'?'مبلغ دریافتی از مشتری':'مبلغ پرداختی به شرکت/عمده‌فروش'}</label>
           <input id="pay-amount" type="number" inputmode="decimal" placeholder="0">
           <label>تاریخ</label>
@@ -1550,6 +1629,12 @@ const App = {
     const arr = type==='customers' ? this.state.customers : this.state.suppliers;
     const p = arr.find(x=>x.id===id);
     if(!p) return;
+    const currency = (type==='suppliers' && document.getElementById('pay-currency') && document.getElementById('pay-currency').value==='USD') ? 'USD' : 'AFN';
+    let payRate = null;
+    if(currency==='USD'){
+      payRate = this.usdRate();
+      if(payRate<=0){ alert('لطفاً ابتدا نرخ فعلی دالر را تنظیم کنید (از داشبورد یا تنظیمات).'); return; }
+    }
     const photoInput = document.getElementById('pay-photo');
     const photoFile = photoInput && photoInput.files[0];
     let receiptImage = null;
@@ -1558,10 +1643,12 @@ const App = {
       catch(err){ alert(err.message||'خطا در پردازش عکس رسید'); return; }
     }
     const colName = type==='customers' ? 'customers' : 'suppliers';
+    const balField = (type==='suppliers' && currency==='USD') ? 'balanceUSD' : 'balance';
     const batch=writeBatch(db);
-    batch.update(doc(cols[colName], id), { balance: increment(-amt) });
+    batch.update(doc(cols[colName], id), { [balField]: increment(-amt) });
     const paymentId=uid();
-    const paymentDoc = {id:paymentId, ts:Date.now(), date, type: type==='customers'?'receive':'pay', partyType:type==='customers'?'customer':'supplier', partyId:id, partyName:p.name, amount:amt};
+    const paymentDoc = {id:paymentId, ts:Date.now(), date, type: type==='customers'?'receive':'pay', partyType:type==='customers'?'customer':'supplier', partyId:id, partyName:p.name, amount:amt, currency};
+    if(currency==='USD') paymentDoc.rate = payRate;
     if(receiptImage) paymentDoc.receiptImage = receiptImage;
     batch.set(doc(cols.payments, paymentId), paymentDoc);
     batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
@@ -1596,13 +1683,20 @@ const App = {
       : 'اگر شما از قبل (قبل از استفاده از این سیستم) به این شرکت/عمده‌فروش بدهکار هستید، مبلغش را بنویسید';
     const openStr = prompt(openLabel+' (در غیر این صورت 0 بگذارید):','0');
     let openAmt = parseFloat(openStr); if(isNaN(openAmt)) openAmt=0;
+    let openCurrency='AFN';
+    if(type==='suppliers' && openAmt){
+      const curAns=(prompt('این بدهی به کدام ارز است؟ برای افغانی «ا» و برای دالر «د» بنویسید:','ا')||'ا').trim().toLowerCase();
+      if(curAns==='د'||curAns==='d'||curAns==='usd'||curAns==='دالر') openCurrency='USD';
+    }
     const colName = type==='customers' ? 'customers' : 'suppliers';
     const partyId = uid();
     const batch=writeBatch(db);
-    batch.set(doc(cols[colName], partyId), {id:partyId, name, phone, address, balance:openAmt});
+    const partyFields = {id:partyId, name, phone, address, balance: openCurrency==='AFN' ? openAmt : 0};
+    if(type==='suppliers') partyFields.balanceUSD = openCurrency==='USD' ? openAmt : 0;
+    batch.set(doc(cols[colName], partyId), partyFields);
     if(openAmt){
       const openId=uid();
-      batch.set(doc(cols.openingEntries, openId), {id:openId, ts:Date.now(), date:todayISO(), partyType:type, partyId, partyName:name, amount:openAmt, note:'بدهی افتتاحیه (قبل از این سیستم)'});
+      batch.set(doc(cols.openingEntries, openId), {id:openId, ts:Date.now(), date:todayISO(), partyType:type, partyId, partyName:name, amount:openAmt, currency:openCurrency, note:'بدهی افتتاحیه (قبل از این سیستم)'});
     }
     batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
@@ -1616,11 +1710,17 @@ const App = {
     if(amtStr===null) return;
     const amt = parseFloat(amtStr);
     if(!amt){ alert('مبلغ نامعتبر یا صفر است.'); return; }
+    let currency='AFN';
+    if(type==='suppliers'){
+      const curAns=(prompt('این بدهی به کدام ارز است؟ برای افغانی «ا» و برای دالر «د» بنویسید:','ا')||'ا').trim().toLowerCase();
+      if(curAns==='د'||curAns==='d'||curAns==='usd'||curAns==='دالر') currency='USD';
+    }
     const colName = type==='customers' ? 'customers' : 'suppliers';
+    const balField = (type==='suppliers' && currency==='USD') ? 'balanceUSD' : 'balance';
     const batch=writeBatch(db);
-    batch.update(doc(cols[colName], id), { balance: increment(amt) });
+    batch.update(doc(cols[colName], id), { [balField]: increment(amt) });
     const openId=uid();
-    batch.set(doc(cols.openingEntries, openId), {id:openId, ts:Date.now(), date:todayISO(), partyType:type, partyId:id, partyName:p.name, amount:amt, note:'بدهی افتتاحیه (قبل از این سیستم)'});
+    batch.set(doc(cols.openingEntries, openId), {id:openId, ts:Date.now(), date:todayISO(), partyType:type, partyId:id, partyName:p.name, amount:amt, currency, note:'بدهی افتتاحیه (قبل از این سیستم)'});
     batch.commit().then(()=>alert('بدهی افتتاحیه ثبت شد ✅')).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   editParty(type,id){
@@ -1645,7 +1745,8 @@ const App = {
   deleteParty(type,id){
     const arr = type==='customers' ? this.state.customers : this.state.suppliers;
     const p=arr.find(x=>x.id===id); if(!p) return;
-    if(Math.abs(p.balance)>0.5){ alert('این مشتری/فروشنده هنوز بدهی یا طلب دارد؛ ابتدا حساب را تسویه کنید.'); return; }
+    const hasDebt = Math.abs(p.balance||0)>0.5 || (type==='suppliers' && Math.abs(p.balanceUSD||0)>0.5);
+    if(hasDebt){ alert('این مشتری/فروشنده هنوز بدهی یا طلب دارد؛ ابتدا حساب را تسویه کنید.'); return; }
     if(!confirm('این مورد از فهرست حذف شود؟ سابقهٔ فاکتورهای قبلی آن باقی می‌ماند.')) return;
     const colName = type==='customers' ? 'customers' : 'suppliers';
     deleteDoc(doc(cols[colName], id)).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
@@ -1802,7 +1903,7 @@ const App = {
     const grossProfit=revenue-cogs;
     const expTotal=sum(expenses,'amount');
     const netProfit=grossProfit-expTotal;
-    const purchTotal=sum(purchases,'total');
+    const purchTotal = purchases.reduce((a,p)=> a + (p.currency==='USD' ? (Number(p.total)||0)*(Number(p.rateAtPurchase)||this.usdRate()||0) : (Number(p.total)||0)), 0);
 
     const catMap={};
     expenses.forEach(e=>{ catMap[e.category]=(catMap[e.category]||0)+e.amount; });
@@ -1828,6 +1929,7 @@ const App = {
     </div>`:''}
     <div class="card">
       <div class="field-note">بازه: ${label} (${start} تا ${end})</div>
+      <div class="field-note">تمام ارقام این گزارش به ${this.state.settings.currency} است؛ خریدهای دالری نیز به نرخ روز خودشان به ${this.state.settings.currency} تبدیل شده‌اند.</div>
       <div class="row-item"><div class="r-left">مجموع فروش</div><div class="r-right num">${fmt(revenue)}</div></div>
       <div class="row-item"><div class="r-left">قیمت تمام‌شدهٔ کالای فروخته‌شده</div><div class="r-right num">${fmt(cogs)}</div></div>
       <div class="row-item"><div class="r-left"><b>سود ناخالص</b></div><div class="r-right num" style="color:var(--green)"><b>${fmt(grossProfit)}</b></div></div>
@@ -1835,7 +1937,7 @@ const App = {
       <div class="total-line"><span>سود خالص</span><span class="num ${netProfit>=0?'':'red'}" style="color:${netProfit>=0?'var(--green)':'var(--red)'}">${fmt(netProfit)}</span></div>
     </div>
     <div class="card">
-      <div class="row-item"><div class="r-left">مجموع خرید در این بازه</div><div class="r-right num">${fmt(purchTotal)}</div></div>
+      <div class="row-item"><div class="r-left">مجموع خرید در این بازه (${this.state.settings.currency}، شامل تبدیل خریدهای دالری)</div><div class="r-right num">${fmt(purchTotal)}</div></div>
       <div class="row-item"><div class="r-left">تعداد فاکتور فروش (فعال)</div><div class="r-right num">${sales.filter(s=>s.status!=='cancelled').length}</div></div>
       ${sales.some(s=>s.status==='cancelled')?`<div class="row-item"><div class="r-left">فاکتورهای باطل‌شده در این بازه</div><div class="r-right num" style="color:var(--red)">${sales.filter(s=>s.status==='cancelled').length}</div></div>`:''}
     </div>
@@ -1850,6 +1952,7 @@ const App = {
       businessName:(document.getElementById('set-name').value||'').trim()||'پخش موتر من',
       currency:(document.getElementById('set-currency').value||'').trim()||'افغانی',
       openingCash:parseFloat(document.getElementById('set-cash').value)||0,
+      usdRate:parseFloat(document.getElementById('set-usdrate').value)||0,
       logoEmoji:(document.getElementById('set-logo').value||'').trim()||'🏪',
       businessPhone:(document.getElementById('set-phone').value||'').trim(),
       businessAddress:(document.getElementById('set-address').value||'').trim(),
@@ -1944,6 +2047,9 @@ const App = {
       </select>
       <label>موجودی نقد آغازین صندوق</label>
       <input id="set-cash" type="number" value="${s.openingCash}">
+      <label>نرخ فعلی دالر (۱ دالر = چند ${s.currency}؟)</label>
+      <input id="set-usdrate" type="number" inputmode="decimal" value="${s.usdRate||''}" placeholder="مثلاً 70">
+      <div class="field-note">این نرخ برای تبدیل خودکار خریدها و بدهی‌های دالری به ${s.currency} استفاده می‌شود. بهتر است هر روز که خرید دالری دارید، این نرخ را به‌روز کنید (یا از دکمهٔ «✏️ نرخ دالر» در داشبورد/فرم خرید استفاده کنید).</div>
       <hr class="divider">
       <div class="field-note">این اطلاعات در بالای فاکتور فروش چاپ می‌شود.</div>
       <label>لوگو / آیکن فروشگاه (ایموجی)</label>
