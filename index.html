@@ -232,6 +232,26 @@ const teamDocRef       = (uid_) => doc(db, 'businesses', BIZ_ID, 'team', uid_);
 /* ---------- Helpers ---------- */
 function uid(){ return 'id_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8); }
 function todayISO(){ return new Date().toISOString().slice(0,10); }
+
+/* ---------- شناسهٔ دستگاه (گوشی) ----------
+   هر گوشی/مرورگر یک شناسهٔ ثابت محلی می‌گیرد که در تمام رکوردهای ثبت‌شده از همان گوشی ذخیره می‌شود.
+   کاربر می‌تواند یک نام دلخواه (مثلاً «گوشی احمد») هم برای این دستگاه در تنظیمات بگذارد. */
+const WITHDRAWAL_CATEGORY = 'برداشت شخصی';
+function getDeviceId(){
+  let id;
+  try{ id = localStorage.getItem('hesabdari_device_id'); }catch(e){}
+  if(!id){
+    id = 'dev_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8);
+    try{ localStorage.setItem('hesabdari_device_id', id); }catch(e){}
+  }
+  return id;
+}
+function getDeviceLabel(){
+  try{ return localStorage.getItem('hesabdari_device_label') || ''; }catch(e){ return ''; }
+}
+function setDeviceLabel(label){
+  try{ localStorage.setItem('hesabdari_device_label', label||''); }catch(e){}
+}
 function fmt(n){ n = Math.round(Number(n)||0); return n.toLocaleString('en-US'); }
 function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function sum(arr,key){ return arr.reduce((a,b)=>a+(Number(b[key])||0),0); }
@@ -412,6 +432,35 @@ const App = {
 
     await migrateOldDataIfNeeded();
     this._subscribeAll();
+    this._maybeAskDeviceLabel();
+  },
+
+  /* ---------- ثبت‌کنندهٔ رکورد (کاربر + گوشی) ---------- */
+  recordMeta(){
+    return {
+      createdByEmail: (this.user && this.user.email) || '',
+      createdByDevice: getDeviceLabel() || ('دستگاه '+getDeviceId().slice(-5)),
+    };
+  },
+  editMeta(){
+    return {
+      lastEditedByEmail: (this.user && this.user.email) || '',
+      lastEditedByDevice: getDeviceLabel() || ('دستگاه '+getDeviceId().slice(-5)),
+      lastEditedTs: Date.now(),
+    };
+  },
+  whoLabel(rec){
+    if(!rec) return '';
+    const who=[rec.createdByEmail, rec.createdByDevice].filter(Boolean).join(' · ');
+    return who ? 'ثبت‌شده توسط: '+who : '';
+  },
+  _maybeAskDeviceLabel(){
+    if(getDeviceLabel()) return;
+    setTimeout(()=>{
+      const val=prompt('برای شناسایی بهتر معاملات، یک نام برای این گوشی/دستگاه بگذارید (مثلاً «گوشی احمد» یا «دفتر»). بعداً هم از تنظیمات قابل تغییر است:', '');
+      if(val && val.trim()) setDeviceLabel(val.trim());
+      this.render();
+    }, 400);
   },
 
   _teardown(){
@@ -596,7 +645,9 @@ const App = {
   renderDashboard(){
     const today = todayISO();
     const todaySales = this.salesInRange(today,today);
-    const todayExpenses = this.expensesInRange(today,today);
+    const todayExpensesAll = this.expensesInRange(today,today);
+    const todayExpenses = todayExpensesAll.filter(e=>e.category!==WITHDRAWAL_CATEGORY);
+    const todayWithdrawals = todayExpensesAll.filter(e=>e.category===WITHDRAWAL_CATEGORY);
     const todayProfit = sum(todaySales,'profit') - sum(todayExpenses,'amount');
     const cur = this.state.settings.currency;
 
@@ -607,14 +658,17 @@ const App = {
     ].sort((a,b)=>(b.ts||0)-(a.ts||0)).slice(0,8);
 
     const recentHtml = recent.length ? recent.map(x=>{
+      const who=this.whoLabel(x);
+      const whoHtml = who?`<span class="sub" style="opacity:.75;">${escapeHtml(who)}</span>`:'';
       if(x._type==='sale'){
         const tag = x.status==='cancelled' ? ' <span class="badge gold">باطل</span>' : '';
-        return `<div class="row-item clickable" onclick="App.viewInvoice('${x.id}')"><div class="r-left"><b>فروش ${this.invoiceNoLabel(x.id)} — ${escapeHtml(x.customerName)}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--green)">+${fmt(x.paid)}</div></div>`;
+        return `<div class="row-item clickable" onclick="App.viewInvoice('${x.id}')"><div class="r-left"><b>فروش ${this.invoiceNoLabel(x.id)} — ${escapeHtml(x.customerName)}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span>${whoHtml}</div><div class="r-right num" style="color:var(--green)">+${fmt(x.paid)}</div></div>`;
       } else if(x._type==='purchase'){
         const tag = x.status==='cancelled' ? ' <span class="badge gold">باطل</span>' : (x.currency==='USD' ? ' <span class="badge gold">دالر</span>' : '');
-        return `<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><div class="r-left"><b>خرید — ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span></div><div class="r-right num" style="color:var(--red)">-${fmt(x.paid)}${x.currency==='USD'?' $':''}</div></div>`;
+        return `<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><div class="r-left"><b>خرید — ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span>${whoHtml}</div><div class="r-right num" style="color:var(--red)">-${fmt(x.paid)}${x.currency==='USD'?' $':''}</div></div>`;
       } else {
-        return `<div class="row-item"><div class="r-left"><b>مصرف — ${escapeHtml(x.category)}</b><span class="sub">${x.date}${x.note?(' · '+escapeHtml(x.note)):''}</span></div><div class="r-right num" style="color:var(--red)">-${fmt(x.amount)}</div></div>`;
+        const isW = x.category===WITHDRAWAL_CATEGORY;
+        return `<div class="row-item"><div class="r-left"><b>${isW?'💰 برداشت — '+escapeHtml(x.withdrawnBy||''):'مصرف — '+escapeHtml(x.category)}</b><span class="sub">${x.date}${x.note?(' · '+escapeHtml(x.note)):''}</span>${whoHtml}</div><div class="r-right num" style="color:var(--red)">-${fmt(x.amount)}</div></div>`;
       }
     }).join('') : `<div class="empty">هنوز معامله‌ای ثبت نشده. از دکمه‌های بالا شروع کنید.</div>`;
 
@@ -627,6 +681,7 @@ const App = {
     <div class="ledger-strip">
       <div class="chip"><div class="t">فروش امروز</div><div class="v num">${fmt(sum(todaySales,'total'))}</div></div>
       <div class="chip"><div class="t">مصرف امروز</div><div class="v num">${fmt(sum(todayExpenses,'amount'))}</div></div>
+      ${todayWithdrawals.length?`<div class="chip"><div class="t">💰 برداشت امروز</div><div class="v num">${fmt(sum(todayWithdrawals,'amount'))}</div></div>`:''}
       <div class="chip"><div class="t">طلب از مشتریان</div><div class="v num">${fmt(this.totalReceivable())}</div></div>
       <div class="chip"><div class="t">قرض از عمده‌فروش (${cur})</div><div class="v num">${fmt(this.totalPayable())}</div></div>
       ${this.totalPayableUSD()!==0?`<div class="chip"><div class="t">قرض از عمده‌فروش (دالر)</div><div class="v num">$${fmt(this.totalPayableUSD())}</div></div>`:''}
@@ -695,7 +750,7 @@ const App = {
       let customer=this.state.customers.find(c=>c.name===custName);
       if(!customer){
         customerId=uid(); customerNameFinal=custName;
-        batch.set(doc(cols.customers,customerId), {id:customerId,name:custName,phone:custPhone,address:custAddress,balance:remaining});
+        batch.set(doc(cols.customers,customerId), {id:customerId,name:custName,phone:custPhone,address:custAddress,balance:remaining, ...this.recordMeta()});
       } else {
         customerId=customer.id; customerNameFinal=customer.name;
         const fields={ balance: increment(remaining) };
@@ -723,7 +778,8 @@ const App = {
       id:saleId, ts:Date.now(), date, customerId, customerName:customerNameFinal,
       customerPhone: custName?custPhone:'', customerAddress: custName?custAddress:'',
       items:this.saleDraft.items.map(it=>({...it,returnedQty:0})), total, totalCost, profit: total-totalCost,
-      paid, remaining, note, status:'active', returns:[], originalTotal: total
+      paid, remaining, note, status:'active', returns:[], originalTotal: total,
+      ...this.recordMeta()
     };
     batch.set(doc(cols.sales, saleId), newSale);
 
@@ -843,6 +899,7 @@ const App = {
         <span>شماره فاکتور: <b class="num">${this.invoiceNoLabel(sale.id)}</b></span>
         <span>تاریخ: <b class="num">${sale.date}</b></span>
       </div>
+      ${this.whoLabel(sale)?`<div class="field-note no-print">${escapeHtml(this.whoLabel(sale))}${sale.lastEditedByEmail?` · آخرین ویرایش: ${escapeHtml([sale.lastEditedByEmail,sale.lastEditedByDevice].filter(Boolean).join(' · '))}`:''}</div>`:''}
       <div class="inv-cust">
         <div class="l1">مشتری: ${escapeHtml(sale.customerName)}</div>
         ${sale.customerPhone?`<div>تماس: <span class="num">${escapeHtml(sale.customerPhone)}</span></div>`:''}
@@ -982,7 +1039,7 @@ const App = {
       let supplier=this.state.suppliers.find(c=>c.name===supName);
       if(!supplier){
         supplierId=uid(); supplierNameFinal=supName;
-        batch.set(doc(cols.suppliers,supplierId), {id:supplierId,name:supName,phone:'',address:'',balance:currency==='AFN'?remaining:0,balanceUSD:currency==='USD'?remaining:0});
+        batch.set(doc(cols.suppliers,supplierId), {id:supplierId,name:supName,phone:'',address:'',balance:currency==='AFN'?remaining:0,balanceUSD:currency==='USD'?remaining:0, ...this.recordMeta()});
       } else {
         supplierId=supplier.id; supplierNameFinal=supplier.name;
         batch.update(doc(cols.suppliers,supplier.id), { [balField]: increment(remaining) });
@@ -1021,7 +1078,8 @@ const App = {
     const newPurchase = {
       id:purchaseId, ts:Date.now(), date, supplierId, supplierName:supplierNameFinal, currency, rateAtPurchase,
       items:this.purchaseDraft.items.map(it=>({...it,returnedQty:0})), total, paid, remaining, note,
-      status:'active', returns:[], originalTotal: total
+      status:'active', returns:[], originalTotal: total,
+      ...this.recordMeta()
     };
     if(billImage) newPurchase.billImage = billImage;
     batch.set(doc(cols.purchases, purchaseId), newPurchase);
@@ -1152,6 +1210,7 @@ const App = {
       <div class="inv-meta">
         <span>تاریخ: <b class="num">${pur.date}</b></span>
       </div>
+      ${this.whoLabel(pur)?`<div class="field-note no-print">${escapeHtml(this.whoLabel(pur))}${pur.lastEditedByEmail?` · آخرین ویرایش: ${escapeHtml([pur.lastEditedByEmail,pur.lastEditedByDevice].filter(Boolean).join(' · '))}`:''}</div>`:''}
       <div class="inv-cust">
         <div class="l1">شرکت / عمده‌فروش: ${escapeHtml(pur.supplierName||'—')}</div>
       </div>
@@ -1207,7 +1266,7 @@ const App = {
     });
     // remaining = total-paid، برای سادگی و دقت مستقیم محاسبه و ست می‌کنیم نه increment مبهم:
     const newTotal = sale.total-refund, newPaid = sale.paid-cashRefund;
-    batch.update(doc(cols.sales, sale.id), { remaining: newTotal-newPaid });
+    batch.update(doc(cols.sales, sale.id), { remaining: newTotal-newPaid, ...this.editMeta() });
     if(sale.customerId && debtReduction>0){
       batch.update(doc(cols.customers, sale.customerId), { balance: increment(-debtReduction) });
     }
@@ -1242,7 +1301,7 @@ const App = {
     batch.update(doc(cols.sales, sale.id), {
       items:newItems, returns:newReturns, status:'cancelled',
       total:runningTotal, totalCost:runningCost, profit:runningTotal-runningCost,
-      paid:runningPaid, remaining:runningTotal-runningPaid
+      paid:runningPaid, remaining:runningTotal-runningPaid, ...this.editMeta()
     });
     if(sale.customerId && customerDebtReduction>0){
       batch.update(doc(cols.customers, sale.customerId), { balance: increment(-customerDebtReduction) });
@@ -1275,7 +1334,7 @@ const App = {
     const batch=writeBatch(db);
     batch.update(doc(cols.sales, sale.id), {
       items:newItems, total:newTotal, originalTotal: increment(addAmount),
-      totalCost:newTotalCost, profit:newTotal-newTotalCost, paid:newPaid, remaining:newTotal-newPaid
+      totalCost:newTotalCost, profit:newTotal-newTotalCost, paid:newPaid, remaining:newTotal-newPaid, ...this.editMeta()
     });
     if(p) batch.update(doc(cols.products, it.productId), { stock: increment(-qty) });
     if(sale.customerId && addAmount-addPaid>0){
@@ -1319,7 +1378,7 @@ const App = {
     const newTotal=sale.total+addAmount, newPaid=sale.paid+addPaid, newTotalCost=sale.totalCost+qty*cost;
     batch.update(doc(cols.sales, sale.id), {
       items:newItems, total:newTotal, originalTotal: increment(addAmount),
-      totalCost:newTotalCost, profit:newTotal-newTotalCost, paid:newPaid, remaining:newTotal-newPaid
+      totalCost:newTotalCost, profit:newTotal-newTotalCost, paid:newPaid, remaining:newTotal-newPaid, ...this.editMeta()
     });
     if(sale.customerId && addAmount-addPaid>0){
       batch.update(doc(cols.customers, sale.customerId), { balance: increment(addAmount-addPaid) });
@@ -1353,7 +1412,7 @@ const App = {
     const newTotal=pur.total-refund, newPaid=pur.paid-cashRefund;
 
     const batch=writeBatch(db);
-    batch.update(doc(cols.purchases, pur.id), { items:newItems, returns:newReturns, total:newTotal, paid:newPaid, remaining:newTotal-newPaid });
+    batch.update(doc(cols.purchases, pur.id), { items:newItems, returns:newReturns, total:newTotal, paid:newPaid, remaining:newTotal-newPaid, ...this.editMeta() });
     if(pur.supplierId && debtReduction>0){
       const balField = pur.currency==='USD' ? 'balanceUSD' : 'balance';
       batch.update(doc(cols.suppliers, pur.supplierId), { [balField]: increment(-debtReduction) });
@@ -1391,7 +1450,7 @@ const App = {
     });
 
     const batch=writeBatch(db);
-    batch.update(doc(cols.purchases, pur.id), { items:newItems, returns:newReturns, status:'cancelled', total:runningTotal, paid:runningPaid, remaining:runningTotal-runningPaid });
+    batch.update(doc(cols.purchases, pur.id), { items:newItems, returns:newReturns, status:'cancelled', total:runningTotal, paid:runningPaid, remaining:runningTotal-runningPaid, ...this.editMeta() });
     if(pur.supplierId && supplierDebtReduction>0){
       const balField = pur.currency==='USD' ? 'balanceUSD' : 'balance';
       batch.update(doc(cols.suppliers, pur.supplierId), { [balField]: increment(-supplierDebtReduction) });
@@ -1419,7 +1478,7 @@ const App = {
     const newTotal=pur.total+addAmount, newPaid=pur.paid+addPaid;
 
     const batch=writeBatch(db);
-    batch.update(doc(cols.purchases, pur.id), { items:newItems, total:newTotal, originalTotal: increment(addAmount), paid:newPaid, remaining:newTotal-newPaid });
+    batch.update(doc(cols.purchases, pur.id), { items:newItems, total:newTotal, originalTotal: increment(addAmount), paid:newPaid, remaining:newTotal-newPaid, ...this.editMeta() });
     if(p){
       const unitCostAFN = pur.currency==='USD' ? it.unitCost*((Number(pur.rateAtPurchase)||this.usdRate())||0) : it.unitCost;
       const newStock=p.stock+qty;
@@ -1481,7 +1540,7 @@ const App = {
     const newItem={productId, name:trimmed, unit, qty, unitCost:cost, returnedQty:0};
     const newItems=[...pur.items, newItem];
     const newTotal=pur.total+addAmount, newPaid=pur.paid+addPaid;
-    batch.update(doc(cols.purchases, pur.id), { items:newItems, total:newTotal, originalTotal: increment(addAmount), paid:newPaid, remaining:newTotal-newPaid });
+    batch.update(doc(cols.purchases, pur.id), { items:newItems, total:newTotal, originalTotal: increment(addAmount), paid:newPaid, remaining:newTotal-newPaid, ...this.editMeta() });
     if(pur.supplierId && addAmount-addPaid>0){
       const balField = pur.currency==='USD' ? 'balanceUSD' : 'balance';
       batch.update(doc(cols.suppliers, pur.supplierId), { [balField]: increment(addAmount-addPaid) });
@@ -1553,7 +1612,7 @@ const App = {
     } else {
       history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید'+(s.currency==='USD'?' (دالر)':''),amount:s.total,paid:s.paid,purchaseId:s.id,status:s.status}));
     }
-    const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:(x.type==='receive'?'دریافت پول':'پرداخت پول')+(x.currency==='USD'?' (دالر)':''),amount:x.amount,paid:null,isPayment:true,paymentId:x.id,receiptImage:x.receiptImage||null}));
+    const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:(x.type==='receive'?'دریافت پول':'پرداخت پول')+(x.currency==='USD'?' (دالر)':''),amount:x.amount,paid:null,isPayment:true,paymentId:x.id,receiptImage:x.receiptImage||null,who:this.whoLabel(x)}));
     const openings = (this.state.openingEntries||[]).filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:'📋 بدهی افتتاحیه (قبل از سیستم)'+(x.currency==='USD'?' (دالر)':''),amount:x.amount,isOpening:true}));
     history = [...history,...pays,...openings].sort((a,b)=>(b.ts||0)-(a.ts||0));
 
@@ -1563,7 +1622,7 @@ const App = {
         const photoBtn = h.receiptImage
           ? `<span onclick="App.viewPaymentReceipt('${h.paymentId}')" style="cursor:pointer;margin-inline-start:6px;" title="مشاهده عکس رسید">🧾</span>`
           : `<span onclick="App.addPaymentReceiptPhoto('${h.paymentId}')" style="cursor:pointer;margin-inline-start:6px;opacity:.55;" title="افزودن عکس رسید">📷</span>`;
-        return `<div class="row-item"><div class="r-left"><b>${h.label}</b>${photoBtn}<span class="sub">${h.date}</span></div><div class="r-right num" style="color:${color}">${fmt(h.amount)}</div></div>`;
+        return `<div class="row-item"><div class="r-left"><b>${h.label}</b>${photoBtn}<span class="sub">${h.date}</span>${h.who?`<span class="sub" style="opacity:.75;">${escapeHtml(h.who)}</span>`:''}</div><div class="r-right num" style="color:${color}">${fmt(h.amount)}</div></div>`;
       }
       if(h.isOpening){
         return `<div class="row-item"><div class="r-left"><b>${h.label}</b><span class="sub">${h.date}</span></div><div class="r-right num" style="color:var(--gold-d)">${fmt(h.amount)}</div></div>`;
@@ -1647,7 +1706,7 @@ const App = {
     const batch=writeBatch(db);
     batch.update(doc(cols[colName], id), { [balField]: increment(-amt) });
     const paymentId=uid();
-    const paymentDoc = {id:paymentId, ts:Date.now(), date, type: type==='customers'?'receive':'pay', partyType:type==='customers'?'customer':'supplier', partyId:id, partyName:p.name, amount:amt, currency};
+    const paymentDoc = {id:paymentId, ts:Date.now(), date, type: type==='customers'?'receive':'pay', partyType:type==='customers'?'customer':'supplier', partyId:id, partyName:p.name, amount:amt, currency, ...this.recordMeta()};
     if(currency==='USD') paymentDoc.rate = payRate;
     if(receiptImage) paymentDoc.receiptImage = receiptImage;
     batch.set(doc(cols.payments, paymentId), paymentDoc);
@@ -1691,12 +1750,12 @@ const App = {
     const colName = type==='customers' ? 'customers' : 'suppliers';
     const partyId = uid();
     const batch=writeBatch(db);
-    const partyFields = {id:partyId, name, phone, address, balance: openCurrency==='AFN' ? openAmt : 0};
+    const partyFields = {id:partyId, name, phone, address, balance: openCurrency==='AFN' ? openAmt : 0, ...this.recordMeta()};
     if(type==='suppliers') partyFields.balanceUSD = openCurrency==='USD' ? openAmt : 0;
     batch.set(doc(cols[colName], partyId), partyFields);
     if(openAmt){
       const openId=uid();
-      batch.set(doc(cols.openingEntries, openId), {id:openId, ts:Date.now(), date:todayISO(), partyType:type, partyId, partyName:name, amount:openAmt, currency:openCurrency, note:'بدهی افتتاحیه (قبل از این سیستم)'});
+      batch.set(doc(cols.openingEntries, openId), {id:openId, ts:Date.now(), date:todayISO(), partyType:type, partyId, partyName:name, amount:openAmt, currency:openCurrency, note:'بدهی افتتاحیه (قبل از این سیستم)', ...this.recordMeta()});
     }
     batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
@@ -1720,7 +1779,7 @@ const App = {
     const batch=writeBatch(db);
     batch.update(doc(cols[colName], id), { [balField]: increment(amt) });
     const openId=uid();
-    batch.set(doc(cols.openingEntries, openId), {id:openId, ts:Date.now(), date:todayISO(), partyType:type, partyId:id, partyName:p.name, amount:amt, currency, note:'بدهی افتتاحیه (قبل از این سیستم)'});
+    batch.set(doc(cols.openingEntries, openId), {id:openId, ts:Date.now(), date:todayISO(), partyType:type, partyId:id, partyName:p.name, amount:amt, currency, note:'بدهی افتتاحیه (قبل از این سیستم)', ...this.recordMeta()});
     batch.commit().then(()=>alert('بدهی افتتاحیه ثبت شد ✅')).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   editParty(type,id){
@@ -1766,7 +1825,7 @@ const App = {
     return `
     <h2 class="section-title">☰ بیشتر</h2>
     <div class="more-list">
-      <button onclick="App.navigate('more','expenses')"><span class="ic">💸</span> مصارف روزانه (کرایه، تیل، تعمیرات...)</button>
+      <button onclick="App.navigate('more','expenses')"><span class="ic">💸</span> مصارف روزانه و برداشت شخصی</button>
       ${this.isOwner()?`<button onclick="App.navigate('more','reports')"><span class="ic">📊</span> گزارش سود روزانه / هفته‌وار / ماهوار</button>`:''}
       <button onclick="App.navigate('more','products')"><span class="ic">🗂️</span> مدیریت محصولات و موجودی</button>
       ${this.isOwner()?`<button onclick="App.navigate('more','settings')"><span class="ic">⚙️</span> تنظیمات و پشتیبان‌گیری</button>`:''}
@@ -1783,9 +1842,14 @@ const App = {
     const date = document.getElementById('exp-date').value || todayISO();
     const note = (document.getElementById('exp-note').value||'').trim();
     if(!amount || amount<=0){ alert('مبلغ مصرف را درست بنویسید'); return; }
-    const expId=uid();
-    setDoc(doc(cols.expenses, expId), {id:expId, ts:Date.now(), date, category, amount, note}).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
-    alert('مصرف ثبت شد ✅');
+    const expDoc = {id:uid(), ts:Date.now(), date, category, amount, note, ...this.recordMeta()};
+    if(category===WITHDRAWAL_CATEGORY){
+      const withdrawnBy=(document.getElementById('exp-withdrawn-by').value||'').trim();
+      if(!withdrawnBy){ alert('نام شخصی که این پول را برداشت کرده بنویسید'); return; }
+      expDoc.withdrawnBy = withdrawnBy;
+    }
+    setDoc(doc(cols.expenses, expDoc.id), expDoc).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
+    alert(category===WITHDRAWAL_CATEGORY ? 'برداشت ثبت شد ✅' : 'مصرف ثبت شد ✅');
     this.navigate('more','expenses');
   },
   deleteExpense(id){
@@ -1795,36 +1859,52 @@ const App = {
   renderExpenses(){
     const today = todayISO();
     const sorted = [...this.state.expenses].sort((a,b)=>(b.ts||0)-(a.ts||0));
-    const rows = sorted.length ? sorted.slice(0,40).map(e=>
-      `<div class="row-item"><div class="r-left"><b>${escapeHtml(e.category)}</b><span class="sub">${e.date}${e.note?(' · '+escapeHtml(e.note)):''}</span></div>
-      <div class="r-right" style="display:flex;align-items:center;gap:8px;"><span class="num" style="color:var(--red)">-${fmt(e.amount)}</span><span class="x" style="color:var(--red);cursor:pointer;" onclick="App.deleteExpense('${e.id}')">✕</span></div></div>`
-    ).join('') : `<div class="empty">هنوز مصرفی ثبت نشده.</div>`;
+    const rows = sorted.length ? sorted.slice(0,40).map(e=>{
+      const isW = e.category===WITHDRAWAL_CATEGORY;
+      const subParts=[e.date];
+      if(isW && e.withdrawnBy) subParts.push('برداشت‌کننده: '+e.withdrawnBy);
+      if(e.note) subParts.push(e.note);
+      const who=this.whoLabel(e);
+      return `<div class="row-item"><div class="r-left"><b>${isW?'💰 ':''}${escapeHtml(e.category)}</b><span class="sub">${subParts.map(escapeHtml).join(' · ')}</span>${who?`<span class="sub" style="color:var(--muted);opacity:.8;">${escapeHtml(who)}</span>`:''}</div>
+      <div class="r-right" style="display:flex;align-items:center;gap:8px;"><span class="num" style="color:var(--red)">-${fmt(e.amount)}</span><span class="x" style="color:var(--red);cursor:pointer;" onclick="App.deleteExpense('${e.id}')">✕</span></div></div>`;
+    }).join('') : `<div class="empty">هنوز مصرفی ثبت نشده.</div>`;
 
     return `
     <button class="back-btn" onclick="App.navigate('more')">← بازگشت</button>
-    <h2 class="section-title">💸 ثبت مصرف روزانه</h2>
+    <h2 class="section-title">💸 ثبت مصرف روزانه / برداشت شخصی</h2>
     <div class="card">
       <label>نوع مصرف</label>
-      <select id="exp-category" onchange="document.getElementById('exp-other-wrap').style.display=this.value==='__other__'?'block':'none'">
+      <select id="exp-category" onchange="App.onExpenseCategoryChange()">
         <option value="کرایه">کرایه دکان/گدام</option>
         <option value="تیل/بنزین">تیل / بنزین موتر</option>
         <option value="تعمیرات">تعمیرات موتر</option>
         <option value="معاش">معاش کارمند</option>
         <option value="حمل و نقل">کرایه حمل و نقل بار</option>
+        <option value="${WITHDRAWAL_CATEGORY}">💰 برداشت شخصی (مالک/شریک)</option>
         <option value="__other__">متفرقه / دیگر</option>
       </select>
       <div id="exp-other-wrap" style="display:none;"><label>نام مصرف</label><input id="exp-other" placeholder="مثلاً چای و نان"></div>
+      <div id="exp-withdrawn-wrap" style="display:none;">
+        <label>نام شخصی که این پول را برداشت کرده</label>
+        <input id="exp-withdrawn-by" placeholder="مثلاً رضوان یا یحیی مرادی">
+        <div class="field-note">این مقدار به‌عنوان مصرف واقعی کسب‌وکار حساب نمی‌شود و در محاسبهٔ سود خالص کم نمی‌گردد؛ فقط از موجودی نقد کسر می‌شود و در گزارش‌ها جدا نشان داده می‌شود.</div>
+      </div>
       <div class="grid2">
         <div><label>مبلغ</label><input id="exp-amount" type="number" inputmode="decimal" placeholder="0"></div>
         <div><label>تاریخ</label><input id="exp-date" type="date" value="${today}"></div>
       </div>
       <label>یادداشت (اختیاری)</label>
       <input id="exp-note" placeholder="توضیح کوتاه">
-      <button class="btn btn-primary" onclick="App.submitExpense()">ثبت مصرف</button>
+      <button class="btn btn-primary" onclick="App.submitExpense()">ثبت</button>
     </div>
-    <h2 class="section-title">آخرین مصارف</h2>
+    <h2 class="section-title">آخرین مصارف و برداشت‌ها</h2>
     <div class="card">${rows}</div>
     `;
+  },
+  onExpenseCategoryChange(){
+    const v=document.getElementById('exp-category').value;
+    document.getElementById('exp-other-wrap').style.display = v==='__other__' ? 'block':'none';
+    document.getElementById('exp-withdrawn-wrap').style.display = v===WITHDRAWAL_CATEGORY ? 'block':'none';
   },
 
   /* ---------- Products ---------- */
@@ -1836,7 +1916,7 @@ const App = {
     const sell=parseFloat(document.getElementById('np-sell').value)||0;
     if(!name){ alert('نام محصول را بنویسید'); return; }
     const pid=uid();
-    setDoc(doc(cols.products, pid), {id:pid, name, unit, stock, avgCost:cost, sellPrice:sell}).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
+    setDoc(doc(cols.products, pid), {id:pid, name, unit, stock, avgCost:cost, sellPrice:sell, ...this.recordMeta()}).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   editProduct(id){
     const p=this.state.products.find(x=>x.id===id); if(!p) return;
@@ -1897,12 +1977,15 @@ const App = {
 
     const sales=this.salesInRange(start,end);
     const purchases=this.purchasesInRange(start,end);
-    const expenses=this.expensesInRange(start,end);
+    const expensesAll=this.expensesInRange(start,end);
+    const expenses=expensesAll.filter(e=>e.category!==WITHDRAWAL_CATEGORY);
+    const withdrawals=expensesAll.filter(e=>e.category===WITHDRAWAL_CATEGORY);
     const revenue=sum(sales,'total');
     const cogs=sum(sales,'totalCost');
     const grossProfit=revenue-cogs;
     const expTotal=sum(expenses,'amount');
     const netProfit=grossProfit-expTotal;
+    const withdrawalTotal=sum(withdrawals,'amount');
     const purchTotal = purchases.reduce((a,p)=> a + (p.currency==='USD' ? (Number(p.total)||0)*(Number(p.rateAtPurchase)||this.usdRate()||0) : (Number(p.total)||0)), 0);
 
     const catMap={};
@@ -1910,6 +1993,15 @@ const App = {
     const catRows = Object.keys(catMap).length ? Object.entries(catMap).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
       `<div class="row-item"><div class="r-left"><b>${escapeHtml(k)}</b></div><div class="r-right num">${fmt(v)}</div></div>`
     ).join('') : `<div class="empty">مصرفی در این بازه ثبت نشده.</div>`;
+
+    const wdByPerson={};
+    withdrawals.forEach(w=>{ const name=w.withdrawnBy||'نامشخص'; wdByPerson[name]=(wdByPerson[name]||0)+w.amount; });
+    const wdSummaryRows = Object.keys(wdByPerson).length ? Object.entries(wdByPerson).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
+      `<div class="row-item"><div class="r-left"><b>${escapeHtml(k)}</b></div><div class="r-right num" style="color:var(--red)">${fmt(v)}</div></div>`
+    ).join('') : '';
+    const wdListRows = [...withdrawals].sort((a,b)=>(b.ts||0)-(a.ts||0)).map(w=>
+      `<div class="row-item"><div class="r-left"><b>${escapeHtml(w.withdrawnBy||'نامشخص')}</b><span class="sub">${w.date}${w.note?(' · '+escapeHtml(w.note)):''}</span><span class="sub" style="opacity:.8;">${escapeHtml(this.whoLabel(w))}</span></div><div class="r-right num" style="color:var(--red)">-${fmt(w.amount)}</div></div>`
+    ).join('');
 
     return `
     <button class="back-btn" onclick="App.navigate('more')">← بازگشت</button>
@@ -1933,7 +2025,7 @@ const App = {
       <div class="row-item"><div class="r-left">مجموع فروش</div><div class="r-right num">${fmt(revenue)}</div></div>
       <div class="row-item"><div class="r-left">قیمت تمام‌شدهٔ کالای فروخته‌شده</div><div class="r-right num">${fmt(cogs)}</div></div>
       <div class="row-item"><div class="r-left"><b>سود ناخالص</b></div><div class="r-right num" style="color:var(--green)"><b>${fmt(grossProfit)}</b></div></div>
-      <div class="row-item"><div class="r-left">مجموع مصارف</div><div class="r-right num" style="color:var(--red)">-${fmt(expTotal)}</div></div>
+      <div class="row-item"><div class="r-left">مجموع مصارف کسب‌وکار (بدون برداشت شخصی)</div><div class="r-right num" style="color:var(--red)">-${fmt(expTotal)}</div></div>
       <div class="total-line"><span>سود خالص</span><span class="num ${netProfit>=0?'':'red'}" style="color:${netProfit>=0?'var(--green)':'var(--red)'}">${fmt(netProfit)}</span></div>
     </div>
     <div class="card">
@@ -1943,10 +2035,23 @@ const App = {
     </div>
     <h2 class="section-title">مصارف بر اساس نوع</h2>
     <div class="card">${catRows}</div>
+    <h2 class="section-title">💰 برداشت‌های شخصی (جدا از سود/زیان)</h2>
+    <div class="card">
+      <div class="field-note">برداشت شخصی، سود/زیان کسب‌وکار را تغییر نمی‌دهد؛ فقط از موجودی نقد کم می‌شود. این بخش فقط برای این است که بدانید هرکس چقدر برداشت کرده.</div>
+      <div class="row-item"><div class="r-left"><b>مجموع برداشت در این بازه</b></div><div class="r-right num" style="color:var(--red)"><b>${fmt(withdrawalTotal)}</b></div></div>
+      ${wdSummaryRows}
+    </div>
+    ${withdrawals.length?`<div class="card">${wdListRows}</div>`:''}
     `;
   },
 
   /* ---------- Settings / Backup ---------- */
+  saveDeviceLabelFromInput(){
+    const val=(document.getElementById('set-device-label').value||'').trim();
+    setDeviceLabel(val);
+    alert('نام دستگاه ذخیره شد ✅');
+    this.render();
+  },
   saveSettings(){
     const fields = {
       businessName:(document.getElementById('set-name').value||'').trim()||'پخش موتر من',
@@ -2036,6 +2141,12 @@ const App = {
     return `
     <button class="back-btn" onclick="App.navigate('more')">← بازگشت</button>
     <h2 class="section-title">⚙️ تنظیمات</h2>
+    <div class="card">
+      <label>نام این گوشی/دستگاه (برای شناسایی ثبت‌کننده در فاکتورها)</label>
+      <input id="set-device-label" value="${escapeHtml(getDeviceLabel())}" placeholder="مثلاً گوشی احمد، دفتر مرکزی">
+      <div class="field-note">این نام فقط روی همین گوشی ذخیره می‌شود و کنار هر فروش/خرید/مصرفی که از این گوشی ثبت کنید نشان داده می‌شود. حساب ورودی فعلی: <b>${escapeHtml(this.user?this.user.email:'')}</b></div>
+      <button class="btn btn-outline" onclick="App.saveDeviceLabelFromInput()">ذخیرهٔ نام دستگاه</button>
+    </div>
     <div class="card">
       <label>نام کسب‌وکار</label>
       <input id="set-name" value="${escapeHtml(s.businessName)}">

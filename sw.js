@@ -1,6 +1,6 @@
 // حساب‌داری پخش موتر — Service Worker
 // هر بار که تغییری اساسی در فایل‌های اصلی دادید، این نسخه را عوض کنید تا گوشی‌ها نسخهٔ تازه بگیرند
-const CACHE_VERSION = 'hesabdari-v1';
+const CACHE_VERSION = 'hesabdari-v2';
 const APP_SHELL = [
   './',
   './index.html',
