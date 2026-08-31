@@ -388,7 +388,7 @@ async function migrateOldDataIfNeeded(){
 const App = {
   state: { settings: defaultSettings(), products:[], customers:[], suppliers:[], sales:[], purchases:[], expenses:[], payments:[], openingEntries:[] },
   tab:'dashboard', sub:null,
-  saleDraft:null, purchaseDraft:null,
+  saleDraft:null, purchaseDraft:null, editingInvoiceId:null,
   reportPeriod:'today', reportStart:null, reportEnd:null,
   user:null, role:null, authReady:false, dataReady:false, imageViewerSrc:null, payFormOpen:false,
   _loadedParts:null, _unsubs:null,
@@ -776,7 +776,7 @@ const App = {
     const saleId = uid();
     const newSale = {
       id:saleId, ts:Date.now(), date, customerId, customerName:customerNameFinal,
-      customerPhone: custName?custPhone:'', customerAddress: custName?custAddress:'',
+      customerPhone: custPhone, customerAddress: custAddress,
       items:this.saleDraft.items.map(it=>({...it,returnedQty:0})), total, totalCost, profit: total-totalCost,
       paid, remaining, note, status:'active', returns:[], originalTotal: total,
       ...this.recordMeta()
@@ -853,6 +853,9 @@ const App = {
     if(!sale){
       return `<button class="back-btn" onclick="App.navigate('dashboard')">← بازگشت</button><div class="empty">فاکتور یافت نشد.</div>`;
     }
+    if(this.editingInvoiceId===sale.id){
+      return this.renderInvoiceEditForm(sale);
+    }
     const s=this.state.settings;
     const cancelled = sale.status==='cancelled';
     const itemsHtml = sale.items.map((it,idx)=>{
@@ -883,6 +886,7 @@ const App = {
     </div>
     ${!cancelled?`
     <div class="inv-actions no-print">
+      <button class="btn btn-outline" onclick="App.startEditInvoice('${sale.id}')">✏️ ویرایش فاکتور</button>
       <button class="btn btn-outline" onclick="App.saleAddItem('${sale.id}')">➕ افزودن قلم جدید</button>
       <button class="btn btn-danger" onclick="App.cancelSale('${sale.id}')">❌ کنسل کامل فاکتور</button>
     </div>`:''}
@@ -925,6 +929,173 @@ const App = {
     `;
   },
 
+  /* ---------- Invoice full edit (items price/qty + customer info) ----------
+     برخلاف افزودن/مرجوعی که فقط یک تغییر کوچک را ثبت می‌کنند، این حالت به کاربر
+     اجازه می‌دهد قیمت و تعداد هر قلم و نیز اطلاعات مشتری (نام/شماره/آدرس) را
+     یک‌جا ویرایش کند. بعد از ذخیره، مجموع فاکتور، بدهی مشتری (قدیم/جدید) و
+     موجودی انبار همگی بر اساس مقدار جدید دوباره محاسبه و اصلاح می‌شوند. */
+  renderInvoiceEditForm(sale){
+    const itemsHtml = sale.items.map((it,idx)=>{
+      const returned = it.returnedQty||0;
+      return `
+      <div class="grid2" style="align-items:end;margin-bottom:10px;">
+        <div>
+          <label>${escapeHtml(it.name)} — تعداد${returned>0?` <span class="sub" style="color:var(--red);">(حداقل ${returned}، به‌دلیل مرجوعی)</span>`:''}</label>
+          <input id="edit-item-qty-${idx}" type="number" inputmode="decimal" value="${it.qty}">
+        </div>
+        <div>
+          <label>قیمت واحد (${escapeHtml(it.unit)})</label>
+          <input id="edit-item-price-${idx}" type="number" inputmode="decimal" value="${it.unitPrice}">
+        </div>
+      </div>`;
+    }).join('');
+
+    return `
+    <button class="back-btn" onclick="App.cancelEditInvoice()">← انصراف از ویرایش</button>
+    <h2 class="section-title">✏️ ویرایش فاکتور ${this.invoiceNoLabel(sale.id)}</h2>
+    <div class="card">
+      <b style="font-size:13.5px;">اقلام فاکتور</b>
+      <hr class="divider">
+      ${itemsHtml}
+      <hr class="divider">
+      <label>تاریخ</label>
+      <input id="edit-sale-date" type="date" value="${sale.date}">
+
+      <label>نام مشتری (خالی = فروش نقدی)</label>
+      <input id="edit-customer-name" list="customers-list" placeholder="مثلاً دوکان احمد" value="${escapeHtml(sale.customerName==='مشتری نقدی'?'':sale.customerName)}">
+      <datalist id="customers-list">${this.state.customers.map(c=>`<option value="${escapeHtml(c.name)}">`).join('')}</datalist>
+
+      <div class="grid2">
+        <div><label>شماره تماس مشتری (اختیاری)</label><input id="edit-customer-phone" type="tel" placeholder="07xxxxxxxx" value="${escapeHtml(sale.customerPhone||'')}"></div>
+        <div><label>آدرس مشتری (اختیاری)</label><input id="edit-customer-address" value="${escapeHtml(sale.customerAddress||'')}"></div>
+      </div>
+      <div class="field-note">حتی اگر نام مشتری خالی بماند، شماره واتساپ ثبت‌شده در اینجا برای ارسال فاکتور استفاده می‌شود.</div>
+
+      <label>مبلغ دریافت‌شده (نقد)</label>
+      <input id="edit-sale-paid" type="number" inputmode="decimal" value="${sale.paid}">
+      <div class="field-note">اگر مبلغ دریافتی کمتر از مجموع باشد، باقیمانده به عنوان بدهی مشتری ثبت می‌شود.</div>
+
+      <label>یادداشت</label>
+      <input id="edit-sale-note" value="${escapeHtml(sale.note||'')}">
+
+      <div class="field-note">با ذخیره: مجموع فاکتور، بدهی مشتری (چه مشتری قبلی و چه جدید) و موجودی انبار همگی بر اساس مقادیر جدید دوباره محاسبه می‌شوند.</div>
+
+      <div class="inv-actions" style="margin-top:12px;">
+        <button class="btn btn-primary" onclick="App.saveEditInvoice('${sale.id}')">💾 ذخیرهٔ ویرایش</button>
+        <button class="btn btn-outline" onclick="App.cancelEditInvoice()">انصراف</button>
+      </div>
+    </div>
+    `;
+  },
+
+  startEditInvoice(saleId){
+    const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
+    if(sale.status==='cancelled'){ alert('این فاکتور باطل شده است و قابل ویرایش نیست.'); return; }
+    this.editingInvoiceId=saleId;
+    this.render();
+  },
+  cancelEditInvoice(){
+    this.editingInvoiceId=null;
+    this.render();
+  },
+  saveEditInvoice(saleId){
+    const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
+    if(sale.status==='cancelled'){ alert('این فاکتور باطل شده است.'); return; }
+
+    const newItems = sale.items.map((it,idx)=>{
+      const qtyEl=document.getElementById('edit-item-qty-'+idx);
+      const priceEl=document.getElementById('edit-item-price-'+idx);
+      const qty=parseFloat(qtyEl ? qtyEl.value : NaN);
+      const unitPrice=parseFloat(priceEl ? priceEl.value : NaN);
+      return {...it, qty, unitPrice};
+    });
+    for(const it of newItems){
+      if(isNaN(it.qty)||it.qty<=0){ alert('تعداد نامعتبر برای «'+it.name+'»'); return; }
+      if(isNaN(it.unitPrice)||it.unitPrice<0){ alert('قیمت نامعتبر برای «'+it.name+'»'); return; }
+      if(it.qty < (it.returnedQty||0)){ alert('تعداد «'+it.name+'» نمی‌تواند کمتر از مقدار مرجوعی‌شدهٔ آن ('+(it.returnedQty||0)+' '+it.unit+') باشد.'); return; }
+    }
+
+    const custName=(document.getElementById('edit-customer-name').value||'').trim();
+    const custPhone=(document.getElementById('edit-customer-phone').value||'').trim();
+    const custAddress=(document.getElementById('edit-customer-address').value||'').trim();
+    const date=document.getElementById('edit-sale-date').value || sale.date;
+    const note=(document.getElementById('edit-sale-note').value||'').trim();
+
+    const newTotal = newItems.reduce((a,i)=>a+i.qty*i.unitPrice,0);
+    const newTotalCost = newItems.reduce((a,i)=>a+i.qty*(i.cost||0),0);
+
+    let paid=parseFloat(document.getElementById('edit-sale-paid').value);
+    if(isNaN(paid)||paid<0) paid=0;
+    if(paid>newTotal) paid=newTotal;
+    const newRemaining=newTotal-paid;
+
+    if(!custName && newRemaining>0.001){ alert('برای فروش قرضی (نسیه) باید نام مشتری مشخص باشد.'); return; }
+
+    // موجودی انبار: فقط تفاوت تعداد نسبت به مقدار قبلیِ همان قلم اعمال می‌شود
+    const stockDeltas={};
+    newItems.forEach((it,idx)=>{
+      const deltaQty = it.qty - sale.items[idx].qty;
+      if(deltaQty!==0) stockDeltas[it.productId]=(stockDeltas[it.productId]||0)-deltaQty;
+    });
+    let willGoNegative=false;
+    Object.keys(stockDeltas).forEach(pid=>{
+      const p=this.state.products.find(x=>x.id===pid);
+      if(p && (p.stock+stockDeltas[pid])<0) willGoNegative=true;
+    });
+    if(willGoNegative && !confirm('با این ویرایش موجودی برخی کالاها منفی می‌شود. آیا ادامه می‌دهید؟')) return;
+
+    const batch=writeBatch(db);
+    const oldCustomerId=sale.customerId;
+    const oldRemaining=sale.remaining||0;
+    let newCustomerId=null, newCustomerNameFinal='مشتری نقدی';
+
+    if(custName){
+      const existing=this.state.customers.find(c=>c.name===custName);
+      if(existing){ newCustomerId=existing.id; newCustomerNameFinal=existing.name; }
+      else { newCustomerId=uid(); newCustomerNameFinal=custName; }
+    }
+
+    // اصلاح بدهی مشتری قدیم/جدید (delta-based، تا با ویرایش هم‌زمان تداخل نکند)
+    if(oldCustomerId && newCustomerId && oldCustomerId===newCustomerId){
+      const existing=this.state.customers.find(c=>c.id===oldCustomerId);
+      const fields={ balance: increment(newRemaining-oldRemaining) };
+      if(custPhone && custPhone!==(existing&&existing.phone)) fields.phone=custPhone;
+      if(custAddress && custAddress!==(existing&&existing.address)) fields.address=custAddress;
+      batch.update(doc(cols.customers,oldCustomerId), fields);
+    } else {
+      if(oldCustomerId && Math.abs(oldRemaining)>0.0001){
+        batch.update(doc(cols.customers,oldCustomerId), { balance: increment(-oldRemaining) });
+      }
+      if(newCustomerId){
+        const existing=this.state.customers.find(c=>c.id===newCustomerId);
+        if(existing){
+          const fields={};
+          if(Math.abs(newRemaining)>0.0001) fields.balance=increment(newRemaining);
+          if(custPhone && custPhone!==existing.phone) fields.phone=custPhone;
+          if(custAddress && custAddress!==existing.address) fields.address=custAddress;
+          if(Object.keys(fields).length) batch.update(doc(cols.customers,newCustomerId), fields);
+        } else {
+          batch.set(doc(cols.customers,newCustomerId), {id:newCustomerId,name:custName,phone:custPhone,address:custAddress,balance:newRemaining, ...this.recordMeta()});
+        }
+      }
+    }
+
+    Object.keys(stockDeltas).forEach(pid=>{
+      if(stockDeltas[pid]!==0) batch.update(doc(cols.products,pid), { stock: increment(stockDeltas[pid]) });
+    });
+
+    batch.update(doc(cols.sales, sale.id), {
+      items:newItems, customerId:newCustomerId, customerName:newCustomerNameFinal,
+      customerPhone:custPhone, customerAddress:custAddress, date, note,
+      total:newTotal, totalCost:newTotalCost, profit:newTotal-newTotalCost,
+      paid, remaining:newRemaining, ...this.editMeta()
+    });
+
+    batch.commit().then(()=>{
+      this.editingInvoiceId=null;
+      this.render();
+    }).catch(e=>{ console.error('saveEditInvoice error',e); alert('خطا در ذخیرهٔ ویرایش؛ اتصال اینترنت را بررسی کنید و دوباره تلاش کنید.'); });
+  },
 
   renderSale(){
     const items = this.saleDraft.items;
@@ -1258,15 +1429,13 @@ const App = {
     const newItems = sale.items.map((x,i)=> i===idx ? {...x, returnedQty:(x.returnedQty||0)+qty} : x);
     const newReturns = [...sale.returns, {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, unitPrice:it.unitPrice, amount:refund}];
 
+    const newTotal = sale.total-refund, newPaid = sale.paid-cashRefund;
     const batch = writeBatch(db);
     batch.update(doc(cols.sales, sale.id), {
       items: newItems, returns: newReturns,
-      total: increment(-refund), totalCost: increment(-refundCost), profit: increment(-(refund-refundCost)),
-      paid: increment(-cashRefund), remaining: increment(-(cashRefund - (-debtReduction) - 0) ) // محاسبه دقیق پایین
+      total: newTotal, totalCost: sale.totalCost-refundCost, profit: newTotal-(sale.totalCost-refundCost),
+      paid: newPaid, remaining: newTotal-newPaid, ...this.editMeta()
     });
-    // remaining = total-paid، برای سادگی و دقت مستقیم محاسبه و ست می‌کنیم نه increment مبهم:
-    const newTotal = sale.total-refund, newPaid = sale.paid-cashRefund;
-    batch.update(doc(cols.sales, sale.id), { remaining: newTotal-newPaid, ...this.editMeta() });
     if(sale.customerId && debtReduction>0){
       batch.update(doc(cols.customers, sale.customerId), { balance: increment(-debtReduction) });
     }
@@ -1919,15 +2088,31 @@ const App = {
     setDoc(doc(cols.products, pid), {id:pid, name, unit, stock, avgCost:cost, sellPrice:sell, ...this.recordMeta()}).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   editProduct(id){
+    // نکته: این تابع دیگر موجودی (stock) را دست نمی‌زند — چون بازنویسیِ مطلقِ موجودی
+    // با یک عدد که ممکن است روی صفحه کهنه/آفلاین باشد، می‌تواند اثر برگشت-به-انبارِ
+    // کنسل/مرجوعیِ فاکتورها را پاک کند. برای اصلاح موجودی از دکمهٔ 📦 (adjustProductStock) استفاده کنید.
     const p=this.state.products.find(x=>x.id===id); if(!p) return;
     const name=prompt('نام محصول:',p.name); if(name===null) return;
     const unit=prompt('واحد:',p.unit); if(unit===null) return;
     const sellPrice=prompt('قیمت فروش پیشنهادی:',p.sellPrice); if(sellPrice===null) return;
-    const stock=prompt('اصلاح موجودی فعلی (تعداد):',p.stock); if(stock===null) return;
     updateDoc(doc(cols.products, id), {
       name: name.trim()||p.name, unit: unit.trim()||p.unit,
-      sellPrice: parseFloat(sellPrice)||0, stock: parseFloat(stock)||0
+      sellPrice: parseFloat(sellPrice)||0
     }).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
+  },
+  // اصلاح موجودی همیشه افزایشی (increment) است، نه جایگزینی مطلق — یعنی حتی اگر
+  // هم‌زمان یک فاکتور دیگر (فروش/خرید/کنسل) روی همین محصول در حال ثبت باشد،
+  // هیچ تغییری گم نمی‌شود، چون سرور مقدار را نسبت به آخرین عدد واقعی خودش جمع/کم می‌کند.
+  adjustProductStock(id){
+    const p=this.state.products.find(x=>x.id===id); if(!p) return;
+    const deltaStr=prompt(
+      'اصلاح موجودی «'+p.name+'»\nموجودی فعلی (طبق آخرین اطلاعات این دستگاه): '+p.stock+' '+p.unit+
+      '\n\nچند عدد اضافه یا کم شود؟\nمثال: برای اضافه‌کردن بنویسید 5 — برای کم‌کردن بنویسید -5', '0');
+    if(deltaStr===null) return;
+    const delta=parseFloat(deltaStr);
+    if(!delta || isNaN(delta)){ alert('عدد نامعتبر است.'); return; }
+    if(!confirm((delta>0?'➕ ':'➖ ')+Math.abs(delta)+' '+p.unit+' به موجودی «'+p.name+'» '+(delta>0?'اضافه':'کم')+' شود؟')) return;
+    updateDoc(doc(cols.products, id), { stock: increment(delta) }).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   deleteProduct(id){
     if(!confirm('این محصول حذف شود؟ این کار سابقهٔ فروش/خرید را تغییر نمی‌دهد.')) return;
@@ -1939,7 +2124,8 @@ const App = {
       `<div class="row-item"><div class="r-left"><b>${escapeHtml(p.name)}</b><span class="sub">قیمت تمام‌شده: <span class="num">${fmt(p.avgCost)}</span> · قیمت فروش: <span class="num">${fmt(p.sellPrice)}</span></span></div>
       <div class="r-right" style="display:flex;align-items:center;gap:10px;">
         <span class="badge ${p.stock<=0?'red':'gold'} num">${p.stock} ${escapeHtml(p.unit)}</span>
-        <span onclick="App.editProduct('${p.id}')" style="cursor:pointer;">✏️</span>
+        <span onclick="App.adjustProductStock('${p.id}')" style="cursor:pointer;" title="اصلاح موجودی">📦</span>
+        <span onclick="App.editProduct('${p.id}')" style="cursor:pointer;" title="ویرایش نام/قیمت">✏️</span>
         <span onclick="App.deleteProduct('${p.id}')" style="cursor:pointer;color:var(--red);">✕</span>
       </div></div>`
     ).join('') : `<div class="empty">هنوز محصولی اضافه نشده.</div>`;
