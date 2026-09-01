@@ -778,7 +778,7 @@ const App = {
       id:saleId, ts:Date.now(), date, customerId, customerName:customerNameFinal,
       customerPhone: custPhone, customerAddress: custAddress,
       items:this.saleDraft.items.map(it=>({...it,returnedQty:0})), total, totalCost, profit: total-totalCost,
-      paid, remaining, note, status:'active', returns:[], originalTotal: total,
+      paid, remaining, note, status:'active', returns:[], originalTotal: total, discount:0,
       ...this.recordMeta()
     };
     batch.set(doc(cols.sales, saleId), newSale);
@@ -888,6 +888,7 @@ const App = {
     <div class="inv-actions no-print">
       <button class="btn btn-outline" onclick="App.startEditInvoice('${sale.id}')">✏️ ویرایش فاکتور</button>
       <button class="btn btn-outline" onclick="App.saleAddItem('${sale.id}')">➕ افزودن قلم جدید</button>
+      ${sale.remaining>0.5?`<button class="btn btn-outline" onclick="App.applySaleDiscount('${sale.id}')">🏷 تخفیف به‌جای بدهی</button>`:''}
       <button class="btn btn-danger" onclick="App.cancelSale('${sale.id}')">❌ کنسل کامل فاکتور</button>
     </div>`:''}
     <div id="invoice-print" class="card">
@@ -915,6 +916,7 @@ const App = {
       </table>
       <div class="inv-totals">
         ${sale.originalTotal!==undefined && Math.abs(sale.originalTotal-sale.total)>0.5?`<div class="row-item"><div class="r-left">مجموع اولیهٔ فاکتور</div><div class="r-right num">${fmt(sale.originalTotal)} ${s.currency}</div></div>`:''}
+        ${sale.discount>0.5?`<div class="row-item"><div class="r-left">🏷 تخفیف داده‌شده</div><div class="r-right num" style="color:var(--gold-d)">-${fmt(sale.discount)} ${s.currency}</div></div>`:''}
         <div class="row-item"><div class="r-left">مجموع فعلی فاکتور</div><div class="r-right num">${fmt(sale.total)} ${s.currency}</div></div>
         <div class="row-item"><div class="r-left">مبلغ دریافت‌شده</div><div class="r-right num" style="color:var(--green)">${fmt(sale.paid)} ${s.currency}</div></div>
         <div class="row-item"><div class="r-left"><b>${sale.remaining>0.5?'باقیمانده (قرض)':'وضعیت'}</b></div><div class="r-right num" style="color:${sale.remaining>0.5?'var(--red)':'var(--green)'}"><b>${cancelled?'باطل شده':(sale.remaining>0.5?fmt(sale.remaining)+' '+s.currency:'تسویه‌شده ✅')}</b></div></div>
@@ -1021,8 +1023,8 @@ const App = {
     const date=document.getElementById('edit-sale-date').value || sale.date;
     const note=(document.getElementById('edit-sale-note').value||'').trim();
 
-    const newTotal = newItems.reduce((a,i)=>a+i.qty*i.unitPrice,0);
-    const newTotalCost = newItems.reduce((a,i)=>a+i.qty*(i.cost||0),0);
+    const newTotal = newItems.reduce((a,i)=>a+(i.qty-(i.returnedQty||0))*i.unitPrice,0);
+    const newTotalCost = newItems.reduce((a,i)=>a+(i.qty-(i.returnedQty||0))*(i.cost||0),0);
 
     let paid=parseFloat(document.getElementById('edit-sale-paid').value);
     if(isNaN(paid)||paid<0) paid=0;
@@ -1511,6 +1513,32 @@ const App = {
     }
     batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
+  // تبدیل بخشی یا کل «باقی‌مانده» یک فاکتور به «تخفیف» به‌جای بدهی مشتری.
+  // مثال: مجموع ۱۳۰۵ شده ولی فقط ۱۳۰۰ از مشتری می‌گیرید — ۵ افغانی باقی‌مانده
+  // را با این دکمه به‌عنوان تخفیف می‌بخشید تا در «طلب از مشتریان» باقی نماند.
+  applySaleDiscount(saleId){
+    const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
+    if(sale.status==='cancelled'){ alert('این فاکتور باطل شده است.'); return; }
+    const remaining=sale.remaining||0;
+    if(remaining<=0.001){ alert('این فاکتور باقیمانده‌ای ندارد که به تخفیف تبدیل شود.'); return; }
+    const cur=this.state.settings.currency;
+    const amtStr=prompt('چقدر از باقیماندهٔ '+fmt(remaining)+' '+cur+' به‌عنوان تخفیف به مشتری بخشیده شود؟\n(بقیهٔ مبلغ، در صورت وجود، همچنان به‌عنوان بدهی مشتری می‌ماند)', remaining);
+    if(amtStr===null) return;
+    const amt=parseFloat(amtStr);
+    if(isNaN(amt)||amt<=0){ alert('عدد نامعتبر است.'); return; }
+    if(amt>remaining+0.001){ alert('این مبلغ از باقیماندهٔ فعلی ('+fmt(remaining)+' '+cur+') بیشتر است.'); return; }
+
+    const newTotal=sale.total-amt, newProfit=(sale.total-amt)-sale.totalCost, newRemaining=sale.remaining-amt;
+    const batch=writeBatch(db);
+    batch.update(doc(cols.sales, sale.id), {
+      total:newTotal, profit:newProfit, remaining:newRemaining,
+      discount:(sale.discount||0)+amt, ...this.editMeta()
+    });
+    if(sale.customerId){
+      batch.update(doc(cols.customers, sale.customerId), { balance: increment(-amt) });
+    }
+    batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
+  },
   saleAddItem(saleId){
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
     if(sale.status==='cancelled'){ alert('این فاکتور باطل شده است.'); return; }
@@ -1991,9 +2019,11 @@ const App = {
     if(this.sub==='reports') return this.renderReports();
     if(this.sub==='products') return this.renderProducts();
     if(this.sub==='settings') return this.renderSettings();
+    if(this.sub==='history') return this.renderFullHistory();
     return `
     <h2 class="section-title">☰ بیشتر</h2>
     <div class="more-list">
+      <button onclick="App.navigate('more','history')"><span class="ic">📜</span> تاریخچهٔ کامل معاملات</button>
       <button onclick="App.navigate('more','expenses')"><span class="ic">💸</span> مصارف روزانه و برداشت شخصی</button>
       ${this.isOwner()?`<button onclick="App.navigate('more','reports')"><span class="ic">📊</span> گزارش سود روزانه / هفته‌وار / ماهوار</button>`:''}
       <button onclick="App.navigate('more','products')"><span class="ic">🗂️</span> مدیریت محصولات و موجودی</button>
@@ -2148,6 +2178,80 @@ const App = {
     </div>
     <h2 class="section-title">فهرست محصولات (${sorted.length})</h2>
     <div class="card">${rows}</div>
+    `;
+  },
+
+  /* ---------- تاریخچهٔ کامل معاملات ----------
+     برخلاف «آخرین معاملات» در داشبورد (فقط ۸ مورد آخر) و «سابقهٔ معاملات» در پروفایل
+     مشتری/عمده‌فروش (فقط برای طرف‌های ثبت‌شده)، این صفحه همهٔ فروش‌ها (چه مشتری نقدی
+     چه ثبت‌شده)، خریدها، مصارف/برداشت‌ها، و دریافت/پرداخت‌ها را با فیلتر تاریخ و نوع
+     نشان می‌دهد — چیزی گم نمی‌شود. */
+  setHistoryPeriod(p){ this.historyPeriod=p; this.render(); },
+  setHistoryType(t){ this.historyType=t; this.render(); },
+  renderFullHistory(){
+    const today=todayISO();
+    let start,end=today,label='امروز';
+    if(this.historyPeriod==='week'){ start=startOfWeek(today); label='این هفته'; }
+    else if(this.historyPeriod==='month'){ start=startOfMonth(today); label='این ماه'; }
+    else if(this.historyPeriod==='all'){ start='0000-01-01'; label='همهٔ زمان‌ها'; }
+    else if(this.historyPeriod==='custom'){ start=this.historyStart||today; end=this.historyEnd||today; label='بازهٔ دلخواه'; }
+    else { start=today; label='امروز'; this.historyPeriod='today'; }
+
+    const type=this.historyType||'all';
+    let rows=[];
+    if(type==='all'||type==='sales'){
+      this.salesInRange(start,end).forEach(x=>{
+        const tag=x.status==='cancelled'?' <span class="badge gold">باطل</span>':'';
+        rows.push({ts:x.ts, html:`<div class="row-item clickable" onclick="App.viewInvoice('${x.id}')"><div class="r-left"><b>🧾 فروش ${this.invoiceNoLabel(x.id)} — ${escapeHtml(x.customerName)}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم${x.remaining>0.5?' · باقی‌مانده '+fmt(x.remaining):''}</span>${this.whoLabel(x)?`<span class="sub" style="opacity:.75;">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num" style="color:var(--green)">+${fmt(x.paid)}</div></div>`});
+      });
+    }
+    if(type==='all'||type==='purchases'){
+      this.purchasesInRange(start,end).forEach(x=>{
+        const tag=x.status==='cancelled'?' <span class="badge gold">باطل</span>':(x.currency==='USD'?' <span class="badge gold">دالر</span>':'');
+        rows.push({ts:x.ts, html:`<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><div class="r-left"><b>📦 خرید — ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span>${this.whoLabel(x)?`<span class="sub" style="opacity:.75;">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num" style="color:var(--red)">-${fmt(x.paid)}${x.currency==='USD'?' $':''}</div></div>`});
+      });
+    }
+    if(type==='all'||type==='expenses'){
+      this.expensesInRange(start,end).forEach(x=>{
+        const isW=x.category===WITHDRAWAL_CATEGORY;
+        rows.push({ts:x.ts, html:`<div class="row-item"><div class="r-left"><b>${isW?'💰 برداشت — '+escapeHtml(x.withdrawnBy||''):'💸 مصرف — '+escapeHtml(x.category)}</b><span class="sub">${x.date}${x.note?(' · '+escapeHtml(x.note)):''}</span>${this.whoLabel(x)?`<span class="sub" style="opacity:.75;">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num" style="color:var(--red)">-${fmt(x.amount)}</div></div>`});
+      });
+    }
+    if(type==='all'||type==='payments'){
+      this.state.payments.filter(x=>x.date>=start && x.date<=end).forEach(x=>{
+        const color=x.type==='receive'?'var(--green)':'var(--red)';
+        const photoBtn = x.receiptImage ? `<span onclick="App.viewPaymentReceipt('${x.id}')" style="cursor:pointer;margin-inline-start:6px;" title="مشاهده عکس رسید">🧾</span>` : '';
+        rows.push({ts:x.ts, html:`<div class="row-item"><div class="r-left"><b>${x.type==='receive'?'⬅️ دریافت از':'➡️ پرداخت به'} ${escapeHtml(x.partyName||'')}</b>${photoBtn}<span class="sub">${x.date}${x.currency==='USD'?' · دالری':''}</span>${this.whoLabel(x)?`<span class="sub" style="opacity:.75;">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num" style="color:${color}">${fmt(x.amount)}${x.currency==='USD'?' $':''}</div></div>`});
+      });
+    }
+    rows.sort((a,b)=>(b.ts||0)-(a.ts||0));
+
+    return `
+    <button class="back-btn" onclick="App.navigate('more')">← بازگشت</button>
+    <h2 class="section-title">📜 تاریخچهٔ کامل معاملات</h2>
+    <div class="period-btns">
+      <button class="${this.historyPeriod==='today'||!this.historyPeriod?'active':''}" onclick="App.setHistoryPeriod('today')">امروز</button>
+      <button class="${this.historyPeriod==='week'?'active':''}" onclick="App.setHistoryPeriod('week')">این هفته</button>
+      <button class="${this.historyPeriod==='month'?'active':''}" onclick="App.setHistoryPeriod('month')">این ماه</button>
+      <button class="${this.historyPeriod==='all'?'active':''}" onclick="App.setHistoryPeriod('all')">همه</button>
+      <button class="${this.historyPeriod==='custom'?'active':''}" onclick="App.setHistoryPeriod('custom')">بازهٔ دلخواه</button>
+    </div>
+    ${this.historyPeriod==='custom'?`
+    <div class="card">
+      <div class="grid2">
+        <div><label>از تاریخ</label><input type="date" value="${this.historyStart||today}" onchange="App.historyStart=this.value; App.render();"></div>
+        <div><label>تا تاریخ</label><input type="date" value="${this.historyEnd||today}" onchange="App.historyEnd=this.value; App.render();"></div>
+      </div>
+    </div>`:''}
+    <div class="tabbar-sub">
+      <button class="${type==='all'?'active':''}" onclick="App.setHistoryType('all')">همه</button>
+      <button class="${type==='sales'?'active':''}" onclick="App.setHistoryType('sales')">فروش</button>
+      <button class="${type==='purchases'?'active':''}" onclick="App.setHistoryType('purchases')">خرید</button>
+      <button class="${type==='expenses'?'active':''}" onclick="App.setHistoryType('expenses')">مصرف</button>
+      <button class="${type==='payments'?'active':''}" onclick="App.setHistoryType('payments')">دریافت/پرداخت</button>
+    </div>
+    <div class="field-note">بازه: ${label} (${start==='0000-01-01'?'ابتدا':start} تا ${end}) — ${rows.length} مورد</div>
+    <div class="card">${rows.length?rows.map(r=>r.html).join(''):'<div class="empty">در این بازه معامله‌ای نیست.</div>'}</div>
     `;
   },
 
