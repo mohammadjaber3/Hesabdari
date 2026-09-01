@@ -508,7 +508,11 @@ const App = {
     this._unsubs.push(unsubSettings);
   },
 
-  isOwner(){ return this.role==='owner'; },
+  // فقط کسی «مالک» حساب می‌شود که هم نقش «owner» در Firestore داشته باشد و هم دقیقاً
+  // با همین ایمیل وارد شده باشد — یعنی حتی اگر یک نقش owner به‌اشتباه به کاربر دیگری
+  // داده شود، تا وقتی ایمیلش manager@motar.com نباشد، دسترسی مدیریتی نمی‌گیرد.
+  OWNER_EMAIL: 'manager@motar.com',
+  isOwner(){ return this.role==='owner' && !!this.user && this.user.email===this.OWNER_EMAIL; },
 
   logout(){
     if(!confirm('از حساب خارج شوید؟')) return;
@@ -2026,7 +2030,7 @@ const App = {
       <button onclick="App.navigate('more','history')"><span class="ic">📜</span> تاریخچهٔ کامل معاملات</button>
       <button onclick="App.navigate('more','expenses')"><span class="ic">💸</span> مصارف روزانه و برداشت شخصی</button>
       ${this.isOwner()?`<button onclick="App.navigate('more','reports')"><span class="ic">📊</span> گزارش سود روزانه / هفته‌وار / ماهوار</button>`:''}
-      <button onclick="App.navigate('more','products')"><span class="ic">🗂️</span> مدیریت محصولات و موجودی</button>
+      <button onclick="App.navigate('more','products')"><span class="ic">🗂️</span> ${this.isOwner()?'مدیریت محصولات و موجودی':'مشاهدهٔ محصولات و موجودی (فقط خواندنی)'}</button>
       ${this.isOwner()?`<button onclick="App.navigate('more','settings')"><span class="ic">⚙️</span> تنظیمات و پشتیبان‌گیری</button>`:''}
       <button onclick="App.logout()"><span class="ic">🚪</span> خروج از حساب (${escapeHtml(this.user?this.user.email:'')})</button>
     </div>
@@ -2108,6 +2112,7 @@ const App = {
 
   /* ---------- Products ---------- */
   submitNewProductForm(){
+    if(!this.isOwner()){ alert('فقط مدیر می‌تواند محصول اضافه کند.'); return; }
     const name=(document.getElementById('np-name').value||'').trim();
     const unit=(document.getElementById('np-unit').value||'').trim()||'عدد';
     const stock=parseFloat(document.getElementById('np-stock').value)||0;
@@ -2118,6 +2123,7 @@ const App = {
     setDoc(doc(cols.products, pid), {id:pid, name, unit, stock, avgCost:cost, sellPrice:sell, ...this.recordMeta()}).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   editProduct(id){
+    if(!this.isOwner()){ alert('فقط مدیر می‌تواند اطلاعات محصول را ویرایش کند.'); return; }
     // نکته: این تابع دیگر موجودی (stock) را دست نمی‌زند — چون بازنویسیِ مطلقِ موجودی
     // با یک عدد که ممکن است روی صفحه کهنه/آفلاین باشد، می‌تواند اثر برگشت-به-انبارِ
     // کنسل/مرجوعیِ فاکتورها را پاک کند. برای اصلاح موجودی از دکمهٔ 📦 (adjustProductStock) استفاده کنید.
@@ -2133,7 +2139,9 @@ const App = {
   // اصلاح موجودی همیشه افزایشی (increment) است، نه جایگزینی مطلق — یعنی حتی اگر
   // هم‌زمان یک فاکتور دیگر (فروش/خرید/کنسل) روی همین محصول در حال ثبت باشد،
   // هیچ تغییری گم نمی‌شود، چون سرور مقدار را نسبت به آخرین عدد واقعی خودش جمع/کم می‌کند.
+  // فقط مدیر می‌تواند دستی موجودی را اصلاح کند — تغییرات خودکار خرید/فروش/کنسل برای همه باز است.
   adjustProductStock(id){
+    if(!this.isOwner()){ alert('فقط مدیر می‌تواند موجودی را دستی اصلاح کند.'); return; }
     const p=this.state.products.find(x=>x.id===id); if(!p) return;
     const deltaStr=prompt(
       'اصلاح موجودی «'+p.name+'»\nموجودی فعلی (طبق آخرین اطلاعات این دستگاه): '+p.stock+' '+p.unit+
@@ -2145,24 +2153,28 @@ const App = {
     updateDoc(doc(cols.products, id), { stock: increment(delta) }).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   deleteProduct(id){
+    if(!this.isOwner()){ alert('فقط مدیر می‌تواند محصول را حذف کند.'); return; }
     if(!confirm('این محصول حذف شود؟ این کار سابقهٔ فروش/خرید را تغییر نمی‌دهد.')) return;
     deleteDoc(doc(cols.products, id)).catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
   renderProducts(){
+    const owner=this.isOwner();
     const sorted=[...this.state.products].sort((a,b)=>a.name.localeCompare(b.name,'fa'));
     const rows = sorted.length ? sorted.map(p=>
       `<div class="row-item"><div class="r-left"><b>${escapeHtml(p.name)}</b><span class="sub">قیمت تمام‌شده: <span class="num">${fmt(p.avgCost)}</span> · قیمت فروش: <span class="num">${fmt(p.sellPrice)}</span></span></div>
       <div class="r-right" style="display:flex;align-items:center;gap:10px;">
         <span class="badge ${p.stock<=0?'red':'gold'} num">${p.stock} ${escapeHtml(p.unit)}</span>
-        <span onclick="App.adjustProductStock('${p.id}')" style="cursor:pointer;" title="اصلاح موجودی">📦</span>
+        ${owner?`<span onclick="App.adjustProductStock('${p.id}')" style="cursor:pointer;" title="اصلاح موجودی">📦</span>
         <span onclick="App.editProduct('${p.id}')" style="cursor:pointer;" title="ویرایش نام/قیمت">✏️</span>
-        <span onclick="App.deleteProduct('${p.id}')" style="cursor:pointer;color:var(--red);">✕</span>
+        <span onclick="App.deleteProduct('${p.id}')" style="cursor:pointer;color:var(--red);">✕</span>`:''}
       </div></div>`
     ).join('') : `<div class="empty">هنوز محصولی اضافه نشده.</div>`;
 
     return `
     <button class="back-btn" onclick="App.navigate('more')">← بازگشت</button>
     <h2 class="section-title">🗂️ محصولات و موجودی</h2>
+    ${!owner?`<div class="field-note">🔒 این بخش فقط برای مشاهده است — تغییر موجودی/قیمت/محصولات فقط با حساب مدیر ممکن است. موجودی همچنان با ثبت خرید یا فروش شما به‌صورت خودکار درست می‌شود.</div>`:''}
+    ${owner?`
     <div class="card">
       <label>افزودن محصول جدید</label>
       <input id="np-name" placeholder="نام محصول">
@@ -2175,7 +2187,7 @@ const App = {
         <div><label>قیمت فروش پیشنهادی</label><input id="np-sell" type="number" placeholder="0"></div>
       </div>
       <button class="btn btn-primary" onclick="App.submitNewProductForm()">افزودن محصول</button>
-    </div>
+    </div>`:''}
     <h2 class="section-title">فهرست محصولات (${sorted.length})</h2>
     <div class="card">${rows}</div>
     `;
