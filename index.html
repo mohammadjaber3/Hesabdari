@@ -842,12 +842,19 @@ const App = {
       lines.push(`${idx+1}. ${it.name} — ${it.qty} ${it.unit} × ${fmt(it.unitPrice)} = ${fmt(it.qty*it.unitPrice)}${ret}`);
     });
     lines.push('———————————————');
+    if(sale.originalTotal!==undefined && Math.abs(sale.originalTotal-sale.total)>0.5) lines.push('مجموع اولیهٔ فاکتور: '+fmt(sale.originalTotal)+' '+s.currency);
+    if(sale.discount>0.5) lines.push('🏷 تخفیف داده‌شده: '+fmt(sale.discount)+' '+s.currency);
     lines.push('مجموع فاکتور: '+fmt(sale.total)+' '+s.currency);
     lines.push('پرداخت‌شده: '+fmt(sale.paid)+' '+s.currency);
     if(sale.status==='cancelled') lines.push('وضعیت: باطل شده ❌');
     else if(sale.remaining>0.5) lines.push('باقیمانده (قرض): '+fmt(sale.remaining)+' '+s.currency);
     else lines.push('وضعیت: تسویه‌شده ✅');
     if(sale.note) lines.push('یادداشت: '+sale.note);
+    if(sale.returns && sale.returns.length){
+      lines.push('———————————————');
+      lines.push('↩️ کالاهای مرجوعی:');
+      sale.returns.forEach(r=> lines.push(`- ${r.name} — ${r.qty} عدد — ${fmt(r.amount)} ${s.currency}`));
+    }
     lines.push('———————————————');
     lines.push('با تشکر از خرید شما 🙏');
     return lines.join('\n');
@@ -937,7 +944,6 @@ const App = {
       <div class="inv-sign">
         <div class="line">امضای فروشنده</div>
       </div>
-      <div class="inv-footer">سند هذا بدون مهر و امضا اعتبار ندارد، جنس فروخته شده واپس گرفته نمی شود</div>
     </div>
     ${returnsHtml}
     `;
