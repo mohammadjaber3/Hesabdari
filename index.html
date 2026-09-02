@@ -253,6 +253,14 @@ function setDeviceLabel(label){
   try{ localStorage.setItem('hesabdari_device_label', label||''); }catch(e){}
 }
 function fmt(n){ n = Math.round(Number(n)||0); return n.toLocaleString('en-US'); }
+// برای مبالغ دالری/سنتی و نرخ دالر — هیچ‌وقت گرد نمی‌شود، همیشه با اعشار (سنت) نشان داده می‌شود.
+function fmt2(n){
+  n = Number(n)||0;
+  const neg = n<0; n = Math.abs(n);
+  const fixed = n.toFixed(2);
+  const [intPart, decPart] = fixed.split('.');
+  return (neg?'-':'') + Number(intPart).toLocaleString('en-US') + '.' + decPart;
+}
 function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function sum(arr,key){ return arr.reduce((a,b)=>a+(Number(b[key])||0),0); }
 /* ---------- فشرده‌سازی عکس (بل شرکت / رسید پرداخت) ----------
@@ -669,7 +677,7 @@ const App = {
         return `<div class="row-item clickable" onclick="App.viewInvoice('${x.id}')"><div class="r-left"><b>فروش ${this.invoiceNoLabel(x.id)} — ${escapeHtml(x.customerName)}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span>${whoHtml}</div><div class="r-right num" style="color:var(--green)">+${fmt(x.paid)}</div></div>`;
       } else if(x._type==='purchase'){
         const tag = x.status==='cancelled' ? ' <span class="badge gold">باطل</span>' : (x.currency==='USD' ? ' <span class="badge gold">دالر</span>' : '');
-        return `<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><div class="r-left"><b>خرید — ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span>${whoHtml}</div><div class="r-right num" style="color:var(--red)">-${fmt(x.paid)}${x.currency==='USD'?' $':''}</div></div>`;
+        return `<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><div class="r-left"><b>خرید — ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span>${whoHtml}</div><div class="r-right num" style="color:var(--red)">-${x.currency==='USD'?fmt2(x.paid)+' $':fmt(x.paid)}</div></div>`;
       } else {
         const isW = x.category===WITHDRAWAL_CATEGORY;
         return `<div class="row-item"><div class="r-left"><b>${isW?'💰 برداشت — '+escapeHtml(x.withdrawnBy||''):'مصرف — '+escapeHtml(x.category)}</b><span class="sub">${x.date}${x.note?(' · '+escapeHtml(x.note)):''}</span>${whoHtml}</div><div class="r-right num" style="color:var(--red)">-${fmt(x.amount)}</div></div>`;
@@ -688,9 +696,9 @@ const App = {
       ${todayWithdrawals.length?`<div class="chip"><div class="t">💰 برداشت امروز</div><div class="v num">${fmt(sum(todayWithdrawals,'amount'))}</div></div>`:''}
       <div class="chip"><div class="t">طلب از مشتریان</div><div class="v num">${fmt(this.totalReceivable())}</div></div>
       <div class="chip"><div class="t">قرض از عمده‌فروش (${cur})</div><div class="v num">${fmt(this.totalPayable())}</div></div>
-      ${this.totalPayableUSD()!==0?`<div class="chip"><div class="t">قرض از عمده‌فروش (دالر)</div><div class="v num">$${fmt(this.totalPayableUSD())}</div></div>`:''}
+      ${this.totalPayableUSD()!==0?`<div class="chip"><div class="t">قرض از عمده‌فروش (دالر)</div><div class="v num">$${fmt2(this.totalPayableUSD())}</div></div>`:''}
       ${this.totalPayableUSD()!==0 && this.usdRate()>0?`<div class="chip"><div class="t">مجموع کل قرض به ${cur}</div><div class="v num">${fmt(this.totalPayableCombinedAFN())}</div></div>`:''}
-      <div class="chip" onclick="App.quickSetUsdRate()" style="cursor:pointer;"><div class="t">✏️ نرخ دالر</div><div class="v num">${this.usdRate()>0?fmt(this.usdRate()):'تنظیم کنید'}</div></div>
+      <div class="chip" onclick="App.quickSetUsdRate()" style="cursor:pointer;"><div class="t">✏️ نرخ دالر</div><div class="v num">${this.usdRate()>0?fmt2(this.usdRate()):'تنظیم کنید'}</div></div>
     </div>
     <div class="quick-actions">
       <div class="qa-btn" onclick="App.navigate('sale')"><span class="ic">🧾</span>فروش جدید</div>
@@ -841,7 +849,7 @@ const App = {
     else lines.push('وضعیت: تسویه‌شده ✅');
     if(sale.note) lines.push('یادداشت: '+sale.note);
     lines.push('———————————————');
-    lines.push('سند هذا بدون مهر و امضا اعتبار ندارد، جنس فروخته شده واپس گرفته نمی شود');
+    lines.push('با تشکر از خرید شما 🙏');
     return lines.join('\n');
   },
   sendInvoiceWhatsApp(id){
@@ -929,7 +937,7 @@ const App = {
       <div class="inv-sign">
         <div class="line">امضای فروشنده</div>
       </div>
-      <div class="inv-footer">با تشکر از خرید شما 🙏</div>
+      <div class="inv-footer">سند هذا بدون مهر و امضا اعتبار ندارد، جنس فروخته شده واپس گرفته نمی شود</div>
     </div>
     ${returnsHtml}
     `;
@@ -1274,8 +1282,8 @@ const App = {
     const cur = this.purchaseDraft.currency || 'AFN';
     const rate = this.usdRate();
     const itemsHtml = items.length ? items.map((it,idx)=>
-      `<div class="item-row"><span>${escapeHtml(it.name)} — ${it.qty} ${escapeHtml(it.unit)} × <span class="num">${fmt(it.unitCost)}</span></span>
-      <span style="display:flex;align-items:center;gap:8px;"><b class="num">${fmt(it.qty*it.unitCost)}</b><span class="x" onclick="App.removePurchaseItem(${idx})">✕</span></span></div>`
+      `<div class="item-row"><span>${escapeHtml(it.name)} — ${it.qty} ${escapeHtml(it.unit)} × <span class="num">${cur==='USD'?fmt2(it.unitCost):fmt(it.unitCost)}</span></span>
+      <span style="display:flex;align-items:center;gap:8px;"><b class="num">${cur==='USD'?fmt2(it.qty*it.unitCost):fmt(it.qty*it.unitCost)}</b><span class="x" onclick="App.removePurchaseItem(${idx})">✕</span></span></div>`
     ).join('') : `<div class="field-note">هنوز محصولی اضافه نشده.</div>`;
 
     return `
@@ -1288,7 +1296,7 @@ const App = {
       </select>
       ${cur==='USD'?`
       <div class="row-item" style="padding:10px 0;">
-        <div class="r-left"><b>نرخ فعلی دالر</b><span class="sub">${rate>0?('۱ دالر = '+fmt(rate)+' '+this.state.settings.currency):'هنوز تنظیم نشده'}</span></div>
+        <div class="r-left"><b>نرخ فعلی دالر</b><span class="sub">${rate>0?('۱ دالر = '+fmt2(rate)+' '+this.state.settings.currency):'هنوز تنظیم نشده'}</span></div>
         <div class="r-right"><button class="btn btn-outline" style="margin-top:0;padding:8px 14px;" onclick="App.quickSetUsdRate()">✏️ نرخ دالر</button></div>
       </div>
       ${rate>0 && total>0?`<div class="field-note">معادل مجموع فاکتور به ${this.state.settings.currency} (به نرخ امروز): <b class="num">${fmt(total*rate)}</b></div>`:''}
@@ -1304,19 +1312,19 @@ const App = {
       </div>
       <div class="grid2">
         <div><label>تعداد</label><input id="pp-qty" type="number" inputmode="decimal" placeholder="0"></div>
-        <div><label>قیمت خرید هر واحد (${this.curLabel(cur)})</label><input id="pp-cost" type="number" inputmode="decimal" placeholder="0"></div>
+        <div><label>قیمت خرید هر واحد (${this.curLabel(cur)})</label><input id="pp-cost" type="number" inputmode="decimal" step="0.01" placeholder="0"></div>
       </div>
       <button class="btn btn-outline" onclick="App.addPurchaseItem()">+ افزودن به فاکتور</button>
       <hr class="divider">
       ${itemsHtml}
-      <div class="total-line"><span>مجموع فاکتور</span><span class="num">${fmt(total)} ${this.curLabel(cur)}</span></div>
+      <div class="total-line"><span>مجموع فاکتور</span><span class="num">${cur==='USD'?fmt2(total):fmt(total)} ${this.curLabel(cur)}</span></div>
 
       <label>نام شرکت / عمده‌فروش (خالی = خرید نقدی)</label>
       <input id="purchase-supplier-name" list="suppliers-list" placeholder="مثلاً شرکت البرز">
       <datalist id="suppliers-list">${this.state.suppliers.map(c=>`<option value="${escapeHtml(c.name)}">`).join('')}</datalist>
 
       <div class="grid2">
-        <div><label>مبلغ پرداخت‌شده (نقد، ${this.curLabel(cur)})</label><input id="purchase-paid" type="number" inputmode="decimal" value="${total?Math.round(total):''}"></div>
+        <div><label>مبلغ پرداخت‌شده (نقد، ${this.curLabel(cur)})</label><input id="purchase-paid" type="number" inputmode="decimal" step="${cur==='USD'?'0.01':'1'}" value="${total?(cur==='USD'?total:Math.round(total)):''}"></div>
         <div><label>تاریخ</label><input id="purchase-date" type="date" value="${todayISO()}"></div>
       </div>
       <div class="field-note">اگر مبلغ پرداختی کمتر از مجموع باشد، باقیمانده به عنوان بدهی شما به آن شرکت/عمده‌فروش به ${this.curLabel(cur)} ثبت می‌شود.</div>
@@ -1346,8 +1354,8 @@ const App = {
         <td>${idx+1}</td>
         <td>${escapeHtml(it.name)}${returned>0?`<div class="sub" style="color:var(--red);">${returned} ${escapeHtml(it.unit)} واپس شده</div>`:''}</td>
         <td class="num">${it.qty} ${escapeHtml(it.unit)}</td>
-        <td class="num">${fmt(it.unitCost)}</td>
-        <td class="num">${fmt(it.qty*it.unitCost)}</td>
+        <td class="num">${pur.currency==='USD'?fmt2(it.unitCost):fmt(it.unitCost)}</td>
+        <td class="num">${pur.currency==='USD'?fmt2(it.qty*it.unitCost):fmt(it.qty*it.unitCost)}</td>
         <td class="no-print">${!cancelled?`
           <span onclick="App.purchaseReturnItem('${pur.id}',${idx})" style="cursor:pointer;" title="واپس به فروشنده">↩️</span>
           <span onclick="App.purchaseIncreaseItemQty('${pur.id}',${idx})" style="cursor:pointer;" title="افزودن تعداد">➕</span>`:''}</td>
@@ -1367,6 +1375,7 @@ const App = {
     ${!cancelled?`
     <div class="inv-actions no-print">
       <button class="btn btn-outline" onclick="App.purchaseAddItem('${pur.id}')">➕ افزودن قلم جدید</button>
+      ${pur.remaining>0.5?`<button class="btn btn-outline" onclick="App.forgiveRoundoff('${pur.id}')">🪙 نادیده‌گرفتن خرده‌پول</button>`:''}
       <button class="btn btn-danger" onclick="App.cancelPurchase('${pur.id}')">❌ کنسل کامل بل خرید</button>
     </div>`:''}
     <div class="card no-print">
@@ -1396,11 +1405,11 @@ const App = {
         <tbody>${itemsHtml}</tbody>
       </table>
       <div class="inv-totals">
-        ${pur.currency==='USD'?`<div class="row-item"><div class="r-left">نرخ دالر در روز خرید</div><div class="r-right num">${fmt(pur.rateAtPurchase||this.usdRate()||0)} ${s.currency}</div></div>`:''}
-        ${pur.originalTotal!==undefined && Math.abs(pur.originalTotal-pur.total)>0.5?`<div class="row-item"><div class="r-left">مجموع اولیهٔ بل</div><div class="r-right num">${fmt(pur.originalTotal)} ${curLbl}</div></div>`:''}
-        <div class="row-item"><div class="r-left">مجموع فعلی بل</div><div class="r-right num">${fmt(pur.total)} ${curLbl}${pur.currency==='USD'?` (≈ ${fmt(pur.total*(pur.rateAtPurchase||this.usdRate()||0))} ${s.currency})`:''}</div></div>
-        <div class="row-item"><div class="r-left">پرداخت‌شده</div><div class="r-right num" style="color:var(--green)">${fmt(pur.paid)} ${curLbl}</div></div>
-        <div class="row-item"><div class="r-left"><b>${pur.remaining>0.5?'باقیمانده (بدهی ما)':'وضعیت'}</b></div><div class="r-right num" style="color:${pur.remaining>0.5?'var(--red)':'var(--green)'}"><b>${cancelled?'باطل شده':(pur.remaining>0.5?fmt(pur.remaining)+' '+curLbl:'تسویه‌شده ✅')}</b></div></div>
+        ${pur.currency==='USD'?`<div class="row-item"><div class="r-left">نرخ دالر در روز خرید</div><div class="r-right num">${fmt2(pur.rateAtPurchase||this.usdRate()||0)} ${s.currency}</div></div>`:''}
+        ${pur.originalTotal!==undefined && Math.abs(pur.originalTotal-pur.total)>0.5?`<div class="row-item"><div class="r-left">مجموع اولیهٔ بل</div><div class="r-right num">${pur.currency==='USD'?fmt2(pur.originalTotal):fmt(pur.originalTotal)} ${curLbl}</div></div>`:''}
+        <div class="row-item"><div class="r-left">مجموع فعلی بل</div><div class="r-right num">${pur.currency==='USD'?fmt2(pur.total):fmt(pur.total)} ${curLbl}${pur.currency==='USD'?` (≈ ${fmt(pur.total*(pur.rateAtPurchase||this.usdRate()||0))} ${s.currency})`:''}</div></div>
+        <div class="row-item"><div class="r-left">پرداخت‌شده</div><div class="r-right num" style="color:var(--green)">${pur.currency==='USD'?fmt2(pur.paid):fmt(pur.paid)} ${curLbl}</div></div>
+        <div class="row-item"><div class="r-left"><b>${pur.remaining>0.5?'باقیمانده (بدهی ما)':'وضعیت'}</b></div><div class="r-right num" style="color:${pur.remaining>0.5?'var(--red)':'var(--green)'}"><b>${cancelled?'باطل شده':(pur.remaining>0.5?(pur.currency==='USD'?fmt2(pur.remaining):fmt(pur.remaining))+' '+curLbl:'تسویه‌شده ✅')}</b></div></div>
         ${!cancelled && pur.currency==='USD' && pur.remaining>0.5 && this.usdRate()>0?`<div class="row-item"><div class="r-left">معادل باقیمانده به نرخ امروز</div><div class="r-right num" style="color:var(--red)">${fmt(pur.remaining*this.usdRate())} ${s.currency}</div></div>`:''}
       </div>
       ${pur.note?`<div class="field-note">یادداشت: ${escapeHtml(pur.note)}</div>`:''}
@@ -1621,6 +1630,33 @@ const App = {
     batch.update(doc(cols.products, it.productId), { stock: increment(-qty) });
     batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
   },
+  // نادیده‌گرفتن خردهٔ پولِ باقی‌ماندهٔ یک بل خرید (مثلاً وقتی ۷۷۹۳ افغانی شده ولی
+  // ۷۷۹۰ پرداخت می‌کنید و طرفین ۳ افغانی باقی را نادیده می‌گیرند) — این مبلغ دیگر
+  // به‌عنوان بدهیِ ما به عمده‌فروش ثبت نمی‌ماند.
+  forgiveRoundoff(purchaseId){
+    const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
+    if(pur.status==='cancelled'){ alert('این بل باطل شده است.'); return; }
+    const remaining=pur.remaining||0;
+    if(remaining<=0.001){ alert('این بل باقیمانده‌ای ندارد.'); return; }
+    const curLbl = pur.currency==='USD' ? '$' : this.state.settings.currency;
+    const amtStr=prompt('چقدر از باقیماندهٔ '+fmt(remaining)+' '+curLbl+' نادیده گرفته شود؟\n(خردهٔ پولی که هم شما هم عمده‌فروش قبول دارید نباید حساب شود؛ بقیهٔ مبلغ در صورت وجود همچنان به‌عنوان بدهی می‌ماند)', remaining);
+    if(amtStr===null) return;
+    const amt=parseFloat(amtStr);
+    if(isNaN(amt)||amt<=0){ alert('عدد نامعتبر است.'); return; }
+    if(amt>remaining+0.001){ alert('این مبلغ از باقیماندهٔ فعلی ('+fmt(remaining)+' '+curLbl+') بیشتر است.'); return; }
+
+    const newTotal=pur.total-amt, newRemaining=pur.remaining-amt;
+    const batch=writeBatch(db);
+    batch.update(doc(cols.purchases, pur.id), {
+      total:newTotal, remaining:newRemaining,
+      roundoff:(pur.roundoff||0)+amt, ...this.editMeta()
+    });
+    if(pur.supplierId){
+      const balField = pur.currency==='USD' ? 'balanceUSD' : 'balance';
+      batch.update(doc(cols.suppliers, pur.supplierId), { [balField]: increment(-amt) });
+    }
+    batch.commit().catch(e=>{ console.error(e); alert('خطا؛ دوباره تلاش کنید.'); });
+  },
   cancelPurchase(purchaseId){
     const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
     if(pur.status==='cancelled'){ alert('این بل قبلاً باطل شده است.'); return; }
@@ -1792,10 +1828,10 @@ const App = {
       <div class="field-note">مجموع ${sub==='customers'?'طلب از مشتریان':'بدهی به عمده‌فروشان ('+this.state.settings.currency+')'}</div>
       <div class="num" style="font-size:20px;font-weight:800;color:${sub==='customers'?'var(--green)':'var(--red)'}">${fmt(totalKey)} ${sub==='customers'?this.state.settings.currency:''}</div>
       ${sub==='suppliers'?`<div class="field-note" style="margin-top:10px;">مجموع بدهی به عمده‌فروشان (دالر)</div>
-      <div class="num" style="font-size:20px;font-weight:800;color:var(--red)">$${fmt(this.totalPayableUSD())}</div>
+      <div class="num" style="font-size:20px;font-weight:800;color:var(--red)">$${fmt2(this.totalPayableUSD())}</div>
       ${this.totalPayableUSD()!==0?`<div class="field-note" style="margin-top:10px;">مجموع کل بدهی به ${this.state.settings.currency} (شامل تبدیل دالر به نرخ امروز)</div>
       <div class="num" style="font-size:18px;font-weight:800;color:var(--gold-d);">${this.usdRate()>0?fmt(this.totalPayableCombinedAFN())+' '+this.state.settings.currency:'نرخ دالر تنظیم نشده'}</div>`:''}
-      <div class="field-note" style="margin-top:10px;">نرخ فعلی دالر: <b class="num">${this.usdRate()>0?fmt(this.usdRate()):'—'}</b> <span onclick="App.quickSetUsdRate()" style="cursor:pointer;color:var(--gold-d);text-decoration:underline;">✏️ ویرایش نرخ</span></div>`:''}
+      <div class="field-note" style="margin-top:10px;">نرخ فعلی دالر: <b class="num">${this.usdRate()>0?fmt2(this.usdRate()):'—'}</b> <span onclick="App.quickSetUsdRate()" style="cursor:pointer;color:var(--gold-d);text-decoration:underline;">✏️ ویرایش نرخ</span></div>`:''}
     </div>
     <div class="card">${rows}</div>
     `;
@@ -1809,28 +1845,29 @@ const App = {
     if(!p){ this.detailId=null; return this.renderCustomers(); }
     let history=[];
     if(type==='customers'){
-      history = this.state.sales.filter(s=>s.customerId===p.id).map(s=>({date:s.date,ts:s.ts,label:'فروش '+this.invoiceNoLabel(s.id),amount:s.total,paid:s.paid,saleId:s.id,status:s.status}));
+      history = this.state.sales.filter(s=>s.customerId===p.id).map(s=>({date:s.date,ts:s.ts,label:'فروش '+this.invoiceNoLabel(s.id),amount:s.total,paid:s.paid,saleId:s.id,status:s.status,currency:'AFN'}));
     } else {
-      history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید'+(s.currency==='USD'?' (دالر)':''),amount:s.total,paid:s.paid,purchaseId:s.id,status:s.status}));
+      history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید'+(s.currency==='USD'?' (دالر)':''),amount:s.total,paid:s.paid,purchaseId:s.id,status:s.status,currency:s.currency||'AFN'}));
     }
-    const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:(x.type==='receive'?'دریافت پول':'پرداخت پول')+(x.currency==='USD'?' (دالر)':''),amount:x.amount,paid:null,isPayment:true,paymentId:x.id,receiptImage:x.receiptImage||null,who:this.whoLabel(x)}));
-    const openings = (this.state.openingEntries||[]).filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:'📋 بدهی افتتاحیه (قبل از سیستم)'+(x.currency==='USD'?' (دالر)':''),amount:x.amount,isOpening:true}));
+    const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:(x.type==='receive'?'دریافت پول':'پرداخت پول')+(x.currency==='USD'?' (دالر)':''),amount:x.amount,paid:null,isPayment:true,paymentId:x.id,receiptImage:x.receiptImage||null,who:this.whoLabel(x),currency:x.currency||'AFN'}));
+    const openings = (this.state.openingEntries||[]).filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:'📋 بدهی افتتاحیه (قبل از سیستم)'+(x.currency==='USD'?' (دالر)':''),amount:x.amount,isOpening:true,currency:x.currency||'AFN'}));
     history = [...history,...pays,...openings].sort((a,b)=>(b.ts||0)-(a.ts||0));
 
     const rows = history.length ? history.map(h=>{
+      const f = h.currency==='USD' ? fmt2 : fmt;
       if(h.isPayment){
         const color = (type==='customers') ? 'var(--green)' : 'var(--red)';
         const photoBtn = h.receiptImage
           ? `<span onclick="App.viewPaymentReceipt('${h.paymentId}')" style="cursor:pointer;margin-inline-start:6px;" title="مشاهده عکس رسید">🧾</span>`
           : `<span onclick="App.addPaymentReceiptPhoto('${h.paymentId}')" style="cursor:pointer;margin-inline-start:6px;opacity:.55;" title="افزودن عکس رسید">📷</span>`;
-        return `<div class="row-item"><div class="r-left"><b>${h.label}</b>${photoBtn}<span class="sub">${h.date}</span>${h.who?`<span class="sub" style="opacity:.75;">${escapeHtml(h.who)}</span>`:''}</div><div class="r-right num" style="color:${color}">${fmt(h.amount)}</div></div>`;
+        return `<div class="row-item"><div class="r-left"><b>${h.label}</b>${photoBtn}<span class="sub">${h.date}</span>${h.who?`<span class="sub" style="opacity:.75;">${escapeHtml(h.who)}</span>`:''}</div><div class="r-right num" style="color:${color}">${f(h.amount)}</div></div>`;
       }
       if(h.isOpening){
-        return `<div class="row-item"><div class="r-left"><b>${h.label}</b><span class="sub">${h.date}</span></div><div class="r-right num" style="color:var(--gold-d)">${fmt(h.amount)}</div></div>`;
+        return `<div class="row-item"><div class="r-left"><b>${h.label}</b><span class="sub">${h.date}</span></div><div class="r-right num" style="color:var(--gold-d)">${f(h.amount)}</div></div>`;
       }
       const clickAttr = h.saleId ? ` onclick="App.viewInvoice('${h.saleId}')" style="cursor:pointer;"` : (h.purchaseId ? ` onclick="App.viewPurchase('${h.purchaseId}')" style="cursor:pointer;"` : '');
       const cancelledTag = h.status==='cancelled' ? ' <span class="badge gold">باطل شده</span>' : '';
-      return `<div class="row-item"${clickAttr}><div class="r-left"><b>${h.label} — مجموع ${fmt(h.amount)}</b>${cancelledTag}<span class="sub">${h.date} · پرداخت‌شده: ${fmt(h.paid)}</span></div><div class="r-right num" style="color:var(--red)">${fmt(h.amount-h.paid)}</div></div>`;
+      return `<div class="row-item"${clickAttr}><div class="r-left"><b>${h.label} — مجموع ${f(h.amount)}</b>${cancelledTag}<span class="sub">${h.date} · پرداخت‌شده: ${f(h.paid)}</span></div><div class="r-right num" style="color:var(--red)">${f(h.amount-h.paid)}</div></div>`;
     }).join('') : `<div class="empty">هنوز معامله‌ای نیست.</div>`;
 
     const actionLabel = type==='customers' ? 'دریافت پول از مشتری' : 'پرداخت پول به عمده‌فروش';
@@ -1842,7 +1879,7 @@ const App = {
         <b style="font-size:16px;">${escapeHtml(p.name)}</b>
         <span class="badge ${p.balance>0.5?'red':'green'} num">${fmt(Math.abs(p.balance||0))} ${p.balance>0.5?'بدهکار':((p.balance||0)<-0.5?'طلبکار':'تسویه')}</span>
       </div>
-      ${type==='suppliers' && Math.abs(p.balanceUSD||0)>0.5 ? `<div style="margin-top:6px;text-align:left;"><span class="badge ${p.balanceUSD>0.5?'red':'green'} num">$${fmt(Math.abs(p.balanceUSD))} ${p.balanceUSD>0.5?'بدهکار (دالر)':'طلبکار (دالر)'}</span>${this.usdRate()>0?`<div class="sub" style="margin-top:2px;">معادل امروز: ${fmt(Math.abs(p.balanceUSD)*this.usdRate())} ${this.state.settings.currency} (به نرخ ${fmt(this.usdRate())})</div>`:`<div class="sub" style="margin-top:2px;color:var(--red);">نرخ دالر تنظیم نشده — <span onclick="App.quickSetUsdRate()" style="cursor:pointer;text-decoration:underline;">تنظیم کنید</span></div>`}</div>` : ''}
+      ${type==='suppliers' && Math.abs(p.balanceUSD||0)>0.5 ? `<div style="margin-top:6px;text-align:left;"><span class="badge ${p.balanceUSD>0.5?'red':'green'} num">$${fmt2(Math.abs(p.balanceUSD))} ${p.balanceUSD>0.5?'بدهکار (دالر)':'طلبکار (دالر)'}</span>${this.usdRate()>0?`<div class="sub" style="margin-top:2px;">معادل امروز: ${fmt(Math.abs(p.balanceUSD)*this.usdRate())} ${this.state.settings.currency} (به نرخ ${fmt2(this.usdRate())})</div>`:`<div class="sub" style="margin-top:2px;color:var(--red);">نرخ دالر تنظیم نشده — <span onclick="App.quickSetUsdRate()" style="cursor:pointer;text-decoration:underline;">تنظیم کنید</span></div>`}</div>` : ''}
       ${p.phone?`<div class="sub" style="margin-top:6px;">📞 ${escapeHtml(p.phone)}</div>`:''}
       ${p.address?`<div class="sub">📍 ${escapeHtml(p.address)}</div>`:''}
       <div class="grid2" style="margin-top:12px;">
@@ -1859,9 +1896,9 @@ const App = {
             <option value="AFN">${this.state.settings.currency} (افغانی)</option>
             <option value="USD">دالر</option>
           </select>
-          <div class="field-note">نرخ فعلی دالر: <b class="num">${this.usdRate()>0?fmt(this.usdRate()):'تنظیم نشده'}</b> <span onclick="App.quickSetUsdRate()" style="cursor:pointer;color:var(--gold-d);">✏️ ویرایش</span></div>` : ''}
+          <div class="field-note">نرخ فعلی دالر: <b class="num">${this.usdRate()>0?fmt2(this.usdRate()):'تنظیم نشده'}</b> <span onclick="App.quickSetUsdRate()" style="cursor:pointer;color:var(--gold-d);">✏️ ویرایش</span></div>` : ''}
           <label>${type==='customers'?'مبلغ دریافتی از مشتری':'مبلغ پرداختی به شرکت/عمده‌فروش'}</label>
-          <input id="pay-amount" type="number" inputmode="decimal" placeholder="0">
+          <input id="pay-amount" type="number" inputmode="decimal" step="0.01" placeholder="0">
           <label>تاریخ</label>
           <input id="pay-date" type="date" value="${todayISO()}">
           <label>📷 عکس رسید ${type==='suppliers'?'(پیشنهاد می‌شود ضمیمه کنید)':'(اختیاری)'}</label>
@@ -2220,7 +2257,7 @@ const App = {
     if(type==='all'||type==='purchases'){
       this.purchasesInRange(start,end).forEach(x=>{
         const tag=x.status==='cancelled'?' <span class="badge gold">باطل</span>':(x.currency==='USD'?' <span class="badge gold">دالر</span>':'');
-        rows.push({ts:x.ts, html:`<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><div class="r-left"><b>📦 خرید — ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span>${this.whoLabel(x)?`<span class="sub" style="opacity:.75;">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num" style="color:var(--red)">-${fmt(x.paid)}${x.currency==='USD'?' $':''}</div></div>`});
+        rows.push({ts:x.ts, html:`<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><div class="r-left"><b>📦 خرید — ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span>${this.whoLabel(x)?`<span class="sub" style="opacity:.75;">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num" style="color:var(--red)">-${x.currency==='USD'?fmt2(x.paid)+' $':fmt(x.paid)}</div></div>`});
       });
     }
     if(type==='all'||type==='expenses'){
@@ -2233,7 +2270,7 @@ const App = {
       this.state.payments.filter(x=>x.date>=start && x.date<=end).forEach(x=>{
         const color=x.type==='receive'?'var(--green)':'var(--red)';
         const photoBtn = x.receiptImage ? `<span onclick="App.viewPaymentReceipt('${x.id}')" style="cursor:pointer;margin-inline-start:6px;" title="مشاهده عکس رسید">🧾</span>` : '';
-        rows.push({ts:x.ts, html:`<div class="row-item"><div class="r-left"><b>${x.type==='receive'?'⬅️ دریافت از':'➡️ پرداخت به'} ${escapeHtml(x.partyName||'')}</b>${photoBtn}<span class="sub">${x.date}${x.currency==='USD'?' · دالری':''}</span>${this.whoLabel(x)?`<span class="sub" style="opacity:.75;">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num" style="color:${color}">${fmt(x.amount)}${x.currency==='USD'?' $':''}</div></div>`});
+        rows.push({ts:x.ts, html:`<div class="row-item"><div class="r-left"><b>${x.type==='receive'?'⬅️ دریافت از':'➡️ پرداخت به'} ${escapeHtml(x.partyName||'')}</b>${photoBtn}<span class="sub">${x.date}${x.currency==='USD'?' · دالری':''}</span>${this.whoLabel(x)?`<span class="sub" style="opacity:.75;">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num" style="color:${color}">${x.currency==='USD'?fmt2(x.amount)+' $':fmt(x.amount)}</div></div>`});
       });
     }
     rows.sort((a,b)=>(b.ts||0)-(a.ts||0));
