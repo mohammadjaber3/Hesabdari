@@ -506,7 +506,7 @@ const App = {
   _loadedParts:null, _unsubs:null,
   modal:null, actionMenu:null, searchOpen:false, searchQuery:'',
   pinLocked:false, pinEntry:'', pinStage:'enter',
-  syncState:'offline',
+  syncState:'offline', _pendingParts:null,
 
   init(){
     this.resetSaleDraft();
@@ -604,6 +604,7 @@ const App = {
   _subscribeAll(){
     this._teardown();
     this._loadedParts = new Set();
+    this._pendingParts = new Set();
     const totalParts = COLLECTIONS.length + 1; // + settings
 
     const checkReady = ()=>{
@@ -616,13 +617,22 @@ const App = {
       this.render();
     };
 
+    // وضعیت واقعی سینک باید از روی همهٔ داده‌ها (فروش، خرید، محصولات و ...) سنجیده شود،
+    // نه فقط سند تنظیمات — وگرنه وقتی مثلاً یک فاکتور هنوز به سرور نرسیده، نشانگر ممکن است
+    // اشتباهاً «آنلاین/ذخیره‌شده» نشان بدهد.
+    const markPart = (name, hasPendingWrites)=>{
+      if(hasPendingWrites) this._pendingParts.add(name); else this._pendingParts.delete(name);
+      this._recomputeSyncState();
+    };
+
     COLLECTIONS.forEach(name=>{
-      const unsub = onSnapshot(cols[name], (snap)=>{
+      const unsub = onSnapshot(cols[name], {includeMetadataChanges:true}, (snap)=>{
         const arr = [];
         snap.forEach(d=>arr.push(d.data()));
         this.state[name] = arr;
         if(name==='sales' || name==='purchases') migrateRecordArrays(this.state.sales, this.state.purchases);
         this._loadedParts.add(name);
+        markPart(name, snap.metadata.hasPendingWrites);
         checkReady();
       }, (err)=>console.error('sync error ('+name+')', err));
       this._unsubs.push(unsub);
@@ -636,15 +646,20 @@ const App = {
         try{ await setDoc(settingsDocRef, this.state.settings); }catch(e){}
       }
       this._loadedParts.add('settings');
-      if(!navigator.onLine) this.setSyncState('offline');
-      else this.setSyncState(snap.metadata.hasPendingWrites ? 'pending' : 'ok');
+      markPart('settings', snap.metadata.hasPendingWrites);
       checkReady();
     }, (err)=>console.error('sync error (settings)', err));
     this._unsubs.push(unsubSettings);
 
-    window.addEventListener('online', ()=> this.setSyncState('ok'));
-    window.addEventListener('offline', ()=> this.setSyncState('offline'));
-    this.setSyncState(navigator.onLine ? 'ok' : 'offline');
+    window.addEventListener('online', ()=> this._recomputeSyncState());
+    window.addEventListener('offline', ()=> this._recomputeSyncState());
+    this._recomputeSyncState();
+  },
+  // یک نقطهٔ واحد برای تصمیم‌گیری دربارهٔ وضعیت نمایشی: آفلاین (اصلاً وصل نیست)،
+  // در حال همگام‌سازی (وصل است ولی هنوز چیزی در صفِ ارسال به سرور مانده)، یا آنلاین (همه‌چیز رسیده).
+  _recomputeSyncState(){
+    if(!navigator.onLine){ this.setSyncState('offline'); return; }
+    this.setSyncState(this._pendingParts && this._pendingParts.size>0 ? 'pending' : 'ok');
   },
 
   // فقط کسی «مالک» حساب می‌شود که هم نقش «owner» در Firestore داشته باشد و هم دقیقاً
@@ -856,7 +871,7 @@ const App = {
 
   openSearch(){ this.searchOpen=true; this.searchQuery=''; this.renderSearchRoot(); setTimeout(()=>{ const el=document.getElementById('global-search-input'); if(el) el.focus(); },50); },
   closeSearch(){ this.searchOpen=false; this.renderSearchRoot(); },
-  onSearchInput(v){ this.searchQuery=v; this.renderSearchRoot(); },
+  onSearchInput(v){ this.searchQuery=v; this.renderSearchResultsOnly(); },
   runGlobalSearch(q){
     q=(q||'').trim();
     if(!q) return {products:[],customers:[],suppliers:[],sales:[],purchases:[]};
@@ -867,27 +882,43 @@ const App = {
     const suppliers = this.state.suppliers.filter(c=>norm(c.name).includes(nq)||norm(c.phone).includes(nq)).slice(0,8);
     const invNo = nq.replace(/^#/,'').replace(/^0+/,'');
     const sales = this.state.sales.filter(s=> norm(s.customerName).includes(nq) || (invNo && String(this.saleSeqNo(s.id)).includes(invNo)) ).slice(0,8);
-    const purchases = this.state.purchases.filter(s=> norm(s.supplierName).includes(nq) ).slice(0,8);
+    const purchases = this.state.purchases.filter(s=>
+      norm(s.supplierName).includes(nq)
+      || norm(s.supplierInvoiceNo).includes(nq)
+      || norm(s.note).includes(nq)
+      || (invNo && String(this.purchaseSeqNo(s.id)).includes(invNo))
+    ).slice(0,8);
     return {products,customers,suppliers,sales,purchases};
   },
-  renderSearchRoot(){
-    const root=document.getElementById('search-root'); if(!root) return;
-    if(!this.searchOpen){ root.innerHTML=''; return; }
-    const q=this.searchQuery;
+  // فقط بخش نتایج را بازسازی می‌کند و به فیلد ورودی دست نمی‌زند، تا در حین تایپ
+  // فوکوس آن از بین نرود (قبلاً کل کادر جستجو -از جمله خودِ input- با هر حرف
+  // دوباره ساخته می‌شد که باعث می‌شد بعد از هر حرف فوکوس قطع شود).
+  buildSearchResultsBody(q){
     const r = this.runGlobalSearch(q);
     const hasAny = r.products.length||r.customers.length||r.suppliers.length||r.sales.length||r.purchases.length;
     const group = (title, arr, renderRow) => arr.length ? `<div class="search-group-title">${title}</div>` + arr.map(renderRow).join('') : '';
-    const body = !q.trim() ? `<div class="empty"><span class="ic">🔍</span>نام محصول، مشتری، عمده‌فروش یا شمارهٔ فاکتور را بنویسید</div>` :
+    return !q.trim() ? `<div class="empty"><span class="ic">🔍</span>نام محصول، مشتری، عمده‌فروش یا شمارهٔ فاکتور (خرید یا فروش) را بنویسید</div>` :
       (!hasAny ? `<div class="empty"><span class="ic">🙁</span>چیزی پیدا نشد</div>` :
       group('🗂️ محصولات', r.products, p=>`<div class="row-item clickable" onclick="App.closeSearch(); App.navigate('more','products');"><div class="r-left"><b>${escapeHtml(p.name)}</b><span class="sub">موجودی: ${p.stock} ${escapeHtml(p.unit)}</span></div><div class="r-right num">${fmt(p.sellPrice)}</div></div>`)
       + group('👤 مشتریان', r.customers, c=>`<div class="row-item clickable" onclick="App.closeSearch(); App.navigate('customers'); App.openParty('customers','${c.id}');"><div class="r-left"><b>${escapeHtml(c.name)}</b><span class="sub">${escapeHtml(c.phone||'')}</span></div><div class="r-right num" style="color:${c.balance>0.5?'var(--red)':'var(--green)'}">${fmt(c.balance||0)}</div></div>`)
       + group('🏭 عمده‌فروشان', r.suppliers, c=>`<div class="row-item clickable" onclick="App.closeSearch(); App.navigate('customers'); App.openParty('suppliers','${c.id}');"><div class="r-left"><b>${escapeHtml(c.name)}</b><span class="sub">${escapeHtml(c.phone||'')}</span></div><div class="r-right num" style="color:${c.balance>0.5?'var(--red)':'var(--green)'}">${fmt(c.balance||0)}</div></div>`)
       + group('🧾 فروش‌ها', r.sales, s=>`<div class="row-item clickable" onclick="App.closeSearch(); App.viewInvoice('${s.id}');"><div class="r-left"><b>فروش ${this.invoiceNoLabel(s.id)} — ${escapeHtml(s.customerName)}</b><span class="sub">${s.date}</span></div><div class="r-right num">${fmt(s.total)}</div></div>`)
-      + group('📦 خریدها', r.purchases, s=>`<div class="row-item clickable" onclick="App.closeSearch(); App.viewPurchase('${s.id}');"><div class="r-left"><b>خرید — ${escapeHtml(s.supplierName||'—')}</b><span class="sub">${s.date}</span></div><div class="r-right num">${fmt(s.total)}</div></div>`));
+      + group('📦 خریدها', r.purchases, s=>`<div class="row-item clickable" onclick="App.closeSearch(); App.viewPurchase('${s.id}');"><div class="r-left"><b>خرید ${this.purchaseBillLabel(s)} — ${escapeHtml(s.supplierName||'—')}</b><span class="sub">${s.date}</span></div><div class="r-right num">${fmt(s.total)}</div></div>`));
+  },
+  renderSearchResultsOnly(){
+    const results=document.querySelector('#search-root .search-results');
+    if(!results) return;
+    results.innerHTML = this.buildSearchResultsBody(this.searchQuery);
+  },
+  renderSearchRoot(){
+    const root=document.getElementById('search-root'); if(!root) return;
+    if(!this.searchOpen){ root.innerHTML=''; return; }
+    const q=this.searchQuery;
+    const body = this.buildSearchResultsBody(q);
     root.innerHTML = `
     <div class="search-overlay">
       <div class="search-bar">
-        <input id="global-search-input" placeholder="جستجو..." value="${escapeHtml(q)}" oninput="App.onSearchInput(this.value)">
+        <input id="global-search-input" placeholder="جستجو... (نام یا شماره فاکتور)" value="${escapeHtml(q)}" oninput="App.onSearchInput(this.value)">
         <span class="cancel" onclick="App.closeSearch()">انصراف</span>
       </div>
       <div class="search-results">${body}</div>
@@ -901,7 +932,7 @@ const App = {
     const el=document.getElementById('sync-badge'); const txt=document.getElementById('sync-text');
     if(!el||!txt) return;
     el.className = 'sync-badge '+st;
-    txt.textContent = st==='ok' ? 'همه‌چیز ذخیره شد' : st==='pending' ? 'در حال ذخیره...' : 'آفلاین — بعداً ارسال می‌شود';
+    txt.textContent = st==='ok' ? 'آنلاین' : st==='pending' ? 'در حال همگام‌سازی...' : 'آفلاین';
   },
 
   pinDigit(d){
@@ -1048,7 +1079,7 @@ const App = {
         return `<div class="row-item clickable" onclick="App.viewInvoice('${x.id}')"><div class="r-left"><b>فروش ${this.invoiceNoLabel(x.id)} — ${escapeHtml(x.customerName)}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span>${whoHtml}</div><div class="r-right num" style="color:var(--green)">+${fmt(x.paid)}</div></div>`;
       } else if(x._type==='purchase'){
         const tag = x.status==='cancelled' ? ' <span class="badge gold">باطل</span>' : (x.currency==='USD' ? ' <span class="badge gold">دالر</span>' : '');
-        return `<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><div class="r-left"><b>خرید — ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span>${whoHtml}</div><div class="r-right num" style="color:var(--red)">-${x.currency==='USD'?fmt2(x.paid)+' $':fmt(x.paid)}</div></div>`;
+        return `<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><div class="r-left"><b>خرید${x.supplierInvoiceNo?' (بل #'+escapeHtml(x.supplierInvoiceNo)+')':''} — ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span>${whoHtml}</div><div class="r-right num" style="color:var(--red)">-${x.currency==='USD'?fmt2(x.paid)+' $':fmt(x.paid)}</div></div>`;
       } else {
         const isW = x.category===WITHDRAWAL_CATEGORY;
         return `<div class="row-item"><div class="r-left"><b>${isW?'💰 برداشت — '+escapeHtml(x.withdrawnBy||''):'مصرف — '+escapeHtml(x.category)}</b><span class="sub">${x.date}${x.note?(' · '+escapeHtml(x.note)):''}</span>${whoHtml}</div><div class="r-right num" style="color:var(--red)">-${fmt(x.amount)}</div></div>`;
@@ -1187,6 +1218,29 @@ const App = {
     return idx>=0 ? idx+1 : 0;
   },
   invoiceNoLabel(saleId){ return '#'+String(this.saleSeqNo(saleId)).padStart(5,'0'); },
+  // همان منطق شماره‌گذاری فاکتور فروش، برای فاکتورهای خرید نیز (جدا از شمارهٔ فروش).
+  purchaseSeqNo(purchaseId){
+    const sorted = [...this.state.purchases].sort((a,b)=> (a.ts||0)-(b.ts||0) || (a.id<b.id?-1:1));
+    const idx = sorted.findIndex(s=>s.id===purchaseId);
+    return idx>=0 ? idx+1 : 0;
+  },
+  purchaseNoLabel(purchaseId){ return '#'+String(this.purchaseSeqNo(purchaseId)).padStart(5,'0'); },
+  // برای نمایش، اگر شمارهٔ بلِ واقعی عمده‌فروش ثبت شده باشد همان نشان داده می‌شود
+  // (چون این همان چیزی است که کاربر می‌شناسد)، وگرنه شمارهٔ داخلی برنامه به‌عنوان جایگزین.
+  purchaseBillLabel(pur){ return pur.supplierInvoiceNo ? ('بل #'+pur.supplierInvoiceNo) : this.purchaseNoLabel(pur.id); },
+  editPurchaseInvoiceNo(purchaseId){
+    const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
+    this.openFormModal({
+      title:'✏️ شمارهٔ بل عمده‌فروش',
+      sub:'همان شماره‌ای که روی رسید کاغذی خرید نوشته شده — اختیاری',
+      fields:[{key:'no', label:'شمارهٔ بل/فاکتور', value:pur.supplierInvoiceNo||''}],
+      submitLabel:'ذخیره',
+      onSubmit: async (v)=>{
+        await updateDoc(doc(cols.purchases, purchaseId), { supplierInvoiceNo:(v.no||'').trim(), ...this.editMeta() });
+        this.toast('ذخیره شد ✅');
+      }
+    });
+  },
   waPhoneDigits(phone){
     let d=(phone||'').replace(/[^0-9]/g,'');
     if(!d) return '';
@@ -1648,6 +1702,7 @@ const App = {
     const supName = (document.getElementById('purchase-supplier-name').value||'').trim();
     const date = document.getElementById('purchase-date').value || todayISO();
     const note = (document.getElementById('purchase-note').value||'').trim();
+    const supplierInvoiceNo = (document.getElementById('purchase-supplier-invoice-no').value||'').trim();
     const remaining = total-paid;
 
     const batch = writeBatch(db);
@@ -1694,7 +1749,7 @@ const App = {
     const purchaseId = uid();
     const newPurchase = {
       id:purchaseId, ts:Date.now(), date, supplierId, supplierName:supplierNameFinal, currency, rateAtPurchase,
-      items:this.purchaseDraft.items.map(it=>({...it,returnedQty:0})), total, paid, remaining, note,
+      items:this.purchaseDraft.items.map(it=>({...it,returnedQty:0})), total, paid, remaining, note, supplierInvoiceNo,
       status:'active', returns:[], originalTotal: total,
       ...this.recordMeta()
     };
@@ -1765,13 +1820,17 @@ const App = {
       <input id="purchase-supplier-name" list="suppliers-list" placeholder="مثلاً شرکت البرز">
       <datalist id="suppliers-list">${this.state.suppliers.map(c=>`<option value="${escapeHtml(c.name)}">`).join('')}</datalist>
 
+      <label>شمارهٔ بل/فاکتوری که عمده‌فروش به شما داده (اختیاری)</label>
+      <input id="purchase-supplier-invoice-no" placeholder="مثلاً 1042 — همان شماره‌ای که روی رسید کاغذی نوشته">
+      <div class="field-note">این همان شمارهٔ بل کاغذی عمده‌فروش است، نه شمارهٔ داخلی برنامه. با نوشتن آن، بعداً می‌توانید همین خرید را با تایپ این شماره در جستجو پیدا کنید.</div>
+
       <div class="grid2">
         <div><label>مبلغ پرداخت‌شده (نقد، ${this.curLabel(cur)})</label><input id="purchase-paid" type="number" inputmode="decimal" step="${cur==='USD'?'0.01':'1'}" value="${total?(cur==='USD'?total:Math.round(total)):''}"></div>
         <div><label>تاریخ</label><input id="purchase-date" type="date" value="${todayISO()}"></div>
       </div>
       <div class="field-note">اگر مبلغ پرداختی کمتر از مجموع باشد، باقیمانده به عنوان بدهی شما به آن شرکت/عمده‌فروش به ${this.curLabel(cur)} ثبت می‌شود.</div>
       <label>یادداشت (اختیاری)</label>
-      <input id="purchase-note" placeholder="مثلاً فاکتور شماره ۱۲">
+      <input id="purchase-note" placeholder="مثلاً توضیح اضافه دربارهٔ این خرید">
       <label>📷 عکس بل/فاکتور شرکت (اختیاری)</label>
       <input id="purchase-bill-photo" type="file" accept="image/*" capture="environment">
       <div class="field-note">اگر از یک شرکت یا عمده‌فروش خرید کردید، عکس بل آن‌ها را اینجا ضمیمه کنید تا همیشه همراه این خرید ذخیره و قابل مشاهده باشد.</div>
@@ -1842,6 +1901,8 @@ const App = {
       ${this.whoLabel(pur)?`<div class="field-note no-print">${escapeHtml(this.whoLabel(pur))}${pur.lastEditedByEmail?` · آخرین ویرایش: ${escapeHtml([pur.lastEditedByEmail,pur.lastEditedByDevice].filter(Boolean).join(' · '))}`:''}</div>`:''}
       <div class="inv-cust">
         <div class="l1">شرکت / عمده‌فروش: ${escapeHtml(pur.supplierName||'—')}</div>
+        ${pur.supplierInvoiceNo?`<div class="l1">شمارهٔ بل عمده‌فروش: <b class="num">${escapeHtml(pur.supplierInvoiceNo)}</b></div>`:''}
+        <div class="l1 no-print" style="margin-top:2px;color:var(--gold-d);cursor:pointer;" onclick="App.editPurchaseInvoiceNo('${pur.id}')">✏️ ${pur.supplierInvoiceNo?'ویرایش شمارهٔ بل':'ثبت شمارهٔ بل عمده‌فروش'}</div>
       </div>
       <table class="inv-table">
         <thead><tr><th>#</th><th>شرح کالا</th><th>تعداد</th><th>فی واحد</th><th>مجموع</th><th class="no-print"></th></tr></thead>
@@ -2839,7 +2900,7 @@ const App = {
     if(type==='all'||type==='purchases'){
       this.purchasesInRange(start,end).forEach(x=>{
         const tag=x.status==='cancelled'?' <span class="badge gold">باطل</span>':(x.currency==='USD'?' <span class="badge gold">دالر</span>':'');
-        rows.push({ts:x.ts, html:`<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><div class="r-left"><b>📦 خرید — ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span>${this.whoLabel(x)?`<span class="sub" style="opacity:.75;">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num" style="color:var(--red)">-${x.currency==='USD'?fmt2(x.paid)+' $':fmt(x.paid)}</div></div>`});
+        rows.push({ts:x.ts, html:`<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><div class="r-left"><b>📦 خرید${x.supplierInvoiceNo?' (بل #'+escapeHtml(x.supplierInvoiceNo)+')':''} — ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span>${this.whoLabel(x)?`<span class="sub" style="opacity:.75;">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num" style="color:var(--red)">-${x.currency==='USD'?fmt2(x.paid)+' $':fmt(x.paid)}</div></div>`});
       });
     }
     if(type==='all'||type==='expenses'){
@@ -2930,7 +2991,7 @@ const App = {
     const wb=XLSX.utils.book_new();
     const salesRows=sales.map(s=>({ 'شماره فاکتور':this.invoiceNoLabel(s.id), 'تاریخ':s.date, 'مشتری':s.customerName, 'مجموع':s.total, 'پرداخت‌شده':s.paid, 'باقیمانده':s.remaining, 'سود':s.profit }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(salesRows), 'فروش');
-    const purchRows=purchases.map(p=>({ 'تاریخ':p.date, 'عمده‌فروش':p.supplierName||'نقدی', 'ارز':p.currency||'AFN', 'مجموع':p.total, 'پرداخت‌شده':p.paid, 'باقیمانده':p.remaining }));
+    const purchRows=purchases.map(p=>({ 'تاریخ':p.date, 'شماره بل عمده‌فروش':p.supplierInvoiceNo||'', 'عمده‌فروش':p.supplierName||'نقدی', 'ارز':p.currency||'AFN', 'مجموع':p.total, 'پرداخت‌شده':p.paid, 'باقیمانده':p.remaining }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(purchRows), 'خرید');
     const expRows=expenses.map(e=>({ 'تاریخ':e.date, 'نوع':e.category, 'مبلغ':e.amount, 'یادداشت':e.note||'' }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(expRows), 'مصارف');
@@ -3072,7 +3133,7 @@ const App = {
       'مشتریان': s.customers.map(c=>({name:c.name, phone:c.phone||'', address:c.address||'', balance:c.balance||0})),
       'عمده‌فروشان': s.suppliers.map(c=>({name:c.name, phone:c.phone||'', address:c.address||'', balance:c.balance||0, balanceUSD:c.balanceUSD||0})),
       'فروش': s.sales.map(x=>({شماره:this.invoiceNoLabel(x.id), تاریخ:x.date, مشتری:x.customerName, مجموع:x.total, پرداختی:x.paid, باقیمانده:x.remaining, سود:x.profit, وضعیت:x.status})),
-      'خرید': s.purchases.map(x=>({تاریخ:x.date, عمده_فروش:x.supplierName||'نقدی', ارز:x.currency||'AFN', مجموع:x.total, پرداختی:x.paid, باقیمانده:x.remaining, وضعیت:x.status})),
+      'خرید': s.purchases.map(x=>({تاریخ:x.date, شماره_بل_عمده_فروش:x.supplierInvoiceNo||'', عمده_فروش:x.supplierName||'نقدی', ارز:x.currency||'AFN', مجموع:x.total, پرداختی:x.paid, باقیمانده:x.remaining, وضعیت:x.status})),
       'مصارف': s.expenses.map(x=>({تاریخ:x.date, نوع:x.category, مبلغ:x.amount, یادداشت:x.note||''})),
       'دریافت-پرداخت': s.payments.map(x=>({تاریخ:x.date, نوع:x.type==='receive'?'دریافت':'پرداخت', طرف:x.partyName||'', ارز:x.currency||'AFN', مبلغ:x.amount})),
     };
