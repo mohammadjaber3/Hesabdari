@@ -535,6 +535,12 @@ const App = {
      نه اینکه خودکار staff در نظر گرفته شود. */
   _roleCacheKey(uid_){ return 'hesabdari_role_'+uid_; },
   async afterLogin(u){
+    // اشتراکِ دادهٔ اصلی (فروش/خرید/محصولات و...) را بلافاصله شروع می‌کنیم و منتظر بررسی
+    // نقش کاربر یا مهاجرت دیتای قدیمی نمی‌مانیم — چون هر دوی این‌ها یک درخواست شبکه‌ای‌اند
+    // و اگر در حالت آفلاین (بدون کش) گیر کنند یا دیر جواب بدهند، کل برنامه باز نمی‌شد.
+    this._subscribeAll();
+    this._maybeAskDeviceLabel();
+
     const cacheKey = this._roleCacheKey(u.uid);
     try{
       const teamSnap = await getDoc(teamDocRef(u.uid));
@@ -545,10 +551,9 @@ const App = {
       try{ cached = localStorage.getItem(cacheKey); }catch(e2){}
       this.role = cached || 'staff';
     }
+    this.renderNav(); this.render(); // نقش ممکن است روی نمایش برخی دکمه‌ها اثر بگذارد
 
-    await migrateOldDataIfNeeded();
-    this._subscribeAll();
-    this._maybeAskDeviceLabel();
+    migrateOldDataIfNeeded().catch(()=>{});
 
     // اگر قبلاً برای این کاربر PIN تعیین شده، صفحه را قفل کن.
     // نکته امنیتی: اگر بررسی به‌هر دلیل (مثلاً قطعی موقت اینترنت) ناکام بماند، به‌جای فرض
@@ -599,6 +604,7 @@ const App = {
   _teardown(){
     if(this._unsubs){ this._unsubs.forEach(fn=>{ try{ fn(); }catch(e){} }); }
     this._unsubs=[];
+    if(this._readyTimeout){ clearTimeout(this._readyTimeout); this._readyTimeout=null; }
   },
 
   _subscribeAll(){
@@ -616,6 +622,14 @@ const App = {
       this.renderNav();
       this.render();
     };
+    // اگر تا این مدت همهٔ ۹ بخش داده هنوز خبری از خودشان نداده باشند (مثلاً چون یکی از
+    // کالکشن‌ها -مثل یک نوع سند که کمتر استفاده شده- هنگام آفلاین‌بودن هرگز از کش هم پاسخ
+    // نمی‌دهد)، به‌جای گیر ماندنِ همیشگی روی «در حال بارگذاری...»، با همان داده‌هایی که تا
+    // الان رسیده باز می‌شویم؛ بقیهٔ بخش‌ها هم به‌محض رسیدن (چه از کش، چه بعد از وصل شدن به
+    // اینترنت) خودشان صفحه را به‌روزرسانی می‌کنند.
+    this._readyTimeout = setTimeout(()=>{
+      if(!this.dataReady){ this.dataReady = true; checkReady(); }
+    }, 3000);
 
     // وضعیت واقعی سینک باید از روی همهٔ داده‌ها (فروش، خرید، محصولات و ...) سنجیده شود،
     // نه فقط سند تنظیمات — وگرنه وقتی مثلاً یک فاکتور هنوز به سرور نرسیده، نشانگر ممکن است
