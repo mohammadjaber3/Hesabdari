@@ -2950,9 +2950,16 @@ const App = {
   /* ---------- Reports ---------- */
   setPeriod(p){ this.reportPeriod=p; this.render(); },
   _trendChartInstance:null,
-  drawTrendChart(){
+  drawTrendChart(chartRetries){
     const canvas=document.getElementById('trend-chart'); if(!canvas) return;
-    if(typeof Chart==='undefined'){ setTimeout(()=>this.drawTrendChart(), 200); return; }
+    if(typeof Chart==='undefined'){
+      // اگر Chart.js هنوز لود نشده (مثلاً اولین لحظات آفلاین قبل از آماده‌شدن کش)، چند بار
+      // دوباره امتحان می‌کنیم، ولی نه برای همیشه — وگرنه اگر واقعاً هیچ‌وقت لود نشود
+      // (مثلاً کش هم خالی است)، این تلاش هر ۲۰۰ میلی‌ثانیه تا ابد ادامه پیدا می‌کند.
+      const tries=(chartRetries||0)+1;
+      if(tries<=25) setTimeout(()=>this.drawTrendChart(tries), 200);
+      return;
+    }
     const today=todayISO();
     let start,end=today;
     if(this.reportPeriod==='today'){ start=today; }
