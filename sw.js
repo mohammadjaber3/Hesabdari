@@ -1,11 +1,14 @@
-// حساب‌داری پخش موتر — Service Worker
+// حساب‌داری فروشگاه صانع — Service Worker
+// نسخهٔ سه‌فایلی: index.html + styles.css + app.js
 // هر بار که تغییری اساسی در فایل‌های اصلی دادید، این نسخه را عوض کنید تا گوشی‌ها نسخهٔ تازه بگیرند
-const CACHE_VERSION = 'hesabdari-v3';
+const CACHE_VERSION = 'hesabdari-v4';
 
 // فایل‌های خود سایت (همیشه باید برای بازکردن آفلاین موجود باشند)
 const APP_SHELL = [
   './',
   './index.html',
+  './styles.css',
+  './app.js',
   './manifest.json',
   './icons/icon-72.png',
   './icons/icon-96.png',
@@ -28,11 +31,15 @@ const EXTERNAL_SHELL = [
   'https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js',
   'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js',
+  // فونت وزیرمتن — بدون این، در حالت آفلاین متن فارسی به Tahoma می‌افتاد
+  'https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/webfonts/Vazirmatn-Regular.woff2',
+  'https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/webfonts/Vazirmatn-SemiBold.woff2',
+  'https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/webfonts/Vazirmatn-Bold.woff2',
 ];
 
 // میزبان‌های بیرونی که اجازه داریم پاسخشان را کش کنیم (فقط کتابخانه‌های ثابت -
 // نه Firestore/Auth که ارتباط زنده دارند و خودشان آفلاین/آنلاین را مدیریت می‌کنند)
-const CACHEABLE_HOSTS = ['www.gstatic.com', 'cdnjs.cloudflare.com'];
+const CACHEABLE_HOSTS = ['www.gstatic.com', 'cdnjs.cloudflare.com', 'cdn.jsdelivr.net'];
 
 // هر فایل را جدا کش می‌کنیم (نه با cache.addAll که اگر حتی یک فایل خطا بدهد، کل نصب
 // سرویس‌ورکر شکست می‌خورد و هیچ‌چیز دیگری هم کش نمی‌شود — یعنی برنامه هرگز آفلاین کار نمی‌کرد)
