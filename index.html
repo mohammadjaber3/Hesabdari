@@ -12,14 +12,10 @@
 <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png">
 <title>حساب‌داری فروشگاه صانع</title>
 
-<!-- فونت وزیرمتن: قبلاً فقط در CSS نوشته شده بود ولی هیچ‌جا لود نمی‌شد و به Tahoma می‌افتاد -->
-<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-<link rel="preload" as="font" type="font/woff2" crossorigin
-      href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/webfonts/Vazirmatn-Regular.woff2">
+<!-- فونت وزیرمتن در styles.css با @font-face و font-display:swap لود می‌شود؛
+     یعنی اگر شبکه کند/قطع باشد، متن فوراً با فونت جایگزین سیستم نشان داده می‌شود
+     و به محض رسیدن فونت (چه از کش، چه از شبکه)، جایگزین می‌شود — هیچ‌چیزی معطلش نمی‌ماند. -->
 <link rel="stylesheet" href="./styles.css">
-
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js" defer></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" defer></script>
 </head>
 <body>
 

@@ -271,6 +271,28 @@ const ICON_PATHS = {
   'wifi-off':'<path d="M2.5 8.5a15 15 0 0 1 5-3"/><path d="M21.5 8.5a15 15 0 0 0-8.5-3.4"/><path d="M6.3 12.3a10 10 0 0 1 2.6-1.7"/><path d="M17.7 12.3a10 10 0 0 0-3.4-2"/><path d="M10 15.9a5 5 0 0 1 4 0"/><path d="M12 19.7h.01"/><path d="M2.5 2.5l19 19"/>',
   building:'<rect x="5" y="3.5" width="14" height="17" rx="1.6"/><path d="M9 7.5h2M13 7.5h2M9 11.5h2M13 11.5h2"/><path d="M10 20.5v-4h4v4"/>'
 };
+/* ---------- بارگذاری تنبلِ کتابخانه‌های بیرونیِ سنگین (Chart.js / xlsx) ----------
+   قبلاً این دو با <script defer> در <head> بودند، یعنی هر بار که اپ باز می‌شد
+   (حتی فقط برای ثبت یک فروش ساده)، خودِ باز شدنِ صفحه به رسیدن به cdnjs.cloudflare.com
+   گره خورده بود. در اتصال ضعیف/آفلاین، مرورگر تا رسیدن به timeout شبکه صبر می‌کرد و رویداد
+   load (که ثبتِ سرویس‌ورکر هم به آن گره خورده) خیلی دیر یا هیچ‌وقت اجرا نمی‌شد.
+   حالا این کتابخانه‌ها فقط وقتی واقعاً لازم می‌شوند (صفحهٔ گزارش، خروجی اکسل) بارگذاری
+   می‌شوند — بازشدنِ اصلِ اپ دیگر به این دو وابسته نیست. */
+const CHART_JS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js';
+const XLSX_JS_URL   = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+const _scriptLoadPromises = {};
+function loadExternalScript(url){
+  if(_scriptLoadPromises[url]) return _scriptLoadPromises[url];
+  _scriptLoadPromises[url] = new Promise((resolve, reject)=>{
+    const s = document.createElement('script');
+    s.src = url;
+    s.onload = ()=>resolve();
+    s.onerror = ()=>{ delete _scriptLoadPromises[url]; reject(new Error('load failed: '+url)); };
+    document.head.appendChild(s);
+  });
+  return _scriptLoadPromises[url];
+}
+
 function ic(name, size, extraClass){
   const d = ICON_PATHS[name];
   if(!d) return '';
@@ -2805,12 +2827,12 @@ const App = {
   drawTrendChart(chartRetries){
     const canvas=document.getElementById('trend-chart'); if(!canvas) return;
     if(typeof Chart==='undefined'){
-      // اگر Chart.js هنوز لود نشده (مثلاً اولین لحظات آفلاین قبل از آماده‌شدن کش)، چند بار
-      // دوباره امتحان می‌کنیم، ولی نه برای همیشه — وگرنه اگر واقعاً هیچ‌وقت لود نشود
-      // (مثلاً کش هم خالی است)، این تلاش هر ۲۰۰ میلی‌ثانیه تا ابد ادامه پیدا می‌کند.
+      if(!chartRetries) loadExternalScript(CHART_JS_URL).catch(()=>{}); // فقط یک‌بار درخواست دانلود را شروع کن
+      // تا کتابخانه برسد (چه از کش سرویس‌ورکر، چه از شبکه)، چند بار با فاصله چک می‌کنیم —
+      // ولی نه برای همیشه — وگرنه اگر واقعاً هیچ‌وقت نرسد، این تلاش هر ۲۰۰ میلی‌ثانیه تا ابد ادامه پیدا می‌کند.
       const tries=(chartRetries||0)+1;
-      if(tries<=10){ setTimeout(()=>this.drawTrendChart(tries), 200); return; }
-      /* سقف تلاش: بعد از ۱۰ بار دیگر تلاش نمی‌کنیم (قبلاً بی‌نهایت بود) و یک پیام ساکت می‌دهیم */
+      if(tries<=15){ setTimeout(()=>this.drawTrendChart(tries), 200); return; }
+      /* سقف تلاش: بعد از ۱۵ بار دیگر تلاش نمی‌کنیم (قبلاً بی‌نهایت بود) و یک پیام ساکت می‌دهیم */
       console.warn('Chart.js بارگذاری نشد؛ نمودار نمایش داده نمی‌شود.');
       const box=canvas.parentElement;
       if(box) box.innerHTML = '<div class="field-note">نمودار بارگذاری نشد (احتمالاً اولین اجرای آفلاین). بعد از وصل شدن اینترنت و باز کردن دوبارهٔ این صفحه، نمودار نشان داده می‌شود. بقیهٔ ارقام گزارش درست است.</div>';
@@ -2846,8 +2868,12 @@ const App = {
       options:{ responsive:true, plugins:{legend:{position:'bottom', labels:{font:{family:'Vazirmatn'}}}}, scales:{ x:{ticks:{font:{size:10}}}, y:{ticks:{font:{size:10}}} } }
     });
   },
-  exportReportExcel(start,end,label){
-    if(typeof XLSX==='undefined'){ this.toast('کتابخانهٔ اکسل هنوز بارگذاری نشده؛ چند ثانیه صبر کنید و دوباره تلاش کنید.'); return; }
+  async exportReportExcel(start,end,label){
+    if(typeof XLSX==='undefined'){
+      this.toast('در حال آماده‌سازی خروجی اکسل...');
+      try{ await loadExternalScript(XLSX_JS_URL); }
+      catch(e){ this.toast('اتصال اینترنت برای دانلود ابزار اکسل لازم است؛ دوباره تلاش کنید.'); return; }
+    }
     const sales=this.salesInRange(start,end).filter(s=>s.status!=='cancelled');
     const purchases=this.purchasesInRange(start,end).filter(p=>p.status!=='cancelled');
     const expenses=this.expensesInRange(start,end);
@@ -2987,8 +3013,12 @@ const App = {
   exportBackup(){
     this._downloadJSON(this.state, 'backup-hesabdari-'+todayISO()+'.json');
   },
-  exportBackupExcel(){
-    if(typeof XLSX==='undefined'){ this.toast('کتابخانهٔ اکسل هنوز بارگذاری نشده؛ چند ثانیه صبر کنید و دوباره تلاش کنید.'); return; }
+  async exportBackupExcel(){
+    if(typeof XLSX==='undefined'){
+      this.toast('در حال آماده‌سازی خروجی اکسل...');
+      try{ await loadExternalScript(XLSX_JS_URL); }
+      catch(e){ this.toast('اتصال اینترنت برای دانلود ابزار اکسل لازم است؛ دوباره تلاش کنید.'); return; }
+    }
     const wb=XLSX.utils.book_new();
     const s=this.state;
     const sheets = {
