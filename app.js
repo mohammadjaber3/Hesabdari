@@ -1109,6 +1109,9 @@ const App = {
   itemPricePerTxUnit(it){ return round2((Number(it.unitPrice)||0)*this.itemFactor(it)); },
   itemCostPerTxUnit(it){ return round2((Number(it.unitCost)||0)*this.itemFactor(it)); },
 
+  // موجودی در یک واحد خاص
+  stockInUnit(p, unit){ if(!p) return 0; return round2((Number(p.stock)||0)/(unit?unit.factor:1)); },
+
   /* --- فرم‌های خرید/فروش: خواندن محصول و واحد انتخاب‌شده از روی صفحه --- */
   formProduct(prefix){
     const sel=document.getElementById(prefix+'-product'); if(!sel) return null;
@@ -3157,6 +3160,15 @@ const App = {
   // هم‌زمان یک فاکتور دیگر (فروش/خرید/کنسل) روی همین محصول در حال ثبت باشد،
   // هیچ تغییری گم نمی‌شود، چون سرور مقدار را نسبت به آخرین عدد واقعی خودش جمع/کم می‌کند.
   // فقط مدیر می‌تواند دستی موجودی را اصلاح کند — تغییرات خودکار خرید/فروش/کنسل برای همه باز است.
+  changeStockUnit(id){
+    if(!this.isOwner()) return;
+    const p=this.state.products.find(x=>x.id===id); if(!p) return;
+    const ladder=this.productUnits(p);
+    if(ladder.length<2){ this.toast('این محصول فقط یک واحد دارد'); return; }
+    const currentUnit=this.unitByName(p, p.defaultSaleUnit);
+    const nextUnit=ladder[(ladder.findIndex(u=>u.name===currentUnit.name)+1)%ladder.length];
+    updateDoc(doc(cols.products, id), { defaultSaleUnit: nextUnit.name }).then(()=>this.toast('واحد نمایش موجودی تغییر کرد: '+nextUnit.name)).catch(e=>{ console.error(e); });
+  },
   adjustProductStock(id){
     if(!this.isOwner()){ this.toast('فقط مدیر می‌تواند موجودی را دستی اصلاح کند.'); return; }
     const p=this.state.products.find(x=>x.id===id); if(!p) return;
@@ -3165,7 +3177,7 @@ const App = {
       sub:'موجودی فعلی (طبق آخرین اطلاعات این دستگاه): '+this.qtyBreakdown(p,p.stock||0),
       fields:[
         {key:'unit', label:'واحد', type:'select', options:this.productUnits(p).map(u=>({value:u.name, label:u.name+(u.factor>1?(' (= '+fmtQty(u.factor)+' '+(p.unit||'عدد')+')'):'')})), value:(p.unit||'عدد')},
-        {key:'delta', label:'چند تا اضافه یا کم شود؟', type:'number', step:'0.01', value:'', hint:'برای اضافه‌کردن عدد مثبت (مثلاً 5)، برای کم‌کردن عدد منفی (مثلاً -5) بنویسید.'}
+        {key:'delta', label:'چند تا اضافه یا کم شود؟ (مثبت یا منفی)', type:'text', value:'', hint:'مثبت: +5 یا 5 · منفی: -5 · اعشار: 2.5 یا -3.2 · کیبورد منفی رو نشان بده'}
       ],
       submitLabel:'ثبت اصلاح',
       onSubmit:(v)=>{
@@ -3208,11 +3220,13 @@ const App = {
     const sorted=[...this.state.products].sort((a,b)=>a.name.localeCompare(b.name,'fa'));
     const rows = sorted.length ? sorted.map(p=>{
       const ladder=this.productUnits(p);
+      const defUnit=this.unitByName(p, p.defaultSaleUnit);
+      const stockInDef=this.stockInUnit(p,defUnit);
       const priceLine = ladder.map(u=>u.name+': '+fmt2(this.unitSellPrice(p,u))+(this.isUnitPriceManual(p,u)?'*':'')).join(' · ');
       const costLine  = ladder.map(u=>u.name+': '+fmt2(this.unitCost(p,u))).join(' · ');
       return `<div class="row-item"><div class="r-left"><b>${escapeHtml(p.name)}</b>${ladder.length>1?`<span class="sub">${escapeHtml(this.unitLadderLabel(p))}</span>`:''}<span class="sub">فروش — ${escapeHtml(priceLine)}</span><span class="sub">تمام‌شده — ${escapeHtml(costLine)}</span></div>
       <div class="r-right" style="display:flex;align-items:center;gap:10px;">
-        <span class="badge ${p.stock<=threshold?'red':'gold'} num">${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</span>
+        <div style="text-align:right;"><div class="badge ${p.stock<=threshold?'red':'gold'} num">${fmtQty(stockInDef)} ${escapeHtml(defUnit.name)}</div><button class="btn btn-sm btn-outline" style="margin-top:4px;font-size:10px;" onclick="App.changeStockUnit('${p.id}')">${escapeHtml(defUnit.name==='عدد'?'به '+ladder[0].name:'به عدد')}</button></div>
         ${owner?`<span class="icon-btn" onclick="App.editProductUnits('${p.id}')" title="ویرایش واحدها و قیمت">${ic('sliders',16)}</span>`:''}
         ${owner?`<span class="menu-dots" onclick='App.openActionMenu([
           {label:"ویرایش واحدها و قیمت‌ها", icon:"sliders", onClick:()=>App.editProductUnits("${p.id}")},
