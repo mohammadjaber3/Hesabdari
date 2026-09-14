@@ -1,7 +1,7 @@
 // حساب‌داری فروشگاه صانع — Service Worker
 // نسخهٔ سه‌فایلی: index.html + styles.css + app.js
 // هر بار که تغییری اساسی در فایل‌های اصلی دادید، این نسخه را عوض کنید تا گوشی‌ها نسخهٔ تازه بگیرند
-const CACHE_VERSION = 'hesabdari-v4';
+const CACHE_VERSION = 'hesabdari-v5';
 
 // فایل‌های خود سایت (همیشه باید برای بازکردن آفلاین موجود باشند)
 const APP_SHELL = [

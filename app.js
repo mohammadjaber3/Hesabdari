@@ -67,6 +67,26 @@ function fmt2(n){
   const [intPart, decPart] = fixed.split('.');
   return (neg?'-':'') + Number(intPart).toLocaleString('en-US') + '.' + decPart;
 }
+/* ---------- واحدهای تو در تو (کارتن ← قوطی/بسته ← عدد) ----------
+   مدل داده (سازگار با نسخهٔ قبلی، هیچ مهاجرتی لازم نیست):
+     unit        = واحد پایه (کوچک‌ترین واحد فروش، مثلاً «عدد»)
+     stock       = موجودی، همیشه به واحد پایه
+     avgCost     = قیمت تمام‌شدهٔ یک واحد پایه
+     sellPrice   = قیمت فروش یک واحد پایه
+     midUnit/midPer   = واحد میانی (قوطی/بسته) و اینکه هر کدام چند واحد پایه دارد
+     packUnit/packSize= واحد بزرگ (کارتن) و اینکه هر کارتن جمعاً چند واحد پایه دارد
+     sellPriceMid / sellPricePack = قیمت فروش دستیِ آن واحد (خالی = خودکار از قیمت پایه)
+     defaultSaleUnit  = واحدی که در فرم فروش پیش‌فرض انتخاب می‌شود
+   اقلام فاکتور (sales/purchases items) هم فقط دو فیلد نمایشی اضافه گرفته‌اند:
+     txUnit  = نام واحدی که واقعاً با آن معامله شد
+     txFactor= چند واحد پایه در آن واحد است
+   مقدار qty و unitPrice/unitCost همیشه به واحد پایه ذخیره می‌شوند تا همهٔ
+   محاسبات قبلی (سود، مرجوعی، کنسل، موجودی) بدون تغییر و درست بمانند. */
+function round2(n){ return Math.round((Number(n)||0)*100)/100; }
+function fmtQty(n){
+  const r = Math.round((Number(n)||0)*1000)/1000;
+  return Number.isInteger(r) ? r.toLocaleString('en-US') : String(r);
+}
 function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function sum(arr,key){ return arr.reduce((a,b)=>a+(Number(b[key])||0),0); }
 /* ---------- فشرده‌سازی عکس (بل شرکت / رسید پرداخت) ----------
@@ -609,6 +629,13 @@ const App = {
     this.modal = {kind:'form', title, sub, fields, submitLabel:submitLabel||'ذخیره', danger:!!danger, onSubmit};
     this.renderModalRoot();
   },
+  // مودال با بدنهٔ دلخواه (برای فرم‌هایی که فیلدهایشان به هم وابسته‌اند،
+  // مثلاً انتخاب محصول ← واحد ← قیمت خودکار)
+  openCustomModal({title, sub, bodyHtml, submitLabel, danger, onSubmit, onOpen}){
+    this.modal = {kind:'custom', title, sub, bodyHtml, submitLabel:submitLabel||'ذخیره', danger:!!danger, onSubmit};
+    this.renderModalRoot();
+    if(onOpen) setTimeout(onOpen,0);
+  },
   openConfirmModal({title, msg, danger, confirmLabel, onConfirm}){
     this.modal = {kind:'confirm', title, msg, danger:!!danger, confirmLabel:confirmLabel||'تأیید', onConfirm};
     this.renderModalRoot();
@@ -625,6 +652,17 @@ const App = {
     const errEl = document.getElementById('modal-err');
     try{
       const res = await this.modal.onSubmit(vals);
+      if(res===false) return;
+      this.closeModal();
+    }catch(err){
+      if(errEl) errEl.textContent = err && err.message ? err.message : 'خطا؛ دوباره تلاش کنید.';
+    }
+  },
+  async submitCustomModal(){
+    if(!this.modal || this.modal.kind!=='custom') return;
+    const errEl=document.getElementById('modal-err');
+    try{
+      const res=await this.modal.onSubmit();
       if(res===false) return;
       this.closeModal();
     }catch(err){
@@ -650,6 +688,23 @@ const App = {
           <div class="modal-actions">
             <button class="btn btn-outline" onclick="App.closeModal()">انصراف</button>
             <button class="btn ${m.danger?'btn-danger':'btn-primary'}" onclick="App.confirmModalYes()">${ic(m.danger?'alert-triangle':'check',16)}${escapeHtml(m.confirmLabel)}</button>
+          </div>
+        </div>
+      </div>`;
+      return;
+    }
+    if(m.kind==='custom'){
+      root.innerHTML = `
+      <div class="modal-overlay" onclick="if(event.target===this) App.closeModal()">
+        <div class="modal-sheet">
+          <div class="sheet-handle"></div>
+          <div class="modal-title">${escapeHtml(m.title||'')}<span class="close" onclick="App.closeModal()">${ic('x',18)}</span></div>
+          ${m.sub?`<div class="modal-sub">${escapeHtml(m.sub)}</div>`:''}
+          ${m.bodyHtml||''}
+          <div id="modal-err" class="err-line"></div>
+          <div class="modal-actions">
+            <button class="btn btn-outline" onclick="App.closeModal()">انصراف</button>
+            <button class="btn ${m.danger?'btn-danger':'btn-primary'}" onclick="App.submitCustomModal()">${ic(m.danger?'alert-triangle':'check',16)}${escapeHtml(m.submitLabel)}</button>
           </div>
         </div>
       </div>`;
@@ -739,7 +794,7 @@ const App = {
     const group = (title, arr, renderRow) => arr.length ? `<div class="search-group-title">${title}</div>` + arr.map(renderRow).join('') : '';
     return !q.trim() ? `<div class="empty"><span class="ic">${ic('search',26)}</span><b>جست‌وجوی سراسری</b>نام محصول، مشتری، عمده‌فروش، یا شمارهٔ فاکتور فروش/بل خرید را بنویسید</div>` :
       (!hasAny ? `<div class="empty"><span class="ic">${ic('frown',26)}</span>چیزی با «${escapeHtml(q)}» پیدا نشد</div>` :
-      group(ic('archive',13)+' محصولات', r.products, p=>`<div class="row-item clickable" onclick="App.closeSearch(); App.navigate('more','products');"><div class="r-left"><b>${escapeHtml(p.name)}</b><span class="sub">موجودی: ${p.stock} ${escapeHtml(p.unit)}</span></div><div class="r-right num">${fmt(p.sellPrice)}</div></div>`)
+      group(ic('archive',13)+' محصولات', r.products, p=>`<div class="row-item clickable" onclick="App.closeSearch(); App.navigate('more','products');"><div class="r-left"><b>${escapeHtml(p.name)}</b><span class="sub">موجودی: ${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</span></div><div class="r-right num">${fmt(p.sellPrice)}</div></div>`)
       + group(ic('users',13)+' مشتریان', r.customers, c=>`<div class="row-item clickable" onclick="App.closeSearch(); App.navigate('customers'); App.openParty('customers','${c.id}');"><div class="r-left"><b>${escapeHtml(c.name)}</b><span class="sub">${escapeHtml(c.phone||'')}</span></div><div class="r-right num" style="color:${c.balance>0.5?'var(--red)':'var(--green)'}">${fmt(c.balance||0)}</div></div>`)
       + group(ic('factory',13)+' عمده‌فروشان', r.suppliers, c=>`<div class="row-item clickable" onclick="App.closeSearch(); App.navigate('customers'); App.openParty('suppliers','${c.id}');"><div class="r-left"><b>${escapeHtml(c.name)}</b><span class="sub">${escapeHtml(c.phone||'')}</span></div><div class="r-right num" style="color:${c.balance>0.5?'var(--red)':'var(--green)'}">${fmt(c.balance||0)}</div></div>`)
       + group(ic('receipt',13)+' فروش‌ها', r.sales, s=>`<div class="row-item clickable" onclick="App.closeSearch(); App.viewInvoice('${s.id}');"><div class="r-left"><b>فروش ${this.invoiceNoLabel(s.id)} — ${escapeHtml(s.customerName)}</b><span class="sub">${s.date}</span></div><div class="r-right num">${fmt(s.total)}</div></div>`)
@@ -965,6 +1020,184 @@ const App = {
     `;
   },
 
+  /* =========================================================
+     واحدهای تو در تو — توابع کمکی مشترک بین خرید، فروش و انبار
+     ========================================================= */
+  // نردبان واحدها از بزرگ به کوچک؛ همیشه واحد پایه را هم شامل است
+  productUnits(p){
+    const base = (p && p.unit) ? p.unit : 'عدد';
+    const out = [];
+    const packSize = Number(p && p.packSize)||0;
+    const midPer   = Number(p && p.midPer)||0;
+    if(p && p.packUnit && packSize>1) out.push({key:'pack', name:p.packUnit, factor:packSize});
+    if(p && p.midUnit && midPer>1)    out.push({key:'mid',  name:p.midUnit,  factor:midPer});
+    out.push({key:'base', name:base, factor:1});
+    out.sort((a,b)=>b.factor-a.factor);
+    return out.filter((u,i,a)=> a.findIndex(x=>x.factor===u.factor)===i && a.findIndex(x=>x.name===u.name)===i);
+  },
+  unitByName(p, name){
+    const ladder=this.productUnits(p);
+    return ladder.find(u=>u.name===name) || ladder[ladder.length-1];
+  },
+  // قیمت فروش یک واحد: اگر دستی تنظیم شده همان، وگرنه خودکار = قیمت پایه × ظرفیت
+  unitSellPrice(p, u){
+    if(!p||!u) return 0;
+    if(u.key==='pack' && Number(p.sellPricePack)>0) return Number(p.sellPricePack);
+    if(u.key==='mid'  && Number(p.sellPriceMid)>0)  return Number(p.sellPriceMid);
+    return round2((Number(p.sellPrice)||0)*u.factor);
+  },
+  isUnitPriceManual(p,u){
+    if(!p||!u) return false;
+    return (u.key==='pack' && Number(p.sellPricePack)>0) || (u.key==='mid' && Number(p.sellPriceMid)>0);
+  },
+  // قیمت تمام‌شدهٔ یک واحد، همیشه خودکار از قیمت تمام‌شدهٔ واحد پایه
+  unitCost(p, u){ return round2((Number(p&&p.avgCost)||0)*(u?u.factor:1)); },
+  // «۲ کارتن و ۳ قوطی و ۵ عدد»
+  qtyBreakdown(p, baseQty){
+    const q0=Number(baseQty)||0;
+    const neg=q0<0; let q=Math.abs(q0);
+    const ladder=this.productUnits(p);
+    const parts=[];
+    for(let i=0;i<ladder.length;i++){
+      const u=ladder[i];
+      if(i===ladder.length-1){
+        const rest=Math.round(q*1000)/1000;
+        if(rest>0.0001 || parts.length===0) parts.push(fmtQty(rest)+' '+u.name);
+        break;
+      }
+      const n=Math.floor(q/u.factor+1e-9);
+      if(n>0){ parts.push(fmtQty(n)+' '+u.name); q-=n*u.factor; }
+    }
+    return (neg?'-':'')+parts.join(' و ');
+  },
+  unitLadderLabel(p){
+    const ladder=this.productUnits(p);
+    if(ladder.length<2) return '';
+    const parts=[];
+    for(let i=0;i<ladder.length-1;i++){
+      const child=ladder[i+1];
+      parts.push('۱ '+ladder[i].name+' = '+fmtQty(ladder[i].factor/child.factor)+' '+child.name);
+    }
+    if(ladder.length>2) parts.push('۱ '+ladder[0].name+' = '+fmtQty(ladder[0].factor)+' '+ladder[ladder.length-1].name);
+    return parts.join(' · ');
+  },
+  /* --- کمکی‌های نمایشِ اقلام فاکتور --- */
+  itemFactor(it){ const f=Number(it&&it.txFactor)||0; return f>0?f:1; },
+  itemUnitName(it){ return (it&&it.txUnit) || (it&&it.unit) || 'عدد'; },
+  itemUnits(it){
+    const p=this.state.products.find(x=>x.id===it.productId);
+    if(p) return this.productUnits(p);
+    const f=this.itemFactor(it);
+    const base={key:'base', name:(it.unit||'عدد'), factor:1};
+    return f>1 ? [{key:'tx', name:this.itemUnitName(it), factor:f}, base] : [base];
+  },
+  itemQtyLabel(it, baseQtyOverride){
+    const f=this.itemFactor(it);
+    const q = baseQtyOverride!==undefined ? (Number(baseQtyOverride)||0) : (Number(it.qty)||0);
+    if(f===1) return fmtQty(q)+' '+this.itemUnitName(it);
+    const inUnit=q/f;
+    if(Math.abs(inUnit-Math.round(inUnit))<1e-9) return fmtQty(Math.round(inUnit))+' '+this.itemUnitName(it);
+    const p=this.state.products.find(x=>x.id===it.productId);
+    return p ? this.qtyBreakdown(p,q) : fmtQty(round2(inUnit))+' '+this.itemUnitName(it);
+  },
+  // معادل واحد پایه، فقط وقتی واحد معامله بزرگ‌تر از پایه بوده
+  itemBaseNote(it){
+    const f=this.itemFactor(it);
+    if(f<=1) return '';
+    return '= '+fmtQty(it.qty)+' '+(it.unit||'عدد');
+  },
+  itemPricePerTxUnit(it){ return round2((Number(it.unitPrice)||0)*this.itemFactor(it)); },
+  itemCostPerTxUnit(it){ return round2((Number(it.unitCost)||0)*this.itemFactor(it)); },
+
+  /* --- فرم‌های خرید/فروش: خواندن محصول و واحد انتخاب‌شده از روی صفحه --- */
+  formProduct(prefix){
+    const sel=document.getElementById(prefix+'-product'); if(!sel) return null;
+    if(sel.value==='__new__') return this.draftNewProduct(prefix);
+    return this.state.products.find(p=>p.id===sel.value)||null;
+  },
+  draftNewProduct(prefix){
+    const gs=id=>{ const el=document.getElementById(id); return el?String(el.value||'').trim():''; };
+    const gn=id=>{ const el=document.getElementById(id); return el?(parseFloat(el.value)||0):0; };
+    const base=gs(prefix+'-newunit')||'عدد';
+    const midUnit=gs(prefix+'-newmidunit'), midPer=gn(prefix+'-newmidper');
+    const packUnit=gs(prefix+'-newpackunit'), packPer=gn(prefix+'-newpackper');
+    const hasMid = !!(midUnit && midPer>1);
+    const packSize = (packUnit && packPer>0) ? (hasMid ? packPer*midPer : packPer) : 0;
+    return {
+      name: gs(prefix+'-newname'), unit: base, stock:0, avgCost:0, sellPrice:0,
+      midUnit: hasMid?midUnit:'', midPer: hasMid?midPer:0,
+      packUnit: packSize>1?packUnit:'', packSize: packSize>1?packSize:0,
+      defaultSaleUnit: hasMid?midUnit:base
+    };
+  },
+  formUnit(prefix){
+    const p=this.formProduct(prefix); if(!p) return null;
+    const sel=document.getElementById(prefix+'-unit');
+    return this.unitByName(p, sel?sel.value:null);
+  },
+  // پر کردن لیست واحدها بر اساس محصول انتخاب‌شده (یا محصول جدیدی که کاربر تایپ می‌کند)
+  fillUnitSelect(prefix, keepPrice){
+    const sel=document.getElementById(prefix+'-unit'); if(!sel) return;
+    const p=this.formProduct(prefix);
+    const ladder = p ? this.productUnits(p) : [];
+    const prev=sel.value;
+    const baseName = p ? (p.unit||'عدد') : 'عدد';
+    sel.innerHTML = ladder.map(u=>`<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}${u.factor>1?' — '+fmtQty(u.factor)+' '+escapeHtml(baseName):''}</option>`).join('');
+    let def=prev;
+    if(!ladder.some(u=>u.name===prev)){
+      if(prefix==='pp') def = ladder.length?ladder[0].name:'';
+      else def = (p&&p.defaultSaleUnit && ladder.some(u=>u.name===p.defaultSaleUnit)) ? p.defaultSaleUnit : (ladder.length?ladder[ladder.length-1].name:'');
+    }
+    sel.value=def;
+    if(!keepPrice) this.autofillUnitPrice(prefix);
+    this.updateUnitHint(prefix);
+  },
+  autofillUnitPrice(prefix){
+    const p=this.formProduct(prefix), u=this.formUnit(prefix);
+    if(!p||!u) return;
+    if(prefix==='sp'){
+      const el=document.getElementById('sp-price'); if(!el) return;
+      const v=this.unitSellPrice(p,u); el.value = v>0 ? v : '';
+    } else {
+      const el=document.getElementById('pp-cost'); if(!el) return;
+      const v=this.unitCost(p,u); el.value = v>0 ? v : '';
+    }
+  },
+  // راهنمای زیر فیلدها: معادل واحد پایه، موجودی به تفکیک واحدها، و قیمت خردشدهٔ واحدهای کوچک‌تر
+  updateUnitHint(prefix){
+    const p=this.formProduct(prefix), u=this.formUnit(prefix);
+    const base = p ? (p.unit||'عدد') : 'عدد';
+    const noteEl=document.getElementById(prefix+'-unit-note');
+    const qtyHint=document.getElementById(prefix+'-qty-hint');
+    const priceHint=document.getElementById(prefix+'-price-hint');
+    const priceLabel=document.getElementById(prefix+'-price-label');
+    const qtyEl=document.getElementById(prefix+'-qty');
+    const priceEl=document.getElementById(prefix==='sp'?'sp-price':'pp-cost');
+    const qty=qtyEl?(parseFloat(qtyEl.value)||0):0;
+    const price=priceEl?parseFloat(priceEl.value):NaN;
+    if(noteEl) noteEl.textContent = (u&&u.factor>1) ? ('۱ '+u.name+' = '+fmtQty(u.factor)+' '+base) : '';
+    if(qtyHint){
+      const bits=[];
+      if(u&&u.factor>1&&qty>0) bits.push('= '+fmtQty(round2(qty*u.factor))+' '+base);
+      if(prefix==='sp'&&p&&p.id) bits.push('موجودی: '+this.qtyBreakdown(p,p.stock||0));
+      qtyHint.textContent=bits.join(' · ');
+    }
+    if(priceLabel&&u){
+      priceLabel.textContent = prefix==='sp'
+        ? ('قیمت فروش هر '+u.name)
+        : ('قیمت خرید هر '+u.name+' ('+this.curLabel((this.purchaseDraft&&this.purchaseDraft.currency)||'AFN')+')');
+    }
+    if(priceHint){
+      if(p&&u&&!isNaN(price)&&price>0&&u.factor>1){
+        const per=price/u.factor;
+        const smaller=this.productUnits(p).filter(x=>x.factor<u.factor);
+        priceHint.textContent = smaller.length
+          ? (prefix==='sp'?'یعنی هر ':'قیمت تمام‌شده: هر ')+smaller.map(x=>x.name+' = '+fmt2(round2(per*x.factor))).join(' · هر ')
+          : '';
+      } else priceHint.textContent='';
+    }
+  },
+
   /* ---------- Sale ---------- */
   addSaleItem(){
     const sel=document.getElementById('sp-product');
@@ -972,33 +1205,36 @@ const App = {
     if(!pid){ this.toast('یک محصول انتخاب کنید'); return; }
     let product;
     if(pid==='__new__'){
-      const name=(document.getElementById('sp-newname').value||'').trim();
-      const unit=(document.getElementById('sp-newunit').value||'').trim()||'عدد';
-      if(!name){ this.toast('نام محصول جدید را بنویسید'); return; }
+      const d=this.draftNewProduct('sp');
+      if(!d.name){ this.toast('نام محصول جدید را بنویسید'); return; }
       // نکته: این محصول هنوز در دیتابیس ذخیره نمی‌شود؛ فقط وقتی فاکتور نهایی ثبت شود ذخیره خواهد شد
       // (تا اگر فاکتور رها شود، محصول یتیم با موجودی صفر در فهرست باقی نماند)
-      product = { id: uid(), name, unit, stock:0, avgCost:0, sellPrice:0, _draftOnly:true };
+      product = Object.assign({}, d, { id: uid(), _draftOnly:true });
     } else {
       product = this.state.products.find(p=>p.id===pid);
     }
     if(!product){ this.toast('محصول یافت نشد'); return; }
-    const qty = pid==='__new__' ? parseFloat(document.getElementById('sp-qty').value) : this.packAdjustedQty('sp');
-    const price=parseFloat(document.getElementById('sp-price').value);
-    if(!qty||qty<=0){ this.toast('تعداد را درست بنویسید'); return; }
-    if(isNaN(price)||price<0){ this.toast('قیمت فروش را بنویسید'); return; }
+    const u = this.unitByName(product, (document.getElementById('sp-unit')||{}).value);
+    const qtyIn = parseFloat(document.getElementById('sp-qty').value);
+    const priceIn = parseFloat(document.getElementById('sp-price').value);
+    if(!qtyIn||qtyIn<=0){ this.toast('تعداد را درست بنویسید'); return; }
+    if(isNaN(priceIn)||priceIn<0){ this.toast('قیمت فروش را بنویسید'); return; }
+    // همه‌چیز به واحد پایه تبدیل و ذخیره می‌شود؛ واحد انتخابی فقط برای نمایش نگه داشته می‌شود
+    const qty = round2(qtyIn*u.factor);
+    const price = priceIn/u.factor;
     /* قلم فقط بعد از تأیید نهایی اضافه می‌شود — هشدار کم‌موجودی حالا مودال داخلی است، نه confirm() مرورگر */
     const finish = ()=>{
       if(product._draftOnly){
         this.saleDraft._draftProducts = this.saleDraft._draftProducts || [];
         if(!this.saleDraft._draftProducts.some(p=>p.id===product.id)) this.saleDraft._draftProducts.push(product);
       }
-      this.saleDraft.items.push({productId:product.id,name:product.name,unit:product.unit,qty,unitPrice:price,cost:product.avgCost});
+      this.saleDraft.items.push({productId:product.id,name:product.name,unit:product.unit,qty,unitPrice:price,cost:product.avgCost,txUnit:u.name,txFactor:u.factor});
       this.render();
     };
     if(qty>product.stock){
       this.openConfirmModal({
         title:'موجودی کافی نیست',
-        msg:'از «'+product.name+'» فقط '+product.stock+' '+product.unit+' در انبار مانده، ولی '+qty+' '+product.unit+' فروخته می‌شود. باز هم اضافه شود؟ (موجودی منفی می‌شود)',
+        msg:'از «'+product.name+'» فقط '+this.qtyBreakdown(product, product.stock||0)+' در انبار مانده، ولی '+fmtQty(qtyIn)+' '+u.name+' ('+fmtQty(qty)+' '+(product.unit||'عدد')+') فروخته می‌شود. باز هم اضافه شود؟ (موجودی منفی می‌شود)',
         danger:true, confirmLabel:'باز هم اضافه کن',
         onConfirm: finish
       });
@@ -1010,8 +1246,8 @@ const App = {
 
   submitSale(){
     if(this.saleDraft.items.length===0){ this.toast('حداقل یک محصول اضافه کنید'); return; }
-    const total = this.saleDraft.items.reduce((a,i)=>a+i.qty*i.unitPrice,0);
-    const totalCost = this.saleDraft.items.reduce((a,i)=>a+i.qty*i.cost,0);
+    const total = round2(this.saleDraft.items.reduce((a,i)=>a+i.qty*i.unitPrice,0));
+    const totalCost = round2(this.saleDraft.items.reduce((a,i)=>a+i.qty*i.cost,0));
     let paid = parseFloat(document.getElementById('sale-paid').value);
     if(isNaN(paid)) paid=0;
     if(paid>total) paid=total;
@@ -1046,7 +1282,9 @@ const App = {
     this.saleDraft.items.forEach(it=>{
       const draftP = draftProducts.find(dp=>dp.id===it.productId);
       if(draftP){
-        batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, stock:-it.qty, avgCost:0, sellPrice:it.unitPrice});
+        batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, stock:-it.qty, avgCost:0, sellPrice:it.unitPrice,
+          midUnit:draftP.midUnit||'', midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', packSize:draftP.packSize||0,
+          defaultSaleUnit:draftP.defaultSaleUnit||draftP.unit, sellPriceMid:0, sellPricePack:0});
       } else {
         batch.update(doc(cols.products, it.productId), { stock: increment(-it.qty) });
       }
@@ -1056,7 +1294,7 @@ const App = {
     const newSale = {
       id:saleId, ts:Date.now(), date, customerId, customerName:customerNameFinal,
       customerPhone: custPhone, customerAddress: custAddress,
-      items:this.saleDraft.items.map(it=>({...it,returnedQty:0})), total, totalCost, profit: total-totalCost,
+      items:this.saleDraft.items.map(it=>({...it,returnedQty:0})), total, totalCost, profit: round2(total-totalCost),
       paid, remaining, note, status:'active', returns:[], originalTotal: total, discount:0,
       ...this.recordMeta()
     };
@@ -1128,8 +1366,9 @@ const App = {
     if(sale.customerAddress) lines.push('آدرس: '+sale.customerAddress);
     lines.push('———————————————');
     sale.items.forEach((it,idx)=>{
-      const ret = it.returnedQty ? ` (مرجوعی: ${it.returnedQty})` : '';
-      lines.push(`${idx+1}. ${it.name} — ${it.qty} ${it.unit} × ${fmt(it.unitPrice)} = ${fmt(it.qty*it.unitPrice)}${ret}`);
+      const ret = it.returnedQty ? ` (مرجوعی: ${this.itemQtyLabel(it, it.returnedQty)})` : '';
+      const base = this.itemFactor(it)>1 ? ` [${fmtQty(it.qty)} ${it.unit}]` : '';
+      lines.push(`${idx+1}. ${it.name} — ${this.itemQtyLabel(it)}${base} × ${fmt(this.itemPricePerTxUnit(it))} = ${fmt(it.qty*it.unitPrice)}${ret}`);
     });
     lines.push('———————————————');
     if(sale.originalTotal!==undefined && Math.abs(sale.originalTotal-sale.total)>0.5) lines.push('مجموع اولیهٔ فاکتور: '+fmt(sale.originalTotal)+' '+s.currency);
@@ -1143,7 +1382,7 @@ const App = {
     if(sale.returns && sale.returns.length){
       lines.push('———————————————');
       lines.push('↩️ کالاهای مرجوعی:');
-      sale.returns.forEach(r=> lines.push(`- ${r.name} — ${r.qty} عدد — ${fmt(r.amount)} ${s.currency}`));
+      sale.returns.forEach(r=> lines.push(`- ${r.name} — ${r.qtyLabel||(r.qty+' عدد')} — ${fmt(r.amount)} ${s.currency}`));
     }
     lines.push('———————————————');
     lines.push('با تشکر از خرید شما 🙏');
@@ -1172,9 +1411,9 @@ const App = {
       return `
       <tr>
         <td>${idx+1}</td>
-        <td>${escapeHtml(it.name)}${returned>0?`<div class="sub" style="color:var(--red);">${returned} ${escapeHtml(it.unit)} مرجوعی</div>`:''}</td>
-        <td class="num">${it.qty} ${escapeHtml(it.unit)}</td>
-        <td class="num">${fmt(it.unitPrice)}</td>
+        <td>${escapeHtml(it.name)}${returned>0?`<div class="sub" style="color:var(--red);">${escapeHtml(this.itemQtyLabel(it,returned))} مرجوعی</div>`:''}</td>
+        <td class="num">${escapeHtml(this.itemQtyLabel(it))}${this.itemBaseNote(it)?`<div class="sub">${escapeHtml(this.itemBaseNote(it))}</div>`:''}</td>
+        <td class="num">${fmt(this.itemPricePerTxUnit(it))}<div class="sub">هر ${escapeHtml(this.itemUnitName(it))}</div></td>
         <td class="num">${fmt(it.qty*it.unitPrice)}</td>
         <td class="no-print">${!cancelled?`<span class="menu-dots" onclick='App.openActionMenu([
           {label:"مرجوعی این قلم", icon:"rotate-ccw", onClick:()=>App.saleReturnItem("${sale.id}",${idx})},
@@ -1185,7 +1424,7 @@ const App = {
 
     const returnsHtml = sale.returns && sale.returns.length ? `
       <h2 class="section-title">${ic('rotate-ccw',17)}کالاهای مرجوعی</h2>
-      <div class="card no-print">${sale.returns.map(r=>`<div class="row-item"><div class="r-left"><b>${escapeHtml(r.name)}</b><span class="sub">${r.date} · ${r.qty} عدد</span></div><div class="r-right num" style="color:var(--red)">-${fmt(r.amount)}</div></div>`).join('')}</div>
+      <div class="card no-print">${sale.returns.map(r=>`<div class="row-item"><div class="r-left"><b>${escapeHtml(r.name)}</b><span class="sub">${r.date} · ${escapeHtml(r.qtyLabel||(r.qty+' عدد'))}</span></div><div class="r-right num" style="color:var(--red)">-${fmt(r.amount)}</div></div>`).join('')}</div>
     ` : '';
 
     return `
@@ -1249,15 +1488,19 @@ const App = {
   renderInvoiceEditForm(sale){
     const itemsHtml = sale.items.map((it,idx)=>{
       const returned = it.returnedQty||0;
+      const f=this.itemFactor(it);
+      const un=this.itemUnitName(it);
+      const minLbl = returned>0 ? this.itemQtyLabel(it,returned) : '';
       return `
       <div class="grid2" style="align-items:end;margin-bottom:10px;">
         <div>
-          <label>${escapeHtml(it.name)} — تعداد${returned>0?` <span class="sub" style="color:var(--red);">(حداقل ${returned}، به‌دلیل مرجوعی)</span>`:''}</label>
-          <input id="edit-item-qty-${idx}" type="number" inputmode="decimal" value="${it.qty}">
+          <label>${escapeHtml(it.name)} — تعداد (${escapeHtml(un)})${returned>0?` <span class="sub" style="color:var(--red);">(حداقل ${escapeHtml(minLbl)}، به‌دلیل مرجوعی)</span>`:''}</label>
+          <input id="edit-item-qty-${idx}" type="number" inputmode="decimal" step="0.01" value="${round2(it.qty/f)}">
+          ${f>1?`<div class="field-note">۱ ${escapeHtml(un)} = ${fmtQty(f)} ${escapeHtml(it.unit||'عدد')}</div>`:''}
         </div>
         <div>
-          <label>قیمت واحد (${escapeHtml(it.unit)})</label>
-          <input id="edit-item-price-${idx}" type="number" inputmode="decimal" value="${it.unitPrice}">
+          <label>قیمت هر ${escapeHtml(un)}</label>
+          <input id="edit-item-price-${idx}" type="number" inputmode="decimal" step="0.01" value="${this.itemPricePerTxUnit(it)}">
         </div>
       </div>`;
     }).join('');
@@ -1315,16 +1558,18 @@ const App = {
     if(sale.status==='cancelled'){ this.toast('این فاکتور باطل شده است.'); return; }
 
     const newItems = sale.items.map((it,idx)=>{
+      const f=this.itemFactor(it);
       const qtyEl=document.getElementById('edit-item-qty-'+idx);
       const priceEl=document.getElementById('edit-item-price-'+idx);
-      const qty=parseFloat(qtyEl ? qtyEl.value : NaN);
-      const unitPrice=parseFloat(priceEl ? priceEl.value : NaN);
+      // ورودی‌ها به واحد معامله‌شده‌اند و اینجا به واحد پایه برمی‌گردند
+      const qty=round2(parseFloat(qtyEl ? qtyEl.value : NaN)*f);
+      const unitPrice=parseFloat(priceEl ? priceEl.value : NaN)/f;
       return {...it, qty, unitPrice};
     });
     for(const it of newItems){
       if(isNaN(it.qty)||it.qty<=0){ App.toastError('تعداد نامعتبر برای «'+it.name+'»'); return; }
       if(isNaN(it.unitPrice)||it.unitPrice<0){ App.toastError('قیمت نامعتبر برای «'+it.name+'»'); return; }
-      if(it.qty < (it.returnedQty||0)){ App.toastError('تعداد «'+it.name+'» نمی‌تواند کمتر از مقدار مرجوعی‌شدهٔ آن ('+(it.returnedQty||0)+' '+it.unit+') باشد.'); return; }
+      if(it.qty < (it.returnedQty||0)-1e-9){ App.toastError('تعداد «'+it.name+'» نمی‌تواند کمتر از مقدار مرجوعی‌شدهٔ آن ('+App.itemQtyLabel(it,it.returnedQty||0)+') باشد.'); return; }
     }
 
     const custName=(document.getElementById('edit-customer-name').value||'').trim();
@@ -1333,8 +1578,8 @@ const App = {
     const date=document.getElementById('edit-sale-date').value || sale.date;
     const note=(document.getElementById('edit-sale-note').value||'').trim();
 
-    const newTotal = newItems.reduce((a,i)=>a+(i.qty-(i.returnedQty||0))*i.unitPrice,0);
-    const newTotalCost = newItems.reduce((a,i)=>a+(i.qty-(i.returnedQty||0))*(i.cost||0),0);
+    const newTotal = round2(newItems.reduce((a,i)=>a+(i.qty-(i.returnedQty||0))*i.unitPrice,0));
+    const newTotalCost = round2(newItems.reduce((a,i)=>a+(i.qty-(i.returnedQty||0))*(i.cost||0),0));
 
     let paid=parseFloat(document.getElementById('edit-sale-paid').value);
     if(isNaN(paid)||paid<0) paid=0;
@@ -1422,7 +1667,7 @@ const App = {
     const items = this.saleDraft.items;
     const total = items.reduce((a,i)=>a+i.qty*i.unitPrice,0);
     const itemsHtml = items.length ? items.map((it,idx)=>
-      `<div class="item-row"><span>${escapeHtml(it.name)} — ${it.qty} ${escapeHtml(it.unit)} × <span class="num">${fmt(it.unitPrice)}</span></span>
+      `<div class="item-row"><span>${escapeHtml(it.name)} — ${escapeHtml(this.itemQtyLabel(it))} × <span class="num">${fmt(this.itemPricePerTxUnit(it))}</span>${this.itemBaseNote(it)?`<span class="sub" style="display:block;">${escapeHtml(this.itemBaseNote(it))}</span>`:''}</span>
       <span style="display:flex;align-items:center;gap:8px;"><b class="num">${fmt(it.qty*it.unitPrice)}</b><span class="x" onclick="App.removeSaleItem(${idx})" title="حذف قلم">${ic('trash',15)}</span></span></div>`
     ).join('') : `<div class="field-note">هنوز محصولی اضافه نشده.</div>`;
 
@@ -1434,23 +1679,32 @@ const App = {
       <div id="sp-new-fields" style="display:none;">
         <div class="grid2">
           <div><label>نام محصول جدید</label><input id="sp-newname" placeholder="مثلاً بطری موتر"></div>
-          <div><label>واحد</label><input id="sp-newunit" placeholder="عدد / کارتن" value="عدد"></div>
+          <div><label>واحد پایه (کوچک‌ترین)</label><input id="sp-newunit" placeholder="عدد" value="عدد" oninput="App.fillUnitSelect('sp',true)"></div>
+        </div>
+        <div class="grid2">
+          <div><label>واحد بزرگ (اختیاری)</label><input id="sp-newpackunit" placeholder="کارتن" oninput="App.fillUnitSelect('sp',true)"></div>
+          <div><label>هر کارتن حاوی چند؟</label><input id="sp-newpackper" type="number" inputmode="decimal" placeholder="6" oninput="App.fillUnitSelect('sp',true)"></div>
+        </div>
+        <div class="grid2">
+          <div><label>واحد میانی (اختیاری)</label><input id="sp-newmidunit" placeholder="قوطی / بسته" oninput="App.fillUnitSelect('sp',true)"></div>
+          <div><label>هر قوطی/بسته حاوی چند عدد؟</label><input id="sp-newmidper" type="number" inputmode="decimal" placeholder="24" oninput="App.fillUnitSelect('sp',true)"></div>
         </div>
       </div>
       <div class="grid2">
         <div>
-          <label>تعداد</label>
-          <input id="sp-qty" type="number" inputmode="decimal" placeholder="0" oninput="App.updatePackHint('sp')">
-          <div id="sp-pack-toggle" style="display:none;margin-top:6px;">
-            <select id="sp-unit-mode" onchange="App.updatePackHint('sp')">
-              <option value="base">عدد</option>
-              <option value="pack" id="sp-pack-option">کارتن</option>
-            </select>
-            <div class="field-note" id="sp-pack-hint"></div>
-          </div>
+          <label>واحد فروش</label>
+          <select id="sp-unit" onchange="App.onSaleUnitChange()"></select>
+          <div class="field-note" id="sp-unit-note"></div>
         </div>
-        <div><label>قیمت فروش هر واحد (عدد)</label><input id="sp-price" type="number" inputmode="decimal" placeholder="0"></div>
+        <div>
+          <label>تعداد</label>
+          <input id="sp-qty" type="number" inputmode="decimal" placeholder="0" oninput="App.updateUnitHint('sp')">
+          <div class="field-note" id="sp-qty-hint"></div>
+        </div>
       </div>
+      <label id="sp-price-label">قیمت فروش هر واحد</label>
+      <input id="sp-price" type="number" inputmode="decimal" placeholder="0" oninput="App.updateUnitHint('sp')">
+      <div class="field-note" id="sp-price-hint">با انتخاب واحد (کارتن، قوطی/بسته یا عدد) قیمت آن واحد خودکار می‌آید؛ اگر تخفیف می‌دهید همین‌جا تغییرش دهید.</div>
       <button class="btn btn-outline" onclick="App.addSaleItem()">${ic('plus',16)}افزودن به فاکتور</button>
       <hr class="divider">
       ${itemsHtml}
@@ -1479,57 +1733,25 @@ const App = {
   onSaleProductChange(){
     const v=document.getElementById('sp-product').value;
     document.getElementById('sp-new-fields').style.display = v==='__new__' ? 'block':'none';
-    const packToggle=document.getElementById('sp-pack-toggle');
-    if(v && v!=='__new__'){
-      const p=this.state.products.find(pp=>pp.id===v);
-      if(p && p.sellPrice) document.getElementById('sp-price').value = p.sellPrice;
-      if(p && p.packSize>0){
-        packToggle.style.display='block';
-        document.getElementById('sp-pack-option').textContent=p.packUnit||'کارتن';
-        document.getElementById('sp-unit-mode').value='base';
-      } else { packToggle.style.display='none'; }
-    } else { packToggle.style.display='none'; }
-    this.updatePackHint('sp');
+    this.fillUnitSelect('sp');
   },
-  // وقتی «واحد ورودی» روی بسته/کارتن باشد، تعداد واردشده را به عددِ پایه (که موجودی/قیمت
-  // بر همان اساس ذخیره می‌شود) تبدیل می‌کند و زیر فیلد تعداد نشان می‌دهد.
-  updatePackHint(prefix){
-    const modeEl=document.getElementById(prefix+'-unit-mode');
-    const hintEl=document.getElementById(prefix+'-pack-hint');
-    if(!modeEl || !hintEl) return;
-    const selId = prefix==='sp' ? 'sp-product' : 'pp-product';
-    const p=this.state.products.find(pp=>pp.id===document.getElementById(selId).value);
-    const qty=parseFloat(document.getElementById(prefix+'-qty').value)||0;
-    if(modeEl.value==='pack' && p && p.packSize>0){
-      hintEl.textContent = '= '+(qty*p.packSize)+' '+(p.unit||'عدد');
-    } else { hintEl.textContent=''; }
-  },
-  packAdjustedQty(prefix){
-    const modeEl=document.getElementById(prefix+'-unit-mode');
-    const selId = prefix==='sp' ? 'sp-product' : 'pp-product';
-    const p=this.state.products.find(pp=>pp.id===document.getElementById(selId).value);
-    const qty=parseFloat(document.getElementById(prefix+'-qty').value)||0;
-    if(modeEl && modeEl.value==='pack' && p && p.packSize>0) return qty*p.packSize;
-    return qty;
+  onSaleUnitChange(){
+    this.autofillUnitPrice('sp');
+    this.updateUnitHint('sp');
   },
   onPurchaseProductChange(){
     const v=document.getElementById('pp-product').value;
     document.getElementById('pp-new-fields').style.display = v==='__new__' ? 'block':'none';
-    const packToggle=document.getElementById('pp-pack-toggle');
-    if(v && v!=='__new__'){
-      const p=this.state.products.find(pp=>pp.id===v);
-      if(p && p.avgCost) document.getElementById('pp-cost').value = p.avgCost;
-      if(p && p.packSize>0){
-        packToggle.style.display='block';
-        document.getElementById('pp-pack-option').textContent=p.packUnit||'کارتن';
-        document.getElementById('pp-unit-mode').value='base';
-      } else { packToggle.style.display='none'; }
-    } else { packToggle.style.display='none'; }
-    this.updatePackHint('pp');
+    this.fillUnitSelect('pp');
+  },
+  onPurchaseUnitChange(){
+    this.autofillUnitPrice('pp');
+    this.updateUnitHint('pp');
   },
   productOptions(){
-    return '<option value="">— انتخاب محصول —</option>' +
-      this.state.products.map(p=>`<option value="${p.id}">${escapeHtml(p.name)} (موجودی: ${p.stock} ${escapeHtml(p.unit)})</option>`).join('') +
+    const sorted=[...this.state.products].sort((a,b)=>String(a.name).localeCompare(String(b.name),'fa'));
+    return '<option value="">— انتخاب محصول از فهرست —</option>' +
+      sorted.map(p=>`<option value="${p.id}">${escapeHtml(p.name)} — موجودی: ${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</option>`).join('') +
       '<option value="__new__">+ محصول جدید</option>';
   },
 
@@ -1540,28 +1762,32 @@ const App = {
     if(!pid){ this.toast('یک محصول انتخاب کنید'); return; }
     let product;
     if(pid==='__new__'){
-      const name=(document.getElementById('pp-newname').value||'').trim();
-      const unit=(document.getElementById('pp-newunit').value||'').trim()||'عدد';
-      if(!name){ this.toast('نام محصول جدید را بنویسید'); return; }
-      product = { id: uid(), name, unit, stock:0, avgCost:0, sellPrice:0, _draftOnly:true };
+      const d=this.draftNewProduct('pp');
+      if(!d.name){ this.toast('نام محصول جدید را بنویسید'); return; }
+      product = Object.assign({}, d, { id: uid(), _draftOnly:true });
       this.purchaseDraft._draftProducts = this.purchaseDraft._draftProducts || [];
       this.purchaseDraft._draftProducts.push(product);
     } else {
       product = this.state.products.find(p=>p.id===pid);
     }
     if(!product){ this.toast('محصول یافت نشد'); return; }
-    const qty = pid==='__new__' ? parseFloat(document.getElementById('pp-qty').value) : this.packAdjustedQty('pp');
-    const cost=parseFloat(document.getElementById('pp-cost').value);
-    if(!qty||qty<=0){ this.toast('تعداد را درست بنویسید'); return; }
-    if(isNaN(cost)||cost<0){ this.toast('قیمت خرید را بنویسید'); return; }
-    this.purchaseDraft.items.push({productId:product.id,name:product.name,unit:product.unit,qty,unitCost:cost});
+    const u = this.unitByName(product, (document.getElementById('pp-unit')||{}).value);
+    const qtyIn = parseFloat(document.getElementById('pp-qty').value);
+    const costIn = parseFloat(document.getElementById('pp-cost').value);
+    if(!qtyIn||qtyIn<=0){ this.toast('تعداد را درست بنویسید'); return; }
+    if(isNaN(costIn)||costIn<0){ this.toast('قیمت خرید را بنویسید'); return; }
+    // قیمت واحدِ بزرگ به قیمت تمام‌شدهٔ واحد پایه شکسته می‌شود؛ از همین‌جا قیمت
+    // تمام‌شدهٔ قوطی/بسته/عدد خودکار به دست می‌آید.
+    const qty = round2(qtyIn*u.factor);
+    const cost = costIn/u.factor;
+    this.purchaseDraft.items.push({productId:product.id,name:product.name,unit:product.unit,qty,unitCost:cost,txUnit:u.name,txFactor:u.factor});
     this.render();
   },
   removePurchaseItem(idx){ this.purchaseDraft.items.splice(idx,1); this.render(); },
 
   async submitPurchase(){
     if(this.purchaseDraft.items.length===0){ this.toast('حداقل یک محصول اضافه کنید'); return; }
-    const total = this.purchaseDraft.items.reduce((a,i)=>a+i.qty*i.unitCost,0);
+    const total = round2(this.purchaseDraft.items.reduce((a,i)=>a+i.qty*i.unitCost,0));
     let paid = parseFloat(document.getElementById('purchase-paid').value);
     if(isNaN(paid)) paid=0;
     if(paid>total) paid=total;
@@ -1599,14 +1825,16 @@ const App = {
       const unitCostAFN = currency==='USD' ? it.unitCost*rateAtPurchase : it.unitCost;
       const draftP = draftProducts.find(dp=>dp.id===it.productId);
       if(draftP){
-        batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, stock:it.qty, avgCost:unitCostAFN, sellPrice:Math.round(unitCostAFN*1.15)});
+        batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, stock:it.qty, avgCost:unitCostAFN, sellPrice:round2(unitCostAFN*1.15),
+          midUnit:draftP.midUnit||'', midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', packSize:draftP.packSize||0,
+          defaultSaleUnit:draftP.defaultSaleUnit||draftP.unit, sellPriceMid:0, sellPricePack:0, ...this.recordMeta()});
       } else {
         const p = this.state.products.find(pp=>pp.id===it.productId);
         if(p){
           const newStock = p.stock + it.qty;
           const newAvgCost = newStock>0 ? ((p.stock*p.avgCost)+(it.qty*unitCostAFN))/newStock : unitCostAFN;
           const fields = { stock: increment(it.qty), avgCost: newAvgCost };
-          if(!p.sellPrice) fields.sellPrice = Math.round(unitCostAFN*1.15);
+          if(!p.sellPrice) fields.sellPrice = round2(unitCostAFN*1.15);
           batch.update(doc(cols.products, it.productId), fields);
         }
       }
@@ -1643,7 +1871,7 @@ const App = {
     const cur = this.purchaseDraft.currency || 'AFN';
     const rate = this.usdRate();
     const itemsHtml = items.length ? items.map((it,idx)=>
-      `<div class="item-row"><span>${escapeHtml(it.name)} — ${it.qty} ${escapeHtml(it.unit)} × <span class="num">${cur==='USD'?fmt2(it.unitCost):fmt(it.unitCost)}</span></span>
+      `<div class="item-row"><span>${escapeHtml(it.name)} — ${escapeHtml(this.itemQtyLabel(it))} × <span class="num">${cur==='USD'?fmt2(this.itemCostPerTxUnit(it)):fmt(this.itemCostPerTxUnit(it))}</span>${this.itemBaseNote(it)?`<span class="sub" style="display:block;">${escapeHtml(this.itemBaseNote(it))} · قیمت تمام‌شدهٔ هر ${escapeHtml(it.unit||'عدد')}: <span class="num">${fmt2(round2(it.unitCost))}</span></span>`:''}</span>
       <span style="display:flex;align-items:center;gap:8px;"><b class="num">${cur==='USD'?fmt2(it.qty*it.unitCost):fmt(it.qty*it.unitCost)}</b><span class="x" onclick="App.removePurchaseItem(${idx})" title="حذف قلم">${ic('trash',15)}</span></span></div>`
     ).join('') : `<div class="field-note">هنوز محصولی اضافه نشده.</div>`;
 
@@ -1667,24 +1895,35 @@ const App = {
       <select id="pp-product" onchange="App.onPurchaseProductChange()">${this.productOptions()}</select>
       <div id="pp-new-fields" style="display:none;">
         <div class="grid2">
-          <div><label>نام محصول جدید</label><input id="pp-newname" placeholder="مثلاً فیلتر روغن"></div>
-          <div><label>واحد</label><input id="pp-newunit" placeholder="عدد / کارتن" value="عدد"></div>
+          <div><label>نام محصول جدید</label><input id="pp-newname" placeholder="مثلاً بسکیت شیری"></div>
+          <div><label>واحد پایه (کوچک‌ترین)</label><input id="pp-newunit" placeholder="عدد" value="عدد" oninput="App.fillUnitSelect('pp',true)"></div>
         </div>
+        <div class="field-note">بسته‌بندی این محصول را همین‌جا بنویسید تا بعداً بتوانید هم کارتن، هم قوطی/بسته و هم عدد بفروشید.</div>
+        <div class="grid2">
+          <div><label>نام واحد بزرگ (اختیاری)</label><input id="pp-newpackunit" placeholder="کارتن" oninput="App.fillUnitSelect('pp',true)"></div>
+          <div><label>هر کارتن حاوی چند؟</label><input id="pp-newpackper" type="number" inputmode="decimal" placeholder="4" oninput="App.fillUnitSelect('pp',true)"></div>
+        </div>
+        <div class="grid2">
+          <div><label>نام واحد میانی (اختیاری)</label><input id="pp-newmidunit" placeholder="قوطی / بسته" oninput="App.fillUnitSelect('pp',true)"></div>
+          <div><label>هر قوطی/بسته حاوی چند عدد؟</label><input id="pp-newmidper" type="number" inputmode="decimal" placeholder="8" oninput="App.fillUnitSelect('pp',true)"></div>
+        </div>
+        <div class="field-note">نمونه‌ها — کارتن بسکیت ۵۴۰ افغانی: واحد بزرگ «کارتن» حاوی ۴، واحد میانی «بسته» حاوی ۸ عدد. کارتن ۱۶۰۰ افغانی با ۶ قوطی ۲۴ عددی: کارتن حاوی ۶، قوطی حاوی ۲۴ عدد. کوکو سطلی ۱۷ عددی: کارتن حاوی ۱۷ و واحد میانی خالی.</div>
       </div>
       <div class="grid2">
         <div>
-          <label>تعداد</label>
-          <input id="pp-qty" type="number" inputmode="decimal" placeholder="0" oninput="App.updatePackHint('pp')">
-          <div id="pp-pack-toggle" style="display:none;margin-top:6px;">
-            <select id="pp-unit-mode" onchange="App.updatePackHint('pp')">
-              <option value="base">عدد</option>
-              <option value="pack" id="pp-pack-option">کارتن</option>
-            </select>
-            <div class="field-note" id="pp-pack-hint"></div>
-          </div>
+          <label>واحد خرید</label>
+          <select id="pp-unit" onchange="App.onPurchaseUnitChange()"></select>
+          <div class="field-note" id="pp-unit-note"></div>
         </div>
-        <div><label>قیمت خرید هر واحد (${this.curLabel(cur)})</label><input id="pp-cost" type="number" inputmode="decimal" step="0.01" placeholder="0"></div>
+        <div>
+          <label>تعداد</label>
+          <input id="pp-qty" type="number" inputmode="decimal" placeholder="0" oninput="App.updateUnitHint('pp')">
+          <div class="field-note" id="pp-qty-hint"></div>
+        </div>
       </div>
+      <label id="pp-price-label">قیمت خرید هر واحد (${this.curLabel(cur)})</label>
+      <input id="pp-cost" type="number" inputmode="decimal" step="0.01" placeholder="0" oninput="App.updateUnitHint('pp')">
+      <div class="field-note" id="pp-price-hint">قیمت یک کارتن (یا بسته) را بنویسید؛ قیمت تمام‌شدهٔ قوطی، بسته و عدد خودکار حساب می‌شود.</div>
       <button class="btn btn-outline" onclick="App.addPurchaseItem()">${ic('plus',16)}افزودن به فاکتور</button>
       <hr class="divider">
       ${itemsHtml}
@@ -1727,9 +1966,9 @@ const App = {
       return `
       <tr>
         <td>${idx+1}</td>
-        <td>${escapeHtml(it.name)}${returned>0?`<div class="sub" style="color:var(--red);">${returned} ${escapeHtml(it.unit)} واپس شده</div>`:''}</td>
-        <td class="num">${it.qty} ${escapeHtml(it.unit)}</td>
-        <td class="num">${pur.currency==='USD'?fmt2(it.unitCost):fmt(it.unitCost)}</td>
+        <td>${escapeHtml(it.name)}${returned>0?`<div class="sub" style="color:var(--red);">${escapeHtml(this.itemQtyLabel(it,returned))} واپس شده</div>`:''}</td>
+        <td class="num">${escapeHtml(this.itemQtyLabel(it))}${this.itemBaseNote(it)?`<div class="sub">${escapeHtml(this.itemBaseNote(it))}</div>`:''}</td>
+        <td class="num">${pur.currency==='USD'?fmt2(this.itemCostPerTxUnit(it)):fmt(this.itemCostPerTxUnit(it))}<div class="sub">هر ${escapeHtml(this.itemUnitName(it))}${this.itemFactor(it)>1?` · هر ${escapeHtml(it.unit||'عدد')}: ${fmt2(round2(it.unitCost))}`:''}</div></td>
         <td class="num">${pur.currency==='USD'?fmt2(it.qty*it.unitCost):fmt(it.qty*it.unitCost)}</td>
         <td class="no-print">${!cancelled?`<span class="menu-dots" onclick='App.openActionMenu([
           {label:"واپس به فروشنده", icon:"rotate-ccw", onClick:()=>App.purchaseReturnItem("${pur.id}",${idx})},
@@ -1740,7 +1979,7 @@ const App = {
 
     const returnsHtml = pur.returns && pur.returns.length ? `
       <h2 class="section-title">${ic('rotate-ccw',17)}کالاهای واپس‌شده به فروشنده</h2>
-      <div class="card no-print">${pur.returns.map(r=>`<div class="row-item"><div class="r-left"><b>${escapeHtml(r.name)}</b><span class="sub">${r.date} · ${r.qty} عدد</span></div><div class="r-right num" style="color:var(--red)">-${fmt(r.amount)}</div></div>`).join('')}</div>
+      <div class="card no-print">${pur.returns.map(r=>`<div class="row-item"><div class="r-left"><b>${escapeHtml(r.name)}</b><span class="sub">${r.date} · ${escapeHtml(r.qtyLabel||(r.qty+' عدد'))}</span></div><div class="r-right num" style="color:var(--red)">-${fmt(r.amount)}</div></div>`).join('')}</div>
     ` : '';
 
     return `
@@ -1805,30 +2044,39 @@ const App = {
     const it=sale.items[idx]; if(!it) return;
     const sellable = it.qty-(it.returnedQty||0);
     if(sellable<=0){ this.toast('این قلم قبلاً بطور کامل مرجوعی خورده است.'); return; }
+    const ladder=this.itemUnits(it);
+    const unitOptions=ladder.map(u=>({value:u.name, label:u.name+(u.factor>1?(' (= '+fmtQty(u.factor)+' '+(it.unit||'عدد')+')'):'')}));
+    const defUnit=this.itemUnitName(it);
+    const defFactor=this.itemFactor(it);
     this.openFormModal({
       title:'مرجوعی «'+it.name+'»',
-      sub:'حداکثر قابل مرجوعی: '+sellable+' '+it.unit,
-      fields:[{key:'qty', label:'تعداد مرجوعی', type:'number', step:'0.01', value:sellable}],
+      sub:'حداکثر قابل مرجوعی: '+this.itemQtyLabel(it, sellable),
+      fields:[
+        {key:'unit', label:'واحد مرجوعی', type:'select', options:unitOptions, value:defUnit, hint:'مشتری ممکن است کارتن گرفته باشد ولی فقط چند قوطی یا چند عدد را واپس بدهد.'},
+        {key:'qty', label:'تعداد مرجوعی', type:'number', step:'0.01', value:round2(sellable/defFactor)}
+      ],
       submitLabel:'ثبت مرجوعی',
       onSubmit: (v)=>{
-        if(!v.qty || v.qty<=0 || v.qty>sellable) throw new Error('تعداد نامعتبر است.');
-        this._applySaleReturn(sale, idx, v.qty);
+        const u=ladder.find(x=>x.name===v.unit)||ladder[ladder.length-1];
+        const baseQty=round2((Number(v.qty)||0)*u.factor);
+        if(!baseQty || baseQty<=0 || baseQty>sellable+1e-9) throw new Error('تعداد نامعتبر است — حداکثر '+this.itemQtyLabel(it,sellable)+'.');
+        this._applySaleReturn(sale, idx, baseQty, fmtQty(v.qty)+' '+u.name);
         this.toast('مرجوعی ثبت شد');
       }
     });
   },
-  _applySaleReturn(sale, idx, qty){
+  _applySaleReturn(sale, idx, qty, qtyLabel){
     const it=sale.items[idx];
-    const refund = qty*it.unitPrice;
-    const refundCost = qty*(it.cost||0);
+    const refund = round2(qty*it.unitPrice);
+    const refundCost = round2(qty*(it.cost||0));
     const oldRemaining = sale.total-sale.paid;
     const debtReduction = Math.min(refund, Math.max(0,oldRemaining));
     const cashRefund = refund-debtReduction;
 
     const newItems = sale.items.map((x,i)=> i===idx ? {...x, returnedQty:(x.returnedQty||0)+qty} : x);
-    const newReturns = [...sale.returns, {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, unitPrice:it.unitPrice, amount:refund}];
+    const newReturns = [...sale.returns, {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, qtyLabel: qtyLabel||this.itemQtyLabel(it,qty), unitPrice:it.unitPrice, amount:refund}];
 
-    const newTotal = sale.total-refund, newPaid = sale.paid-cashRefund;
+    const newTotal = round2(sale.total-refund), newPaid = round2(sale.paid-cashRefund);
     const batch = writeBatch(db);
     batch.update(doc(cols.sales, sale.id), {
       items: newItems, returns: newReturns,
@@ -1866,7 +2114,7 @@ const App = {
       const debtReduction=Math.min(refund, Math.max(0,oldRemaining));
       const cashRefund=refund-debtReduction;
       newItems[idx]={...it, returnedQty:(it.returnedQty||0)+sellable};
-      newReturns.push({id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty:sellable, unitPrice:it.unitPrice, amount:refund});
+      newReturns.push({id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty:sellable, qtyLabel:this.itemQtyLabel(it,sellable), unitPrice:it.unitPrice, amount:refund});
       runningTotal-=refund; runningPaid-=cashRefund; runningCost-=refundCost;
       customerDebtReduction+=debtReduction;
       stockDeltas[it.productId]=(stockDeltas[it.productId]||0)+sellable;
@@ -1891,18 +2139,23 @@ const App = {
     if(sale.status==='cancelled'){ this.toast('این فاکتور باطل شده است.'); return; }
     const it=sale.items[idx]; if(!it) return;
     const p=this.state.products.find(pp=>pp.id===it.productId);
+    const ladder=this.itemUnits(it);
+    const unitOptions=ladder.map(u=>({value:u.name, label:u.name+(u.factor>1?(' (= '+fmtQty(u.factor)+' '+(it.unit||'عدد')+')'):'')}));
+    const defUnit=this.itemUnitName(it);
     this.openFormModal({
       title:'افزودن تعداد «'+it.name+'»',
-      sub: p ? ('موجودی فعلی انبار: '+p.stock+' '+it.unit) : '',
+      sub: p ? ('موجودی فعلی انبار: '+this.qtyBreakdown(p, p.stock||0)) : '',
       fields:[
-        {key:'qty', label:'چند عدد دیگر اضافه شود؟', type:'number', step:'0.01', value:1},
+        {key:'unit', label:'واحد', type:'select', options:unitOptions, value:defUnit},
+        {key:'qty', label:'چند تا دیگر اضافه شود؟', type:'number', step:'0.01', value:1},
         {key:'paid', label:'مبلغ پرداختی نقدی برای همین اضافه', type:'number', step:'1', value:'', hint:'اگر نسیه است، صفر بگذارید.'}
       ],
       submitLabel:'افزودن',
       onSubmit: (v)=>{
         if(!v.qty || v.qty<=0) throw new Error('تعداد نامعتبر است.');
-        const qty=v.qty;
-        const addAmount=qty*it.unitPrice;
+        const u=ladder.find(x=>x.name===v.unit)||ladder[ladder.length-1];
+        const qty=round2((Number(v.qty)||0)*u.factor);
+        const addAmount=round2(qty*it.unitPrice);
         let addPaid = v.paid===null ? addAmount : v.paid;
         if(isNaN(addPaid)||addPaid<0) addPaid=0; if(addPaid>addAmount) addPaid=addAmount;
         if(addPaid<addAmount && !sale.customerId) throw new Error('برای نسیه باید فاکتور برای یک مشتری مشخص باشد.');
@@ -1955,50 +2208,121 @@ const App = {
       }
     });
   },
+  /* =========================================================
+     افزودن قلم جدید به یک فاکتور/بل ثبت‌شده — با انتخاب از فهرست محصولات
+     (نه تایپ دستی نام) و انتخاب واحد و قیمت خودکار همان واحد
+     ========================================================= */
+  productOptionsNoNew(){
+    const sorted=[...this.state.products].sort((a,b)=>String(a.name).localeCompare(String(b.name),'fa'));
+    return '<option value="">— انتخاب از فهرست محصولات —</option>' +
+      sorted.map(p=>`<option value="${p.id}">${escapeHtml(p.name)} — موجودی: ${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</option>`).join('');
+  },
+  _aiBody(mode, curLbl){
+    return `
+    <label>محصول</label>
+    <select id="ai-product" onchange="App.onAddItemProductChange()">${this.productOptionsNoNew()}</select>
+    <div class="field-note">فقط از فهرست محصولات ثبت‌شده انتخاب کنید؛ قیمت و واحدها خودکار می‌آیند. محصول تازه را از صفحهٔ «محصولات و موجودی» یا فرم ثبت خرید اضافه کنید.</div>
+    <div class="grid2">
+      <div>
+        <label>واحد</label>
+        <select id="ai-unit" onchange="App.onAddItemUnitChange()"></select>
+        <div class="field-note" id="ai-unit-note"></div>
+      </div>
+      <div>
+        <label>تعداد</label>
+        <input id="ai-qty" type="number" inputmode="decimal" step="0.01" value="1" oninput="App.onAddItemUnitChange(true)">
+        <div class="field-note" id="ai-qty-hint"></div>
+      </div>
+    </div>
+    <label id="ai-price-label">${mode==='purchase'?'قیمت خرید هر واحد':'قیمت فروش هر واحد'}${curLbl?' ('+escapeHtml(curLbl)+')':''}</label>
+    <input id="ai-price" type="number" inputmode="decimal" step="0.01" placeholder="0" oninput="App.onAddItemUnitChange(true)">
+    <div class="field-note" id="ai-price-hint"></div>
+    <label>مبلغ ${mode==='purchase'?'پرداختی':'دریافتی'} نقدی برای همین قلم</label>
+    <input id="ai-paid" type="number" inputmode="decimal" step="1" placeholder="خالی = تمام مبلغ این قلم">
+    <div class="field-note">اگر نسیه است، صفر بگذارید.</div>`;
+  },
+  _aiProduct(){ const el=document.getElementById('ai-product'); return el ? (this.state.products.find(p=>p.id===el.value)||null) : null; },
+  _aiUnit(){ const p=this._aiProduct(); if(!p) return null; const el=document.getElementById('ai-unit'); return this.unitByName(p, el?el.value:null); },
+  onAddItemProductChange(){
+    const p=this._aiProduct();
+    const sel=document.getElementById('ai-unit'); if(!sel) return;
+    if(!p){ sel.innerHTML=''; const pe=document.getElementById('ai-price'); if(pe) pe.value=''; this.onAddItemUnitChange(true); return; }
+    const ladder=this.productUnits(p);
+    const base=p.unit||'عدد';
+    sel.innerHTML=ladder.map(u=>`<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}${u.factor>1?' — '+fmtQty(u.factor)+' '+escapeHtml(base):''}</option>`).join('');
+    sel.value = this._aiMode==='purchase'
+      ? ladder[0].name
+      : ((p.defaultSaleUnit && ladder.some(u=>u.name===p.defaultSaleUnit)) ? p.defaultSaleUnit : ladder[ladder.length-1].name);
+    this.onAddItemUnitChange();
+  },
+  onAddItemUnitChange(keepPrice){
+    const p=this._aiProduct(), u=this._aiUnit();
+    const priceEl=document.getElementById('ai-price');
+    if(!keepPrice && p && u && priceEl){
+      const v = this._aiMode==='purchase' ? this.unitCost(p,u) : this.unitSellPrice(p,u);
+      priceEl.value = v>0 ? v : '';
+    }
+    const lbl=document.getElementById('ai-price-label');
+    if(lbl && u) lbl.textContent=(this._aiMode==='purchase'?'قیمت خرید هر ':'قیمت فروش هر ')+u.name+(this._aiCur?(' ('+this._aiCur+')'):'');
+    const noteEl=document.getElementById('ai-unit-note');
+    if(noteEl) noteEl.textContent = (p && u && u.factor>1) ? ('۱ '+u.name+' = '+fmtQty(u.factor)+' '+(p.unit||'عدد')) : '';
+    const qtyEl=document.getElementById('ai-qty');
+    const qty=qtyEl?(parseFloat(qtyEl.value)||0):0;
+    const qh=document.getElementById('ai-qty-hint');
+    if(qh) qh.textContent = (p && u && u.factor>1 && qty>0) ? ('= '+fmtQty(round2(qty*u.factor))+' '+(p.unit||'عدد')) : (p?('موجودی: '+this.qtyBreakdown(p,p.stock||0)):'');
+    const price=priceEl?parseFloat(priceEl.value):NaN;
+    const ph=document.getElementById('ai-price-hint');
+    if(ph){
+      const bits=[];
+      if(p && u && !isNaN(price) && price>0){
+        if(qty>0) bits.push('مجموع این قلم: '+fmt(round2(qty*price)));
+        if(u.factor>1) bits.push('هر '+(p.unit||'عدد')+' = '+fmt2(round2(price/u.factor)));
+      }
+      ph.textContent=bits.join(' · ');
+    }
+  },
+  _aiReadCommon(){
+    const product=this._aiProduct();
+    if(!product) throw new Error('یک محصول از فهرست انتخاب کنید.');
+    const u=this._aiUnit();
+    const qtyIn=parseFloat(document.getElementById('ai-qty').value);
+    const priceIn=parseFloat(document.getElementById('ai-price').value);
+    if(!qtyIn||qtyIn<=0) throw new Error('تعداد نامعتبر است.');
+    if(isNaN(priceIn)||priceIn<0) throw new Error('قیمت نامعتبر است.');
+    const qty=round2(qtyIn*u.factor);
+    const perBase=priceIn/u.factor;
+    const addAmount=round2(qty*perBase);
+    const paidRaw=(document.getElementById('ai-paid').value||'').trim();
+    let addPaid = paidRaw==='' ? addAmount : parseFloat(paidRaw);
+    if(isNaN(addPaid)||addPaid<0) addPaid=0;
+    if(addPaid>addAmount) addPaid=addAmount;
+    return {product, u, qty, perBase, addAmount, addPaid};
+  },
   saleAddItem(saleId){
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
     if(sale.status==='cancelled'){ this.toast('این فاکتور باطل شده است.'); return; }
-    this.openFormModal({
-      title:'افزودن قلم جدید',
-      fields:[
-        {key:'name', label:'نام محصول', type:'text', placeholder:'نام محصولِ موجود یا جدید'},
-        {key:'qty', label:'تعداد', type:'number', step:'0.01', value:1},
-        {key:'price', label:'قیمت فروش هر واحد', type:'number', step:'1', value:''},
-        {key:'paid', label:'مبلغ پرداختی نقدی برای همین قلم', type:'number', step:'1', value:'', hint:'اگر نسیه است، صفر بگذارید.'}
-      ],
+    if(!this.state.products.length){ this.toast('فهرست محصولات خالی است؛ اول یک محصول اضافه کنید.'); return; }
+    this._aiMode='sale'; this._aiCur='';
+    this.openCustomModal({
+      title:'افزودن قلم جدید به فاکتور',
+      sub:'محصول را از فهرست انتخاب کنید، بعد واحد (کارتن / قوطی / بسته / عدد) و قیمت.',
+      bodyHtml:this._aiBody('sale',''),
       submitLabel:'افزودن به فاکتور',
-      onSubmit:(v)=>{
-        const trimmed=(v.name||'').trim();
-        if(!trimmed) throw new Error('نام محصول را بنویسید.');
-        if(!v.qty || v.qty<=0) throw new Error('تعداد نامعتبر است.');
-        let product=this.state.products.find(p=>p.name===trimmed);
-        const price = v.price===null ? (product?product.sellPrice:0) : v.price;
-        if(isNaN(price)||price<0) throw new Error('قیمت نامعتبر است.');
-        const qty=v.qty;
-
+      onSubmit:()=>{
+        const {product, u, qty, perBase, addAmount, addPaid} = this._aiReadCommon();
+        if(addPaid<addAmount-0.001 && !sale.customerId) throw new Error('برای نسیه باید فاکتور برای یک مشتری مشخص باشد.');
+        const cost=Number(product.avgCost)||0;
         const batch=writeBatch(db);
-        let isNewProduct=false, newProductId=null, cost=0;
-        if(!product){ isNewProduct=true; newProductId=uid(); cost=0; }
-        else{ cost=product.avgCost; }
-        const addAmount=qty*price;
-        let addPaid = v.paid===null ? addAmount : v.paid;
-        if(isNaN(addPaid)||addPaid<0) addPaid=0; if(addPaid>addAmount) addPaid=addAmount;
-        if(addPaid<addAmount && !sale.customerId) throw new Error('برای نسیه باید فاکتور برای یک مشتری مشخص باشد.');
-
-        if(isNewProduct){
-          batch.set(doc(cols.products,newProductId), {id:newProductId, name:trimmed, unit:'عدد', stock:-qty, avgCost:0, sellPrice:price});
-        } else {
-          batch.update(doc(cols.products, product.id), { stock: increment(-qty) });
-        }
-        const newItem = {productId: isNewProduct?newProductId:product.id, name:trimmed, unit: isNewProduct?'عدد':product.unit, qty, unitPrice:price, cost, returnedQty:0};
+        batch.update(doc(cols.products, product.id), { stock: increment(-qty) });
+        const newItem={productId:product.id, name:product.name, unit:product.unit, qty, unitPrice:perBase, cost, returnedQty:0, txUnit:u.name, txFactor:u.factor};
         const newItems=[...sale.items, newItem];
-        const newTotal=sale.total+addAmount, newPaid=sale.paid+addPaid, newTotalCost=sale.totalCost+qty*cost;
+        const newTotal=round2(sale.total+addAmount), newPaid=round2(sale.paid+addPaid), newTotalCost=round2(sale.totalCost+qty*cost);
         batch.update(doc(cols.sales, sale.id), {
           items:newItems, total:newTotal, originalTotal: increment(addAmount),
-          totalCost:newTotalCost, profit:newTotal-newTotalCost, paid:newPaid, remaining:newTotal-newPaid, ...this.editMeta()
+          totalCost:newTotalCost, profit:round2(newTotal-newTotalCost), paid:newPaid, remaining:round2(newTotal-newPaid), ...this.editMeta()
         });
-        if(sale.customerId && addAmount-addPaid>0){
-          batch.update(doc(cols.customers, sale.customerId), { balance: increment(addAmount-addPaid) });
+        if(sale.customerId && addAmount-addPaid>0.001){
+          batch.update(doc(cols.customers, sale.customerId), { balance: increment(round2(addAmount-addPaid)) });
         }
         return batch.commit().then(()=>this.toast('قلم اضافه شد'));
       }
@@ -2013,27 +2337,36 @@ const App = {
     const returnable = it.qty-(it.returnedQty||0);
     if(returnable<=0){ this.toast('این قلم قبلاً بطور کامل واپس شده است.'); return; }
     const p=this.state.products.find(pp=>pp.id===it.productId);
+    const ladder=this.itemUnits(it);
+    const unitOptions=ladder.map(u=>({value:u.name, label:u.name+(u.factor>1?(' (= '+fmtQty(u.factor)+' '+(it.unit||'عدد')+')'):'')}));
+    const defUnit=this.itemUnitName(it);
+    const defFactor=this.itemFactor(it);
     this.openFormModal({
       title:'واپس‌کردن «'+it.name+'» به فروشنده',
-      sub:'حداکثر قابل واپسی: '+returnable+' '+it.unit + (p?(' — موجودی فعلی انبار: '+p.stock+' '+it.unit):''),
-      fields:[{key:'qty', label:'تعداد', type:'number', step:'0.01', value:returnable}],
+      sub:'حداکثر قابل واپسی: '+this.itemQtyLabel(it, returnable) + (p?(' — موجودی فعلی انبار: '+this.qtyBreakdown(p,p.stock||0)):''),
+      fields:[
+        {key:'unit', label:'واحد', type:'select', options:unitOptions, value:defUnit},
+        {key:'qty', label:'تعداد', type:'number', step:'0.01', value:round2(returnable/defFactor)}
+      ],
       submitLabel:'ثبت',
       onSubmit:(v)=>{
-        if(!v.qty||v.qty<=0||v.qty>returnable) throw new Error('تعداد نامعتبر است.');
-        this._applyPurchaseReturn(pur, idx, v.qty);
+        const u=ladder.find(x=>x.name===v.unit)||ladder[ladder.length-1];
+        const baseQty=round2((Number(v.qty)||0)*u.factor);
+        if(!baseQty||baseQty<=0||baseQty>returnable+1e-9) throw new Error('تعداد نامعتبر است — حداکثر '+this.itemQtyLabel(it,returnable)+'.');
+        this._applyPurchaseReturn(pur, idx, baseQty, fmtQty(v.qty)+' '+u.name);
         this.toast('ثبت شد');
       }
     });
   },
-  _applyPurchaseReturn(pur, idx, qty){
+  _applyPurchaseReturn(pur, idx, qty, qtyLabel){
     const it=pur.items[idx];
-    const refund=qty*it.unitCost;
+    const refund=round2(qty*it.unitCost);
     const oldRemaining=pur.total-pur.paid;
     const debtReduction=Math.min(refund, Math.max(0,oldRemaining));
     const cashRefund=refund-debtReduction;
     const newItems = pur.items.map((x,i)=> i===idx ? {...x, returnedQty:(x.returnedQty||0)+qty} : x);
-    const newReturns = [...pur.returns, {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, unitCost:it.unitCost, amount:refund}];
-    const newTotal=pur.total-refund, newPaid=pur.paid-cashRefund;
+    const newReturns = [...pur.returns, {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, qtyLabel: qtyLabel||this.itemQtyLabel(it,qty), unitCost:it.unitCost, amount:refund}];
+    const newTotal=round2(pur.total-refund), newPaid=round2(pur.paid-cashRefund);
 
     const batch=writeBatch(db);
     batch.update(doc(cols.purchases, pur.id), { items:newItems, returns:newReturns, total:newTotal, paid:newPaid, remaining:newTotal-newPaid, ...this.editMeta() });
@@ -2114,7 +2447,7 @@ const App = {
       const debtReduction=Math.min(refund, Math.max(0,oldRemaining));
       const cashRefund=refund-debtReduction;
       newItems[idx]={...it, returnedQty:(it.returnedQty||0)+returnable};
-      newReturns.push({id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty:returnable, unitCost:it.unitCost, amount:refund});
+      newReturns.push({id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty:returnable, qtyLabel:this.itemQtyLabel(it,returnable), unitCost:it.unitCost, amount:refund});
       runningTotal-=refund; runningPaid-=cashRefund; supplierDebtReduction+=debtReduction;
       stockDeltas[it.productId]=(stockDeltas[it.productId]||0)-returnable;
     });
@@ -2134,17 +2467,22 @@ const App = {
     const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
     if(pur.status==='cancelled'){ this.toast('این بل باطل شده است.'); return; }
     const it=pur.items[idx]; if(!it) return;
+    const ladder=this.itemUnits(it);
+    const unitOptions=ladder.map(u=>({value:u.name, label:u.name+(u.factor>1?(' (= '+fmtQty(u.factor)+' '+(it.unit||'عدد')+')'):'')}));
+    const defUnit=this.itemUnitName(it);
     this.openFormModal({
       title:'افزودن تعداد «'+it.name+'»',
       fields:[
-        {key:'qty', label:'چند عدد دیگر اضافه شود؟', type:'number', step:'0.01', value:1},
+        {key:'unit', label:'واحد', type:'select', options:unitOptions, value:defUnit},
+        {key:'qty', label:'چند تا دیگر اضافه شود؟', type:'number', step:'0.01', value:1},
         {key:'paid', label:'مبلغ پرداختی نقدی برای همین اضافه', type:'number', step:'1', value:'', hint:'اگر نسیه است، صفر بگذارید.'}
       ],
       submitLabel:'افزودن',
       onSubmit:(v)=>{
         if(!v.qty||v.qty<=0) throw new Error('تعداد نامعتبر است.');
-        const qty=v.qty;
-        const addAmount=qty*it.unitCost;
+        const u=ladder.find(x=>x.name===v.unit)||ladder[ladder.length-1];
+        const qty=round2((Number(v.qty)||0)*u.factor);
+        const addAmount=round2(qty*it.unitCost);
         let addPaid = v.paid===null ? addAmount : v.paid;
         if(isNaN(addPaid)||addPaid<0) addPaid=0; if(addPaid>addAmount) addPaid=addAmount;
         if(addPaid<addAmount && !pur.supplierId) throw new Error('برای نسیه باید بل برای یک فروشنده/شرکت مشخص باشد.');
@@ -2187,49 +2525,31 @@ const App = {
   purchaseAddItem(purchaseId){
     const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
     if(pur.status==='cancelled'){ this.toast('این بل باطل شده است.'); return; }
-    this.openFormModal({
-      title:'افزودن قلم جدید',
-      fields:[
-        {key:'name', label:'نام محصول', type:'text', placeholder:'نام محصولِ موجود یا جدید'},
-        {key:'qty', label:'تعداد', type:'number', step:'0.01', value:1},
-        {key:'cost', label:'قیمت خرید هر واحد ('+this.curLabel(pur.currency)+')', type:'number', step:'0.01', value:''},
-        {key:'paid', label:'مبلغ پرداختی نقدی برای همین قلم', type:'number', step:'1', value:'', hint:'اگر نسیه است، صفر بگذارید.'}
-      ],
+    if(!this.state.products.length){ this.toast('فهرست محصولات خالی است؛ اول یک محصول اضافه کنید.'); return; }
+    this._aiMode='purchase'; this._aiCur=this.curLabel(pur.currency);
+    this.openCustomModal({
+      title:'افزودن قلم جدید به بل خرید',
+      sub:'محصول را از فهرست انتخاب کنید، بعد واحد خرید (کارتن / قوطی / بسته / عدد) و قیمت آن واحد.',
+      bodyHtml:this._aiBody('purchase', this.curLabel(pur.currency)),
       submitLabel:'افزودن به بل',
-      onSubmit:(v)=>{
-        const trimmed=(v.name||'').trim();
-        if(!trimmed) throw new Error('نام محصول را بنویسید.');
-        if(!v.qty||v.qty<=0) throw new Error('تعداد نامعتبر است.');
-        let product=this.state.products.find(p=>p.name===trimmed);
-        const cost = v.cost===null ? (product?product.avgCost:0) : v.cost;
-        if(isNaN(cost)||cost<0) throw new Error('قیمت نامعتبر است.');
-        const qty=v.qty;
-        const addAmount=qty*cost;
-        let addPaid = v.paid===null ? addAmount : v.paid;
-        if(isNaN(addPaid)||addPaid<0) addPaid=0; if(addPaid>addAmount) addPaid=addAmount;
-        if(addPaid<addAmount && !pur.supplierId) throw new Error('برای نسیه باید بل برای یک فروشنده/شرکت مشخص باشد.');
-
+      onSubmit:()=>{
+        const {product, u, qty, perBase, addAmount, addPaid} = this._aiReadCommon();
+        if(addPaid<addAmount-0.001 && !pur.supplierId) throw new Error('برای نسیه باید بل برای یک فروشنده/شرکت مشخص باشد.');
+        const rate = (Number(pur.rateAtPurchase)||this.usdRate())||0;
+        const unitCostAFN = pur.currency==='USD' ? perBase*rate : perBase;
         const batch=writeBatch(db);
-        let productId, unit='عدد';
-        const unitCostAFN = pur.currency==='USD' ? cost*((Number(pur.rateAtPurchase)||this.usdRate())||0) : cost;
-        if(!product){
-          productId=uid();
-          batch.set(doc(cols.products, productId), {id:productId, name:trimmed, unit, stock:qty, avgCost:unitCostAFN, sellPrice:Math.round(unitCostAFN*1.15)});
-        } else {
-          productId=product.id; unit=product.unit;
-          const newStock=product.stock+qty;
-          const newAvgCost = newStock>0 ? ((product.stock*product.avgCost)+(qty*unitCostAFN))/newStock : unitCostAFN;
-          const fields = { stock: increment(qty), avgCost: newAvgCost };
-          if(!product.sellPrice) fields.sellPrice = Math.round(unitCostAFN*1.15);
-          batch.update(doc(cols.products, productId), fields);
-        }
-        const newItem={productId, name:trimmed, unit, qty, unitCost:cost, returnedQty:0};
+        const newStock=(Number(product.stock)||0)+qty;
+        const newAvgCost = newStock>0 ? round2((((Number(product.stock)||0)*(Number(product.avgCost)||0))+(qty*unitCostAFN))/newStock) : unitCostAFN;
+        const pFields={ stock: increment(qty), avgCost: newAvgCost };
+        if(!product.sellPrice) pFields.sellPrice = round2(unitCostAFN*1.15);
+        batch.update(doc(cols.products, product.id), pFields);
+        const newItem={productId:product.id, name:product.name, unit:product.unit, qty, unitCost:perBase, returnedQty:0, txUnit:u.name, txFactor:u.factor};
         const newItems=[...pur.items, newItem];
-        const newTotal=pur.total+addAmount, newPaid=pur.paid+addPaid;
-        batch.update(doc(cols.purchases, pur.id), { items:newItems, total:newTotal, originalTotal: increment(addAmount), paid:newPaid, remaining:newTotal-newPaid, ...this.editMeta() });
-        if(pur.supplierId && addAmount-addPaid>0){
+        const newTotal=round2(pur.total+addAmount), newPaid=round2(pur.paid+addPaid);
+        batch.update(doc(cols.purchases, pur.id), { items:newItems, total:newTotal, originalTotal: increment(addAmount), paid:newPaid, remaining:round2(newTotal-newPaid), ...this.editMeta() });
+        if(pur.supplierId && addAmount-addPaid>0.001){
           const balField = pur.currency==='USD' ? 'balanceUSD' : 'balance';
-          batch.update(doc(cols.suppliers, pur.supplierId), { [balField]: increment(addAmount-addPaid) });
+          batch.update(doc(cols.suppliers, pur.supplierId), { [balField]: increment(round2(addAmount-addPaid)) });
         }
         return batch.commit().then(()=>this.toast('قلم اضافه شد'));
       }
@@ -2630,14 +2950,24 @@ const App = {
   /* ---------- Products ---------- */
   submitNewProductForm(){
     if(!this.isOwner()){ this.toast('فقط مدیر می‌تواند محصول اضافه کند.'); return; }
-    const name=(document.getElementById('np-name').value||'').trim();
-    const unit=(document.getElementById('np-unit').value||'').trim()||'عدد';
-    const stock=parseFloat(document.getElementById('np-stock').value)||0;
-    const cost=parseFloat(document.getElementById('np-cost').value)||0;
-    const sell=parseFloat(document.getElementById('np-sell').value)||0;
+    const gs=id=>{ const el=document.getElementById(id); return el?String(el.value||'').trim():''; };
+    const gn=id=>{ const el=document.getElementById(id); const v=el?parseFloat(el.value):NaN; return isNaN(v)?0:v; };
+    const name=gs('np-name');
+    const unit=gs('np-unit')||'عدد';
+    const stock=gn('np-stock');
+    const cost=gn('np-cost');
+    const sell=gn('np-sell');
+    const midUnit=gs('np-midunit'), midPer=gn('np-midper');
+    const packUnit=gs('np-packunit'), packPer=gn('np-packper');
+    const hasMid=!!(midUnit && midPer>1);
+    const packSize=(packUnit && packPer>0) ? (hasMid?round2(packPer*midPer):packPer) : 0;
     if(!name){ this.toast('نام محصول را بنویسید'); return; }
     const pid=uid();
-    setDoc(doc(cols.products, pid), {id:pid, name, unit, stock, avgCost:cost, sellPrice:sell, ...this.recordMeta()}).catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
+    setDoc(doc(cols.products, pid), {id:pid, name, unit, stock, avgCost:cost, sellPrice:sell,
+      midUnit:hasMid?midUnit:'', midPer:hasMid?midPer:0,
+      packUnit:packSize>1?packUnit:'', packSize:packSize>1?packSize:0,
+      sellPriceMid:0, sellPricePack:0, defaultSaleUnit:hasMid?midUnit:unit,
+      ...this.recordMeta()}).then(()=>this.toast('محصول اضافه شد')).catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
   },
   editProduct(id){
     if(!this.isOwner()){ this.toast('فقط مدیر می‌تواند اطلاعات محصول را ویرایش کند.'); return; }
@@ -2650,18 +2980,178 @@ const App = {
       fields:[
         {key:'name', label:'نام محصول', type:'text', value:p.name},
         {key:'unit', label:'واحد پایه (که موجودی بر اساس آن است)', type:'text', value:p.unit},
-        {key:'sellPrice', label:'قیمت فروش پیشنهادی (برای یک واحد پایه)', type:'number', value:p.sellPrice},
-        {key:'packUnit', label:'نام واحد بزرگ‌تر (اختیاری، مثلاً کارتن)', type:'text', value:p.packUnit||'', hint:'اگر این محصول را گاهی به‌صورت کارتن/جعبه هم می‌خرید یا می‌فروشید، اینجا اسمش را بنویسید.'},
-        {key:'packSize', label:'تعداد واحد پایه در هر '+(p.packUnit||'واحد بزرگ‌تر'), type:'number', value:p.packSize||'', hint:'مثلاً اگر هر کارتن ۲۴ عدد است، بنویسید 24. اگر خالی بگذارید، این ویژگی غیرفعال می‌ماند.'}
+        {key:'sellPrice', label:'قیمت فروش یک '+(p.unit||'عدد'), type:'number', value:p.sellPrice, hint:'برای تنظیم کارتن/قوطی/بسته و قیمت هر کدام، از گزینهٔ «ویرایش واحدها و قیمت‌ها» استفاده کنید.'}
       ],
       submitLabel:'ذخیره',
       onSubmit:(v)=>{
         const name=(v.name||'').trim()||p.name, unit=(v.unit||'').trim()||p.unit;
-        const packUnit=(v.packUnit||'').trim();
-        const packSize = (packUnit && v.packSize>0) ? v.packSize : 0;
-        return updateDoc(doc(cols.products, id), { name, unit, sellPrice: v.sellPrice||0, packUnit, packSize }).then(()=>this.toast('ذخیره شد'));
+        return updateDoc(doc(cols.products, id), { name, unit, sellPrice: v.sellPrice||0, ...this.editMeta() }).then(()=>this.toast('ذخیره شد'));
       }
     });
+  },
+  /* =========================================================
+     ویرایش واحدهای تو در تو و قیمت‌های یک محصول موجود در انبار
+     (کارتن ← قوطی/بسته ← عدد + قیمت خرید و قیمت فروش هر واحد)
+     ========================================================= */
+  editProductUnits(id){
+    if(!this.isOwner()){ this.toast('فقط مدیر می‌تواند واحدها و قیمت‌ها را ویرایش کند.'); return; }
+    const p=this.state.products.find(x=>x.id===id); if(!p) return;
+    this._puId=id;
+    const ladder=this.productUnits(p);
+    const packU=ladder.find(u=>u.key==='pack');
+    const midU=ladder.find(u=>u.key==='mid');
+    const packPer = packU ? round2(packU.factor/(midU?midU.factor:1)) : '';
+    const body = `
+    <label>واحد پایه — کوچک‌ترین واحدی که می‌فروشید</label>
+    <input id="pu-base" value="${escapeHtml(p.unit||'عدد')}" placeholder="عدد" oninput="App.previewProductUnits()">
+    <hr class="divider">
+    <b style="font-size:13.5px;">بسته‌بندی</b>
+    <div class="grid2">
+      <div><label>نام واحد بزرگ (اختیاری)</label><input id="pu-pack" value="${escapeHtml(packU?packU.name:'')}" placeholder="کارتن" oninput="App.previewProductUnits()"></div>
+      <div><label id="pu-packper-label">هر کارتن حاوی چند؟</label><input id="pu-packper" type="number" inputmode="decimal" step="0.01" value="${packPer}" placeholder="6" oninput="App.previewProductUnits()"></div>
+    </div>
+    <div class="grid2">
+      <div><label>نام واحد میانی (اختیاری)</label><input id="pu-mid" value="${escapeHtml(midU?midU.name:'')}" placeholder="قوطی / بسته" oninput="App.previewProductUnits()"></div>
+      <div><label id="pu-midper-label">هر قوطی حاوی چند عدد؟</label><input id="pu-midper" type="number" inputmode="decimal" step="0.01" value="${midU?midU.factor:''}" placeholder="24" oninput="App.previewProductUnits()"></div>
+    </div>
+    <div class="field-note">اگر کارتن مستقیم عدد دارد (مثل کوکو سطلی ۱۷ عددی)، واحد میانی را خالی بگذارید.</div>
+    <hr class="divider">
+    <b style="font-size:13.5px;">قیمت خرید (تمام‌شده)</b>
+    <div class="grid2">
+      <div><label>مبلغ</label><input id="pu-cost" type="number" inputmode="decimal" step="0.01" value="${round2(p.avgCost||0)}" oninput="App.previewProductUnits()"></div>
+      <div><label>برای هر</label><select id="pu-costunit" onchange="App.previewProductUnits()"></select></div>
+    </div>
+    <div class="field-note">قیمت خرید یک کارتن را بنویسید و واحد «کارتن» را انتخاب کنید؛ قیمت تمام‌شدهٔ قوطی/بسته و عدد خودکار حساب می‌شود.</div>
+    <hr class="divider">
+    <b style="font-size:13.5px;">قیمت فروش</b>
+    <div id="pu-row-pack" style="display:none;">
+      <label id="pu-lbl-sell-pack">قیمت فروش هر کارتن</label>
+      <input id="pu-sell-pack" type="number" inputmode="decimal" step="0.01" value="${Number(p.sellPricePack)>0?round2(p.sellPricePack):''}" oninput="App.previewProductUnits()">
+      <div class="field-note" id="pu-auto-pack"></div>
+    </div>
+    <div id="pu-row-mid" style="display:none;">
+      <label id="pu-lbl-sell-mid">قیمت فروش هر قوطی</label>
+      <input id="pu-sell-mid" type="number" inputmode="decimal" step="0.01" value="${Number(p.sellPriceMid)>0?round2(p.sellPriceMid):''}" oninput="App.previewProductUnits()">
+      <div class="field-note" id="pu-auto-mid"></div>
+    </div>
+    <div>
+      <label id="pu-lbl-sell-base">قیمت فروش هر عدد</label>
+      <input id="pu-sell-base" type="number" inputmode="decimal" step="0.01" value="${round2(p.sellPrice||0)}" oninput="App.previewProductUnits()">
+    </div>
+    <label>واحد پیش‌فرض در فرم فروش</label>
+    <select id="pu-default"></select>
+    <hr class="divider">
+    <div id="pu-preview"></div>`;
+    this.openCustomModal({
+      title:'واحدها و قیمت «'+p.name+'»',
+      sub:'موجودی فعلی: '+this.qtyBreakdown(p,p.stock||0)+' — موجودی از این‌جا تغییر نمی‌کند (برای آن «اصلاح موجودی»).',
+      bodyHtml: body,
+      submitLabel:'ذخیرهٔ واحدها و قیمت‌ها',
+      onOpen: ()=>{
+        const cu=document.getElementById('pu-costunit');
+        if(cu) cu.dataset.want = packU?packU.name:(midU?midU.name:(p.unit||'عدد'));
+        const du=document.getElementById('pu-default');
+        if(du) du.dataset.want = p.defaultSaleUnit || (midU?midU.name:(p.unit||'عدد'));
+        App.previewProductUnits();
+      },
+      onSubmit: ()=> this.saveProductUnits(id)
+    });
+  },
+  // خواندن وضعیت فعلی فرم واحدها (بدون ذخیره)
+  _puRead(){
+    const gs=id=>{ const el=document.getElementById(id); return el?String(el.value||'').trim():''; };
+    const gn=id=>{ const el=document.getElementById(id); const v=el?parseFloat(el.value):NaN; return isNaN(v)?0:v; };
+    const base=gs('pu-base')||'عدد';
+    const packName=gs('pu-pack'), packPer=gn('pu-packper');
+    const midName=gs('pu-mid'), midPer=gn('pu-midper');
+    const hasMid=!!(midName && midPer>1);
+    const packSize=(packName && packPer>0) ? (hasMid?round2(packPer*midPer):packPer) : 0;
+    const hasPack=!!(packName && packSize>1);
+    const ladder=[];
+    if(hasPack) ladder.push({key:'pack', name:packName, factor:packSize});
+    if(hasMid)  ladder.push({key:'mid',  name:midName,  factor:midPer});
+    ladder.push({key:'base', name:base, factor:1});
+    return {base, packName, packPer, midName, midPer, hasMid, hasPack, packSize, ladder,
+      cost:gn('pu-cost'), costUnit:gs('pu-costunit'),
+      sellPack:gn('pu-sell-pack'), sellMid:gn('pu-sell-mid'), sellBase:gn('pu-sell-base'),
+      defaultUnit:gs('pu-default')};
+  },
+  previewProductUnits(){
+    const r=this._puRead();
+    const setTxt=(id,t)=>{ const el=document.getElementById(id); if(el) el.textContent=t; };
+    const show=(id,on)=>{ const el=document.getElementById(id); if(el) el.style.display = on?'block':'none'; };
+    setTxt('pu-packper-label','هر '+(r.packName||'کارتن')+' حاوی چند '+(r.hasMid?r.midName:r.base)+'؟');
+    setTxt('pu-midper-label','هر '+(r.midName||'قوطی/بسته')+' حاوی چند '+r.base+'؟');
+    setTxt('pu-lbl-sell-pack','قیمت فروش هر '+(r.packName||'کارتن'));
+    setTxt('pu-lbl-sell-mid','قیمت فروش هر '+(r.midName||'قوطی'));
+    setTxt('pu-lbl-sell-base','قیمت فروش هر '+r.base);
+    show('pu-row-pack', r.hasPack);
+    show('pu-row-mid', r.hasMid);
+    // پر کردن سلکت‌ها با حفظ انتخاب قبلی
+    ['pu-costunit','pu-default'].forEach(selId=>{
+      const sel=document.getElementById(selId); if(!sel) return;
+      const want = sel.dataset.want || sel.value;
+      sel.innerHTML = r.ladder.map(u=>`<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}${u.factor>1?' (= '+fmtQty(u.factor)+' '+escapeHtml(r.base)+')':''}</option>`).join('');
+      sel.value = r.ladder.some(u=>u.name===want) ? want : r.ladder[0].name;
+      delete sel.dataset.want;
+    });
+    const r2=this._puRead();
+    const costUnit = r2.ladder.find(u=>u.name===r2.costUnit) || r2.ladder[r2.ladder.length-1];
+    const costPerBase = r2.cost>0 ? r2.cost/costUnit.factor : 0;
+    // قیمت فروش پایه: اگر خالی باشد از واحد بزرگ‌تر حساب می‌شود
+    let basePrice=r2.sellBase;
+    if(!(basePrice>0)){
+      if(r2.hasMid && r2.sellMid>0) basePrice=r2.sellMid/r2.midPer;
+      else if(r2.hasPack && r2.sellPack>0) basePrice=r2.sellPack/r2.packSize;
+    }
+    const priceOf=u=>{
+      if(u.key==='pack' && r2.sellPack>0) return r2.sellPack;
+      if(u.key==='mid'  && r2.sellMid>0)  return r2.sellMid;
+      return round2(basePrice*u.factor);
+    };
+    if(r2.hasPack) setTxt('pu-auto-pack', r2.sellPack>0 ? ('قیمت دستی — بدون آن خودکار '+fmt2(round2(basePrice*r2.packSize))+' می‌شد') : ('خودکار: '+fmt2(round2(basePrice*r2.packSize))+' (خالی بگذارید تا خودکار بماند؛ برای تخفیف کارتنی عدد بنویسید)'));
+    if(r2.hasMid)  setTxt('pu-auto-mid',  r2.sellMid>0  ? ('قیمت دستی — بدون آن خودکار '+fmt2(round2(basePrice*r2.midPer))+' می‌شد')  : ('خودکار: '+fmt2(round2(basePrice*r2.midPer))+' (خالی بگذارید تا خودکار بماند)'));
+    const pv=document.getElementById('pu-preview');
+    if(pv){
+      const rows=r2.ladder.map(u=>{
+        const c=round2(costPerBase*u.factor), s=priceOf(u);
+        const profit=round2(s-c);
+        return `<tr><td>${escapeHtml(u.name)}</td><td class="num">${fmtQty(u.factor)} ${escapeHtml(r2.base)}</td><td class="num">${fmt2(c)}</td><td class="num">${fmt2(s)}</td><td class="num" style="color:${profit>=0?'var(--green)':'var(--red)'}">${fmt2(profit)}</td></tr>`;
+      }).join('');
+      pv.innerHTML = `<b style="font-size:13.5px;">پیش‌نمایش</b>
+      <table class="inv-table"><thead><tr><th>واحد</th><th>ظرفیت</th><th>تمام‌شده</th><th>فروش</th><th>سود</th></tr></thead><tbody>${rows}</tbody></table>
+      <div class="field-note">${escapeHtml(this.unitLadderLabel({unit:r2.base, midUnit:r2.hasMid?r2.midName:'', midPer:r2.hasMid?r2.midPer:0, packUnit:r2.hasPack?r2.packName:'', packSize:r2.hasPack?r2.packSize:0})||'این محصول فقط یک واحد دارد.')}</div>`;
+    }
+  },
+  saveProductUnits(id){
+    const p=this.state.products.find(x=>x.id===id); if(!p) throw new Error('محصول یافت نشد.');
+    const r=this._puRead();
+    if(!r.base) throw new Error('واحد پایه را بنویسید (مثلاً عدد).');
+    if(r.packName && !(r.packPer>0)) throw new Error('برای «'+r.packName+'» بنویسید هر کدام چند '+(r.hasMid?r.midName:r.base)+' دارد.');
+    if(r.midName && !(r.midPer>1)) throw new Error('برای «'+r.midName+'» بنویسید هر کدام چند '+r.base+' دارد (بیشتر از ۱).');
+    if(r.hasPack && r.hasMid && r.packSize<=r.midPer) throw new Error('کارتن باید از قوطی/بسته بزرگ‌تر باشد.');
+    const names=r.ladder.map(u=>u.name);
+    if(new Set(names).size!==names.length) throw new Error('نام واحدها باید با هم متفاوت باشد.');
+    const costUnit=r.ladder.find(u=>u.name===r.costUnit)||r.ladder[r.ladder.length-1];
+    const avgCost = r.cost>0 ? round2(r.cost/costUnit.factor) : 0;
+    let basePrice=r.sellBase;
+    if(!(basePrice>0)){
+      if(r.hasMid && r.sellMid>0) basePrice=round2(r.sellMid/r.midPer);
+      else if(r.hasPack && r.sellPack>0) basePrice=round2(r.sellPack/r.packSize);
+      else basePrice=0;
+    }
+    const fields={
+      unit:r.base,
+      midUnit: r.hasMid?r.midName:'', midPer: r.hasMid?r.midPer:0,
+      packUnit: r.hasPack?r.packName:'', packSize: r.hasPack?r.packSize:0,
+      avgCost,
+      sellPrice: round2(basePrice),
+      sellPriceMid: (r.hasMid && r.sellMid>0)?round2(r.sellMid):0,
+      sellPricePack: (r.hasPack && r.sellPack>0)?round2(r.sellPack):0,
+      defaultSaleUnit: names.includes(r.defaultUnit)?r.defaultUnit:r.base,
+      ...this.editMeta()
+    };
+    return updateDoc(doc(cols.products, id), fields).then(()=>this.toast('واحدها و قیمت‌ها ذخیره شد'));
   },
   // اصلاح موجودی همیشه افزایشی (increment) است، نه جایگزینی مطلق — یعنی حتی اگر
   // هم‌زمان یک فاکتور دیگر (فروش/خرید/کنسل) روی همین محصول در حال ثبت باشد،
@@ -2672,13 +3162,17 @@ const App = {
     const p=this.state.products.find(x=>x.id===id); if(!p) return;
     this.openFormModal({
       title:'اصلاح موجودی «'+p.name+'»',
-      sub:'موجودی فعلی (طبق آخرین اطلاعات این دستگاه): '+p.stock+' '+p.unit,
-      fields:[{key:'delta', label:'چند عدد اضافه یا کم شود؟', type:'number', step:'0.01', value:'', hint:'برای اضافه‌کردن عدد مثبت (مثلاً 5)، برای کم‌کردن عدد منفی (مثلاً -5-) بنویسید.'}],
+      sub:'موجودی فعلی (طبق آخرین اطلاعات این دستگاه): '+this.qtyBreakdown(p,p.stock||0),
+      fields:[
+        {key:'unit', label:'واحد', type:'select', options:this.productUnits(p).map(u=>({value:u.name, label:u.name+(u.factor>1?(' (= '+fmtQty(u.factor)+' '+(p.unit||'عدد')+')'):'')})), value:(p.unit||'عدد')},
+        {key:'delta', label:'چند تا اضافه یا کم شود؟', type:'number', step:'0.01', value:'', hint:'برای اضافه‌کردن عدد مثبت (مثلاً 5)، برای کم‌کردن عدد منفی (مثلاً -5) بنویسید.'}
+      ],
       submitLabel:'ثبت اصلاح',
       onSubmit:(v)=>{
-        const delta=v.delta;
-        if(!delta||isNaN(delta)) throw new Error('عدد نامعتبر است.');
-        return updateDoc(doc(cols.products, id), { stock: increment(delta) }).then(()=>this.toast((delta>0?'+':'-')+Math.abs(delta)+' '+p.unit+' ثبت شد'));
+        if(!v.delta||isNaN(v.delta)) throw new Error('عدد نامعتبر است.');
+        const u=this.unitByName(p, v.unit);
+        const delta=round2(v.delta*u.factor);
+        return updateDoc(doc(cols.products, id), { stock: increment(delta) }).then(()=>this.toast((delta>0?'+':'-')+fmtQty(Math.abs(v.delta))+' '+u.name+' ثبت شد'));
       }
     });
   },
@@ -2697,8 +3191,8 @@ const App = {
     const list = this.lowStockList();
     const rows = list.length ? list.map(p=>`
       <div class="row-item">
-        <div class="r-left"><b>${escapeHtml(p.name)}</b><span class="sub">قیمت فروش: <span class="num">${fmt(p.sellPrice)}</span></span></div>
-        <div class="r-right num" style="color:${p.stock<=0?'var(--red)':'var(--gold-d)'}">${p.stock} ${escapeHtml(p.unit)}</div>
+        <div class="r-left"><b>${escapeHtml(p.name)}</b><span class="sub">قیمت فروش هر ${escapeHtml(p.unit||'عدد')}: <span class="num">${fmt(p.sellPrice)}</span></span></div>
+        <div class="r-right num" style="color:${p.stock<=0?'var(--red)':'var(--gold-d)'}">${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</div>
       </div>`).join('') : `<div class="empty"><span class="ic">${ic('check-circle',26)}</span><b>همه‌چیز کافی است</b>هیچ کالای کم‌موجودی نیست</div>`;
     return `
     <button class="back-btn" onclick="App.navigate('more')">${ic('chevron-right',16)}بازگشت</button>
@@ -2712,17 +3206,22 @@ const App = {
     const owner=this.isOwner();
     const threshold = this.state.settings.lowStockThreshold!==undefined ? this.state.settings.lowStockThreshold : 1;
     const sorted=[...this.state.products].sort((a,b)=>a.name.localeCompare(b.name,'fa'));
-    const rows = sorted.length ? sorted.map(p=>
-      `<div class="row-item"><div class="r-left"><b>${escapeHtml(p.name)}</b><span class="sub">قیمت تمام‌شده: <span class="num">${fmt(p.avgCost)}</span> · قیمت فروش: <span class="num">${fmt(p.sellPrice)}</span></span>${p.packSize>0?`<span class="sub">هر ${escapeHtml(p.packUnit||'کارتن')} = ${p.packSize} ${escapeHtml(p.unit)}</span>`:''}</div>
+    const rows = sorted.length ? sorted.map(p=>{
+      const ladder=this.productUnits(p);
+      const priceLine = ladder.map(u=>u.name+': '+fmt2(this.unitSellPrice(p,u))+(this.isUnitPriceManual(p,u)?'*':'')).join(' · ');
+      const costLine  = ladder.map(u=>u.name+': '+fmt2(this.unitCost(p,u))).join(' · ');
+      return `<div class="row-item"><div class="r-left"><b>${escapeHtml(p.name)}</b>${ladder.length>1?`<span class="sub">${escapeHtml(this.unitLadderLabel(p))}</span>`:''}<span class="sub">فروش — ${escapeHtml(priceLine)}</span><span class="sub">تمام‌شده — ${escapeHtml(costLine)}</span></div>
       <div class="r-right" style="display:flex;align-items:center;gap:10px;">
-        <span class="badge ${p.stock<=threshold?'red':'gold'} num">${p.stock} ${escapeHtml(p.unit)}</span>
+        <span class="badge ${p.stock<=threshold?'red':'gold'} num">${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</span>
+        ${owner?`<span class="icon-btn" onclick="App.editProductUnits('${p.id}')" title="ویرایش واحدها و قیمت">${ic('sliders',16)}</span>`:''}
         ${owner?`<span class="menu-dots" onclick='App.openActionMenu([
+          {label:"ویرایش واحدها و قیمت‌ها", icon:"sliders", onClick:()=>App.editProductUnits("${p.id}")},
           {label:"اصلاح موجودی", icon:"package", onClick:()=>App.adjustProductStock("${p.id}")},
-          {label:"ویرایش نام/قیمت", icon:"pencil", onClick:()=>App.editProduct("${p.id}")},
+          {label:"ویرایش نام و قیمت پایه", icon:"pencil", onClick:()=>App.editProduct("${p.id}")},
           {label:"حذف محصول", icon:"trash", danger:true, onClick:()=>App.deleteProduct("${p.id}")}
         ])'>${ic('more-vertical',17)}</span>`:''}
-      </div></div>`
-    ).join('') : `<div class="empty"><span class="ic">${ic('archive',26)}</span><b>هنوز محصولی اضافه نشده</b>با ثبت اولین خرید یا فروش، محصول خودکار ساخته می‌شود</div>`;
+      </div></div>`;
+    }).join('') : `<div class="empty"><span class="ic">${ic('archive',26)}</span><b>هنوز محصولی اضافه نشده</b>با ثبت اولین خرید یا فروش، محصول خودکار ساخته می‌شود</div>`;
 
     return `
     <button class="back-btn" onclick="App.navigate('more')">${ic('chevron-right',16)}بازگشت</button>
@@ -2733,16 +3232,26 @@ const App = {
       <label>افزودن محصول جدید</label>
       <input id="np-name" placeholder="نام محصول">
       <div class="grid2">
-        <div><label>واحد</label><input id="np-unit" placeholder="عدد / کارتن" value="عدد"></div>
-        <div><label>موجودی آغازین</label><input id="np-stock" type="number" placeholder="0"></div>
+        <div><label>واحد پایه (کوچک‌ترین)</label><input id="np-unit" placeholder="عدد" value="عدد"></div>
+        <div><label>موجودی آغازین (به واحد پایه)</label><input id="np-stock" type="number" inputmode="decimal" placeholder="0"></div>
       </div>
       <div class="grid2">
-        <div><label>قیمت تمام‌شده (خرید)</label><input id="np-cost" type="number" placeholder="0"></div>
-        <div><label>قیمت فروش پیشنهادی</label><input id="np-sell" type="number" placeholder="0"></div>
+        <div><label>نام واحد بزرگ (اختیاری)</label><input id="np-packunit" placeholder="کارتن"></div>
+        <div><label>هر کارتن حاوی چند؟</label><input id="np-packper" type="number" inputmode="decimal" placeholder="6"></div>
       </div>
+      <div class="grid2">
+        <div><label>نام واحد میانی (اختیاری)</label><input id="np-midunit" placeholder="قوطی / بسته"></div>
+        <div><label>هر قوطی/بسته حاوی چند عدد؟</label><input id="np-midper" type="number" inputmode="decimal" placeholder="24"></div>
+      </div>
+      <div class="grid2">
+        <div><label>قیمت تمام‌شدهٔ یک واحد پایه</label><input id="np-cost" type="number" inputmode="decimal" placeholder="0"></div>
+        <div><label>قیمت فروش یک واحد پایه</label><input id="np-sell" type="number" inputmode="decimal" placeholder="0"></div>
+      </div>
+      <div class="field-note">قیمت کارتن و قوطی خودکار از قیمت واحد پایه حساب می‌شود؛ بعد از افزودن، با «ویرایش واحدها و قیمت‌ها» می‌توانید برای هر واحد قیمت جدا (مثلاً تخفیف کارتنی) بگذارید.</div>
       <button class="btn btn-primary" onclick="App.submitNewProductForm()">${ic('plus',17)}افزودن محصول</button>
     </div>`:''}
     <div class="eyebrow"><span>فهرست محصولات</span><span>${sorted.length} قلم</span></div>
+    ${owner&&sorted.length?`<div class="field-note" style="margin-bottom:8px;">با دکمهٔ ${ic('sliders',13)} روی هر محصول، واحدها (کارتن ← قوطی/بسته ← عدد) و قیمت خرید و فروش هر واحد را ویرایش کنید. قیمت واحدهای کوچک‌تر خودکار از قیمت کارتن حساب می‌شود؛ ستارهٔ کنار قیمت یعنی برای آن واحد قیمت دستی گذاشته‌اید.</div>`:''}
     <div class="card">${rows}</div>
     `;
   },
