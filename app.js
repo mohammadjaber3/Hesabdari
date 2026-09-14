@@ -1058,15 +1058,21 @@ const App = {
     const neg=q0<0; let q=Math.abs(q0);
     const ladder=this.productUnits(p);
     const parts=[];
+    // Iterate from largest (first) to smallest (last)
     for(let i=0;i<ladder.length;i++){
       const u=ladder[i];
+      const n=Math.floor(q/u.factor+1e-9);
+      if(n>0){ 
+        parts.push(fmtQty(n)+' '+u.name); 
+        q-=n*u.factor; 
+      }
+      // If this is the last unit and there's remainder, show it
       if(i===ladder.length-1){
         const rest=Math.round(q*1000)/1000;
-        if(rest>0.0001 || parts.length===0) parts.push(fmtQty(rest)+' '+u.name);
+        if(rest>0.0001 && parts.length>0) parts.push(fmtQty(rest)+' '+u.name);
+        else if(rest>0.0001 || parts.length===0) parts.push(fmtQty(rest)+' '+u.name);
         break;
       }
-      const n=Math.floor(q/u.factor+1e-9);
-      if(n>0){ parts.push(fmtQty(n)+' '+u.name); q-=n*u.factor; }
     }
     return (neg?'-':'')+parts.join(' و ');
   },
