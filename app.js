@@ -1130,7 +1130,7 @@ const App = {
       name: gs(prefix+'-newname'), unit: base, stock:0, avgCost:0, sellPrice:0,
       midUnit: hasMid?midUnit:'', midPer: hasMid?midPer:0,
       packUnit: packSize>1?packUnit:'', packSize: packSize>1?packSize:0,
-      defaultSaleUnit: hasMid?midUnit:base
+      defaultSaleUnit: packSize>0?packUnit:(hasMid?midUnit:base)
     };
   },
   formUnit(prefix){
@@ -1287,7 +1287,7 @@ const App = {
       if(draftP){
         batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, stock:-it.qty, avgCost:0, sellPrice:it.unitPrice,
           midUnit:draftP.midUnit||'', midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', packSize:draftP.packSize||0,
-          defaultSaleUnit:draftP.defaultSaleUnit||draftP.unit, sellPriceMid:0, sellPricePack:0});
+          defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||draftP.unit, sellPriceMid:0, sellPricePack:0});
       } else {
         batch.update(doc(cols.products, it.productId), { stock: increment(-it.qty) });
       }
@@ -1830,7 +1830,7 @@ const App = {
       if(draftP){
         batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, stock:it.qty, avgCost:unitCostAFN, sellPrice:round2(unitCostAFN*1.15),
           midUnit:draftP.midUnit||'', midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', packSize:draftP.packSize||0,
-          defaultSaleUnit:draftP.defaultSaleUnit||draftP.unit, sellPriceMid:0, sellPricePack:0, ...this.recordMeta()});
+          defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||draftP.unit, sellPriceMid:0, sellPricePack:0, ...this.recordMeta()});
       } else {
         const p = this.state.products.find(pp=>pp.id===it.productId);
         if(p){
@@ -2969,7 +2969,7 @@ const App = {
     setDoc(doc(cols.products, pid), {id:pid, name, unit, stock, avgCost:cost, sellPrice:sell,
       midUnit:hasMid?midUnit:'', midPer:hasMid?midPer:0,
       packUnit:packSize>1?packUnit:'', packSize:packSize>1?packSize:0,
-      sellPriceMid:0, sellPricePack:0, defaultSaleUnit:hasMid?midUnit:unit,
+      sellPriceMid:0, sellPricePack:0, defaultSaleUnit:packSize>0?packUnit:(hasMid?midUnit:unit),
       ...this.recordMeta()}).then(()=>this.toast('محصول اضافه شد')).catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
   },
   editProduct(id){
@@ -3054,7 +3054,7 @@ const App = {
         const cu=document.getElementById('pu-costunit');
         if(cu) cu.dataset.want = packU?packU.name:(midU?midU.name:(p.unit||'عدد'));
         const du=document.getElementById('pu-default');
-        if(du) du.dataset.want = p.defaultSaleUnit || (midU?midU.name:(p.unit||'عدد'));
+        if(du) du.dataset.want = p.defaultSaleUnit || (p.packUnit || (midU?midU.name:(p.unit||'عدد')));
         App.previewProductUnits();
       },
       onSubmit: ()=> this.saveProductUnits(id)
@@ -3151,7 +3151,7 @@ const App = {
       sellPrice: round2(basePrice),
       sellPriceMid: (r.hasMid && r.sellMid>0)?round2(r.sellMid):0,
       sellPricePack: (r.hasPack && r.sellPack>0)?round2(r.sellPack):0,
-      defaultSaleUnit: names.includes(r.defaultUnit)?r.defaultUnit:r.base,
+      defaultSaleUnit: names.includes(r.defaultUnit)?r.defaultUnit:(r.packUnit||r.midUnit||r.base),
       ...this.editMeta()
     };
     return updateDoc(doc(cols.products, id), fields).then(()=>this.toast('واحدها و قیمت‌ها ذخیره شد'));
