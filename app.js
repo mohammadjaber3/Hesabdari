@@ -1112,6 +1112,34 @@ const App = {
     if(f<=1) return '';
     return '= '+fmtQty(it.qty)+' '+(it.unit||'عدد');
   },
+  // نمایش برای فاکتور: فقط واحدهای بزرگتر، بدون عدد کوچک
+  itemQtyLabelForInvoice(it, baseQtyOverride){
+    const f=this.itemFactor(it);
+    const q = baseQtyOverride!==undefined ? (Number(baseQtyOverride)||0) : (Number(it.qty)||0);
+    // اگر واحد معامله = واحد پایه، فقط یک واحد نشان بده
+    if(f===1) return fmtQty(q)+' '+this.itemUnitName(it);
+    // اگر تقسیم دقیق است، فقط واحد بزرگ نشان بده
+    const inUnit=q/f;
+    if(Math.abs(inUnit-Math.round(inUnit))<1e-9) return fmtQty(Math.round(inUnit))+' '+this.itemUnitName(it);
+    // اگر نه، فقط بزرگترین واحدها نشان بده (بدون عدد)
+    const p=this.state.products.find(x=>x.id===it.productId);
+    if(!p) return fmtQty(round2(inUnit))+' '+this.itemUnitName(it);
+    
+    const ladder=this.productUnits(p);
+    const parts=[];
+    let remaining=q;
+    // از بزرگتر به کوچک‌تر، اما از شاخهٔ کارتن/بسته شروع کن
+    for(let i=0;i<ladder.length-1;i++){ // -1 تا واحد پایه (عدد) رو نادیده بگیر
+      const u=ladder[i];
+      const n=Math.floor(remaining/u.factor+1e-9);
+      if(n>0){
+        parts.push(fmtQty(n)+' '+u.name);
+        remaining-=n*u.factor;
+      }
+    }
+    return parts.length>0 ? parts.join(' و ') : fmtQty(Math.round(inUnit))+' '+this.itemUnitName(it);
+  },
+
   itemPricePerTxUnit(it){ return round2((Number(it.unitPrice)||0)*this.itemFactor(it)); },
   itemCostPerTxUnit(it){ return round2((Number(it.unitCost)||0)*this.itemFactor(it)); },
 
@@ -1377,7 +1405,7 @@ const App = {
     sale.items.forEach((it,idx)=>{
       const ret = it.returnedQty ? ` (مرجوعی: ${this.itemQtyLabel(it, it.returnedQty)})` : '';
       const base = this.itemFactor(it)>1 ? ` [${fmtQty(it.qty)} ${it.unit}]` : '';
-      lines.push(`${idx+1}. ${it.name} — ${this.itemQtyLabel(it)}${base} × ${fmt(this.itemPricePerTxUnit(it))} = ${fmt(it.qty*it.unitPrice)}${ret}`);
+      lines.push(`${idx+1}. ${it.name} — ${this.itemQtyLabelForInvoice(it)}${base} × ${fmt(this.itemPricePerTxUnit(it))} = ${fmt(it.qty*it.unitPrice)}${ret}`);
     });
     lines.push('———————————————');
     if(sale.originalTotal!==undefined && Math.abs(sale.originalTotal-sale.total)>0.5) lines.push('مجموع اولیهٔ فاکتور: '+fmt(sale.originalTotal)+' '+s.currency);
@@ -1421,7 +1449,7 @@ const App = {
       <tr>
         <td>${idx+1}</td>
         <td>${escapeHtml(it.name)}${returned>0?`<div class="sub" style="color:var(--red);">${escapeHtml(this.itemQtyLabel(it,returned))} مرجوعی</div>`:''}</td>
-        <td class="num">${escapeHtml(this.itemQtyLabel(it))}${this.itemBaseNote(it)?`<div class="sub">${escapeHtml(this.itemBaseNote(it))}</div>`:''}</td>
+        <td class="num">${escapeHtml(this.itemQtyLabelForInvoice(it))}${this.itemBaseNote(it)?`<div class="sub">${escapeHtml(this.itemBaseNote(it))}</div>`:''}</td>
         <td class="num">${fmt(this.itemPricePerTxUnit(it))}<div class="sub">هر ${escapeHtml(this.itemUnitName(it))}</div></td>
         <td class="num">${fmt(it.qty*it.unitPrice)}</td>
         <td class="no-print">${!cancelled?`<span class="menu-dots" onclick='App.openActionMenu([
@@ -1880,7 +1908,7 @@ const App = {
     const cur = this.purchaseDraft.currency || 'AFN';
     const rate = this.usdRate();
     const itemsHtml = items.length ? items.map((it,idx)=>
-      `<div class="item-row"><span>${escapeHtml(it.name)} — ${escapeHtml(this.itemQtyLabel(it))} × <span class="num">${cur==='USD'?fmt2(this.itemCostPerTxUnit(it)):fmt(this.itemCostPerTxUnit(it))}</span>${this.itemBaseNote(it)?`<span class="sub" style="display:block;">${escapeHtml(this.itemBaseNote(it))} · قیمت تمام‌شدهٔ هر ${escapeHtml(it.unit||'عدد')}: <span class="num">${fmt2(round2(it.unitCost))}</span></span>`:''}</span>
+      `<div class="item-row"><span>${escapeHtml(it.name)} — ${escapeHtml(this.itemQtyLabelForInvoice(it))} × <span class="num">${cur==='USD'?fmt2(this.itemCostPerTxUnit(it)):fmt(this.itemCostPerTxUnit(it))}</span>${this.itemBaseNote(it)?`<span class="sub" style="display:block;">${escapeHtml(this.itemBaseNote(it))} · قیمت تمام‌شدهٔ هر ${escapeHtml(it.unit||'عدد')}: <span class="num">${fmt2(round2(it.unitCost))}</span></span>`:''}</span>
       <span style="display:flex;align-items:center;gap:8px;"><b class="num">${cur==='USD'?fmt2(it.qty*it.unitCost):fmt(it.qty*it.unitCost)}</b><span class="x" onclick="App.removePurchaseItem(${idx})" title="حذف قلم">${ic('trash',15)}</span></span></div>`
     ).join('') : `<div class="field-note">هنوز محصولی اضافه نشده.</div>`;
 
@@ -1976,7 +2004,7 @@ const App = {
       <tr>
         <td>${idx+1}</td>
         <td>${escapeHtml(it.name)}${returned>0?`<div class="sub" style="color:var(--red);">${escapeHtml(this.itemQtyLabel(it,returned))} واپس شده</div>`:''}</td>
-        <td class="num">${escapeHtml(this.itemQtyLabel(it))}${this.itemBaseNote(it)?`<div class="sub">${escapeHtml(this.itemBaseNote(it))}</div>`:''}</td>
+        <td class="num">${escapeHtml(this.itemQtyLabelForInvoice(it))}${this.itemBaseNote(it)?`<div class="sub">${escapeHtml(this.itemBaseNote(it))}</div>`:''}</td>
         <td class="num">${pur.currency==='USD'?fmt2(this.itemCostPerTxUnit(it)):fmt(this.itemCostPerTxUnit(it))}<div class="sub">هر ${escapeHtml(this.itemUnitName(it))}${this.itemFactor(it)>1?` · هر ${escapeHtml(it.unit||'عدد')}: ${fmt2(round2(it.unitCost))}`:''}</div></td>
         <td class="num">${pur.currency==='USD'?fmt2(it.qty*it.unitCost):fmt(it.qty*it.unitCost)}</td>
         <td class="no-print">${!cancelled?`<span class="menu-dots" onclick='App.openActionMenu([
