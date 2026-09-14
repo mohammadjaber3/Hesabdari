@@ -3160,33 +3160,59 @@ const App = {
   // هم‌زمان یک فاکتور دیگر (فروش/خرید/کنسل) روی همین محصول در حال ثبت باشد،
   // هیچ تغییری گم نمی‌شود، چون سرور مقدار را نسبت به آخرین عدد واقعی خودش جمع/کم می‌کند.
   // فقط مدیر می‌تواند دستی موجودی را اصلاح کند — تغییرات خودکار خرید/فروش/کنسل برای همه باز است.
-  changeStockUnit(id){
-    if(!this.isOwner()) return;
-    const p=this.state.products.find(x=>x.id===id); if(!p) return;
-    const ladder=this.productUnits(p);
-    if(ladder.length<2){ this.toast('این محصول فقط یک واحد دارد'); return; }
-    const currentUnit=this.unitByName(p, p.defaultSaleUnit);
-    const nextUnit=ladder[(ladder.findIndex(u=>u.name===currentUnit.name)+1)%ladder.length];
-    updateDoc(doc(cols.products, id), { defaultSaleUnit: nextUnit.name }).then(()=>this.toast('واحد نمایش موجودی تغییر کرد: '+nextUnit.name)).catch(e=>{ console.error(e); });
-  },
   adjustProductStock(id){
     if(!this.isOwner()){ this.toast('فقط مدیر می‌تواند موجودی را دستی اصلاح کند.'); return; }
     const p=this.state.products.find(x=>x.id===id); if(!p) return;
-    this.openFormModal({
-      title:'اصلاح موجودی «'+p.name+'»',
-      sub:'موجودی فعلی (طبق آخرین اطلاعات این دستگاه): '+this.qtyBreakdown(p,p.stock||0),
-      fields:[
-        {key:'unit', label:'واحد', type:'select', options:this.productUnits(p).map(u=>({value:u.name, label:u.name+(u.factor>1?(' (= '+fmtQty(u.factor)+' '+(p.unit||'عدد')+')'):'')})), value:(p.unit||'عدد')},
-        {key:'delta', label:'چند تا اضافه یا کم شود؟ (مثبت یا منفی)', type:'text', value:'', hint:'مثبت: +5 یا 5 · منفی: -5 · اعشار: 2.5 یا -3.2 · کیبورد منفی رو نشان بده'}
-      ],
-      submitLabel:'ثبت اصلاح',
-      onSubmit:(v)=>{
-        if(!v.delta||isNaN(v.delta)) throw new Error('عدد نامعتبر است.');
-        const u=this.unitByName(p, v.unit);
-        const delta=round2(v.delta*u.factor);
-        return updateDoc(doc(cols.products, id), { stock: increment(delta) }).then(()=>this.toast((delta>0?'+':'-')+fmtQty(Math.abs(v.delta))+' '+u.name+' ثبت شد'));
-      }
+    const ladder=this.productUnits(p);
+    const unitOptions=ladder.map(u=>({value:u.name, label:u.name+(u.factor>1?(' (= '+fmtQty(u.factor)+' '+(p.unit||'عدد')+')'):'')}));
+    this._adjustId=id; this._adjustProduct=p; this._adjustLadder=ladder;
+    const body = `
+    <label>انتخاب کار</label>
+    <div style="display:flex;gap:8px;margin-bottom:12px;">
+      <button class="btn btn-outline" style="flex:1;" id="adj-mode-delta" onclick="App.setAdjustMode('delta')">۱. اضافه یا کم کردن موجودی</button>
+      <button class="btn btn-outline" style="flex:1;" id="adj-mode-unit" onclick="App.setAdjustMode('unit')">۲. تنها تغییر واحد</button>
+    </div>
+    <div id="adj-mode-content"></div>`;
+    this.openCustomModal({
+      title:'اصلاح یا تغییر «'+p.name+'»',
+      sub:'موجودی فعلی: '+this.qtyBreakdown(p,p.stock||0),
+      bodyHtml: body,
+      submitLabel:'ثبت',
+      onOpen: ()=>{
+        App.setAdjustMode('delta'); // پیش‌فرض
+      },
+      onSubmit: ()=> App.submitAdjustStock(id)
     });
+  },
+  setAdjustMode(mode){
+    this._adjustMode=mode;
+    const p=this._adjustProduct, ladder=this._adjustLadder;
+    const unitOpts=ladder.map(u=>({value:u.name, label:u.name+(u.factor>1?(' (= '+fmtQty(u.factor)+' '+(p.unit||'عدد')+')'):'')}));
+    const body=mode==='delta'
+      ? `<label>واحد</label><select id="adj-unit">${unitOpts.map(o=>'<option value="'+o.value+'">'+o.label+'</option>').join('')}</select><option value="${p.unit||'عدد'}">${p.unit||'عدد'}</option></select>
+        <label style="margin-top:10px;">تعداد (مثبت یا منفی)</label><input id="adj-delta" type="text" placeholder="مثال: +5 یا -3.2">`
+      : `<label>تغییر واحد پیش‌فرض نمایش موجودی به</label><select id="adj-newunit">${unitOpts.map(o=>'<option value="'+o.value+'">'+o.label+'</option>').join('')}</select><div class="field-note" style="margin-top:8px;">فقط واحد نمایش تغییر می‌کند، موجودی ثابت می‌ماند.</div>`;
+    document.getElementById('adj-mode-content').innerHTML = body;
+    ['adj-mode-delta','adj-mode-unit'].forEach(id=>{
+      const btn=document.getElementById(id);
+      if(btn) btn.style.opacity = (id==='adj-mode-'+(mode))?'1':'0.5';
+    });
+  },
+  submitAdjustStock(id){
+    const mode=this._adjustMode;
+    const p=this._adjustProduct, ladder=this._adjustLadder;
+    if(mode==='delta'){
+      const deltaStr=document.getElementById('adj-delta').value.trim();
+      if(!deltaStr||isNaN(deltaStr)) throw new Error('عدد نامعتبر است.');
+      const unitName=document.getElementById('adj-unit').value;
+      const u=this.unitByName(p,unitName);
+      const delta=round2(parseFloat(deltaStr)*u.factor);
+      return updateDoc(doc(cols.products, id), { stock: increment(delta) }).then(()=>this.toast((delta>0?'+':'-')+fmtQty(Math.abs(parseFloat(deltaStr)))+' '+u.name+' ثبت شد'));
+    } else {
+      const newUnit=document.getElementById('adj-newunit').value;
+      if(!newUnit || !ladder.some(u=>u.name===newUnit)) throw new Error('واحد نامعتبر است.');
+      return updateDoc(doc(cols.products, id), { defaultSaleUnit: newUnit }).then(()=>this.toast('واحد نمایش تغییر کرد: '+newUnit));
+    }
   },
   deleteProduct(id){
     if(!this.isOwner()){ this.toast('فقط مدیر می‌تواند محصول را حذف کند.'); return; }
@@ -3226,7 +3252,7 @@ const App = {
       const costLine  = ladder.map(u=>u.name+': '+fmt2(this.unitCost(p,u))).join(' · ');
       return `<div class="row-item"><div class="r-left"><b>${escapeHtml(p.name)}</b>${ladder.length>1?`<span class="sub">${escapeHtml(this.unitLadderLabel(p))}</span>`:''}<span class="sub">فروش — ${escapeHtml(priceLine)}</span><span class="sub">تمام‌شده — ${escapeHtml(costLine)}</span></div>
       <div class="r-right" style="display:flex;align-items:center;gap:10px;">
-        <div style="text-align:right;"><div class="badge ${p.stock<=threshold?'red':'gold'} num">${fmtQty(stockInDef)} ${escapeHtml(defUnit.name)}</div><button class="btn btn-sm btn-outline" style="margin-top:4px;font-size:10px;" onclick="App.changeStockUnit('${p.id}')">${escapeHtml(defUnit.name==='عدد'?'به '+ladder[0].name:'به عدد')}</button></div>
+        <span class="badge ${p.stock<=threshold?'red':'gold'} num">${fmtQty(stockInDef)} ${escapeHtml(defUnit.name)}</span>
         ${owner?`<span class="icon-btn" onclick="App.editProductUnits('${p.id}')" title="ویرایش واحدها و قیمت">${ic('sliders',16)}</span>`:''}
         ${owner?`<span class="menu-dots" onclick='App.openActionMenu([
           {label:"ویرایش واحدها و قیمت‌ها", icon:"sliders", onClick:()=>App.editProductUnits("${p.id}")},
