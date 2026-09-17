@@ -5,9 +5,32 @@ import {
 } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
-  doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, onSnapshot,
-  collection, writeBatch, increment
+  doc, getDoc, getDocs, setDoc as _setDoc, updateDoc as _updateDoc, deleteDoc as _deleteDoc, onSnapshot,
+  collection, writeBatch as _writeBatch, increment
 } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
+
+/* ---------- قفل نرمِ نقش «شریک» (فقط دیدن) ----------
+   دیوارِ اصلی همان firestore.rules است، ولی اگر همان‌جا جلوی نوشتن گرفته شود
+   کاربر یک خطای انگلیسیِ نامفهوم می‌بیند. پس همهٔ نوشتن‌ها از یک نقطه رد می‌شوند
+   و برای شریک با یک پیام فارسیِ روشن متوقف می‌شوند.
+   استثنا: setDocRaw — فقط برای PIN شخصی خودِ کاربر. */
+function _assertCanWrite(){
+  let _r=null;
+  try{ _r = App && App.role; }catch(e){ _r=null; }
+  if(_r==='partner'){
+    throw new Error('حساب شما «شریک» است: همه‌چیز را می‌بینید، اما اجازهٔ تغییر، ثبت یا حذف ندارید.');
+  }
+}
+const setDocRaw = _setDoc;
+function setDoc(...a){ _assertCanWrite(); return _setDoc(...a); }
+function updateDoc(...a){ _assertCanWrite(); return _updateDoc(...a); }
+function deleteDoc(...a){ _assertCanWrite(); return _deleteDoc(...a); }
+function writeBatch(d){
+  const b=_writeBatch(d);
+  const commit=b.commit.bind(b);
+  b.commit=function(){ try{ _assertCanWrite(); }catch(e){ return Promise.reject(e); } return commit(); };
+  return b;
+}
 
 const firebaseConfig = {
   apiKey: "AIzaSyC1ro1e1rwR7dB9gHGWQkwq2G2r1ZolLGs",
@@ -34,6 +57,10 @@ const settingsDocRef   = doc(db, 'businesses', BIZ_ID, 'meta', 'settings');
 const migratedFlagRef  = doc(db, 'businesses', BIZ_ID, 'meta', 'migratedV2');
 const oldStateDocRef   = doc(db, 'businesses', BIZ_ID, 'data', 'state'); // ساختار قدیمی (فقط برای مهاجرت یک‌باره)
 const teamDocRef       = (uid_) => doc(db, 'businesses', BIZ_ID, 'team', uid_);
+/* PIN شخصی هر کاربر: سند نقش (team) از سمت کلاینت قابل نوشتن نیست (و نباید باشد)،
+   پس هَشِ PIN در کالکشن جدا ذخیره می‌شود که هر کس فقط سند خودش را می‌نویسد.
+   قبلاً PIN داخل همان سند team ذخیره می‌شد و همیشه بی‌صدا ناکام می‌ماند. */
+const pinDocRef = (uid_) => doc(db, 'businesses', BIZ_ID, 'pins', uid_);
 
 /* ---------- Helpers ---------- */
 function uid(){ return 'id_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8); }
@@ -83,6 +110,9 @@ function fmt2(n){
    مقدار qty و unitPrice/unitCost همیشه به واحد پایه ذخیره می‌شوند تا همهٔ
    محاسبات قبلی (سود، مرجوعی، کنسل، موجودی) بدون تغییر و درست بمانند. */
 function round2(n){ return Math.round((Number(n)||0)*100)/100; }
+/* قیمت تمام‌شدهٔ واحد پایه هرگز نباید گرد شود: یک کارتن ۱۶۰۰ افغانی با ۱۴۴ عدد
+   می‌شود ۱۱.۱۱۱۱ — اگر ۱۱.۱۱ ذخیره شود، ارزش انبار و سود به‌مرور جابه‌جا می‌شود. */
+function round4(n){ return Math.round((Number(n)||0)*10000)/10000; }
 function fmtQty(n){
   const r = Math.round((Number(n)||0)*1000)/1000;
   return Number.isInteger(r) ? r.toLocaleString('en-US') : String(r);
@@ -381,6 +411,9 @@ const App = {
       try{ cached = localStorage.getItem(cacheKey); }catch(e2){}
       this.role = cached || 'staff';
     }
+    // اگر نقش واقعی با نقشی که با آن اشتراک گرفتیم یکی نبود (اولین ورود روی این گوشی،
+    // یا تغییر نقش از کنسول)، اشتراک را با دسترسی درست از نو می‌گیریم.
+    if(this._subscribedRole !== this.role) this._subscribeAll();
     this.renderNav(); this.render(); // نقش ممکن است روی نمایش برخی دکمه‌ها اثر بگذارد
 
     migrateOldDataIfNeeded().catch(()=>{});
@@ -457,7 +490,11 @@ const App = {
     this._teardown();
     this._loadedParts = new Set();
     this._pendingParts = new Set();
-    const totalParts = COLLECTIONS.length + 1; // + settings
+    this._subscribedRole = this._cachedRole();
+    const hidden = this._hiddenCollections();
+    const activeCollections = COLLECTIONS.filter(n=> hidden.indexOf(n)<0);
+    hidden.forEach(n=>{ this.state[n]=[]; });
+    const totalParts = activeCollections.length + 1; // + settings
 
     const checkReady = ()=>{
       if(!this.dataReady && this._loadedParts.size>=totalParts){
@@ -485,7 +522,7 @@ const App = {
       this._recomputeSyncState();
     };
 
-    COLLECTIONS.forEach(name=>{
+    activeCollections.forEach(name=>{
       const unsub = onSnapshot(cols[name], {includeMetadataChanges:true}, (snap)=>{
         const arr = [];
         snap.forEach(d=>arr.push(d.data()));
@@ -527,6 +564,39 @@ const App = {
   // داده شود، تا وقتی ایمیلش manager@motar.com نباشد، دسترسی مدیریتی نمی‌گیرد.
   OWNER_EMAIL: 'manager@motar.com',
   isOwner(){ return this.role==='owner' && !!this.user && this.user.email===this.OWNER_EMAIL; },
+  /* --- نقش‌ها ---
+     owner   : مالک — همه‌کار
+     partner : شریک — همه‌چیز را می‌بیند، هیچ چیز را تغییر نمی‌دهد و پاک نمی‌کند
+     seller  : فروشنده — فقط فروش/مشتری/رسید؛ خرید، مصارف، شرکت‌ها و سود را نمی‌بیند
+     staff   : نقش قدیمی — نوشتن کامل، بدون حذف و بدون تنظیمات */
+  isPartner(){ return this.role==='partner'; },
+  isSeller(){ return this.role==='seller'; },
+  canWrite(){ return !this.isPartner(); },              // شریک همه‌جا فقط خواندنی است
+  canSeeBooks(){ return !this.isSeller(); },            // خرید/مصارف/شرکت‌ها/سود
+  canSeeReports(){ return this.isOwner() || this.isPartner(); },
+  roleLabel(){
+    return this.role==='owner' ? 'مالک' : this.role==='partner' ? 'شریک (فقط دیدن)'
+         : this.role==='seller' ? 'فروشنده' : 'کارمند';
+  },
+  guardWrite(){
+    if(!this.canWrite()){ this.toastError('حساب شما «شریک» است: فقط دیدن، بدون تغییر یا حذف.'); return false; }
+    return true;
+  },
+  guardBooks(){
+    if(!this.canSeeBooks()){ this.toastError('این بخش برای حساب فروشنده باز نیست.'); return false; }
+    return true;
+  },
+  renderNoAccess(what){
+    return `<div class="empty"><span class="ic">${ic('lock',26)}</span><b>دسترسی ندارید</b>بخش «${escapeHtml(what||'')}» برای نقش «${escapeHtml(this.roleLabel())}» بسته است.</div>`;
+  },
+  _cachedRole(){
+    if(this.role) return this.role;
+    try{ return this.user ? (localStorage.getItem(this._roleCacheKey(this.user.uid))||'') : ''; }catch(e){ return ''; }
+  },
+  // فروشنده اجازهٔ خواندن این کالکشن‌ها را ندارد؛ پس بی‌جهت به آن‌ها گوش نمی‌دهیم
+  _hiddenCollections(){
+    return this._cachedRole()==='seller' ? ['purchases','expenses','suppliers','openingEntries'] : [];
+  },
 
   logout(){
     this.openConfirmModal({ title:'خروج از حساب', msg:'از حساب خارج شوید؟', confirmLabel:'خروج', danger:true, onConfirm:()=> signOut(auth) });
@@ -586,8 +656,9 @@ const App = {
       {id:'more',ic:'menu',lb:'بیشتر'},
     ];
     if(!this.dataReady){ document.getElementById('bottomnav').innerHTML=''; return; }
+    const visibleTabs = tabs.filter(t=> t.id!=='purchase' || this.canSeeBooks());
     const lowCount = this.lowStockList().length;
-    document.getElementById('bottomnav').innerHTML = tabs.map(t=>
+    document.getElementById('bottomnav').innerHTML = visibleTabs.map(t=>
       `<button class="${this.tab===t.id?'active':''}" onclick="App.navigate('${t.id}')" style="position:relative;">
         <span class="ic">${ic(t.ic,21)}</span><span class="lb">${t.lb}</span>
         ${t.id==='more' && lowCount ? `<span class="nav-dot">${lowCount>9?'9+':lowCount}</span>` : ''}
@@ -602,11 +673,11 @@ const App = {
     switch(this.tab){
       case 'dashboard': html=this.renderDashboard(); break;
       case 'sale': html=this.renderSale(); break;
-      case 'purchase': html=this.renderPurchase(); break;
+      case 'purchase': html=this.canSeeBooks()?this.renderPurchase():this.renderNoAccess('خرید'); break;
       case 'customers': html=this.renderCustomers(); break;
       case 'more': html=this.renderMore(); break;
       case 'invoice': html=this.renderInvoiceView(); break;
-      case 'purchase-view': html=this.renderPurchaseView(); break;
+      case 'purchase-view': html=this.canSeeBooks()?this.renderPurchaseView():this.renderNoAccess('بل خرید'); break;
       default: html=this.renderDashboard();
     }
     s.innerHTML = html + this.renderImageViewer();
@@ -865,17 +936,23 @@ const App = {
   },
   async getMyPinHash(){
     if(!this.user) return null;
-    const snap = await getDoc(teamDocRef(this.user.uid)); // اگر خطا بدهد، عمداً throw می‌کند (fail-safe نه fail-open)
-    return snap.exists() ? (snap.data().pinHash||null) : null;
+    const snap = await getDoc(pinDocRef(this.user.uid)); // اگر خطا بدهد، عمداً throw می‌کند (fail-safe نه fail-open)
+    if(snap.exists() && snap.data().pinHash) return snap.data().pinHash;
+    // سازگاری با نسخهٔ قبلی که (بی‌اثر) در سند team ذخیره می‌کرد
+    try{
+      const old = await getDoc(teamDocRef(this.user.uid));
+      return old.exists() ? (old.data().pinHash||null) : null;
+    }catch(e){ return null; }
   },
   async setMyPinHash(pin){
     if(!this.user) return;
     const h = await sha256Hex(pin);
-    try{ await setDoc(teamDocRef(this.user.uid), {pinHash:h}, {merge:true}); }catch(e){}
+    try{ await setDocRaw(pinDocRef(this.user.uid), {pinHash:h, uid:this.user.uid, ts:Date.now()}, {merge:true}); }
+    catch(e){ this.toastError('PIN ذخیره نشد؛ اتصال اینترنت را بررسی کنید.'); }
   },
   async resetPin(){
     if(!this.user) return;
-    try{ await setDoc(teamDocRef(this.user.uid), {pinHash:null}, {merge:true}); this.myPinHash=null; this.toast('قفل PIN حذف شد — دفعهٔ بعد یک PIN جدید تعیین کنید'); }
+    try{ await setDocRaw(pinDocRef(this.user.uid), {pinHash:null}, {merge:true}); this.myPinHash=null; this.toast('قفل PIN حذف شد — دفعهٔ بعد یک PIN جدید تعیین کنید'); }
     catch(e){ this.toast('خطا در حذف PIN؛ اتصال اینترنت را بررسی کنید'); }
   },
   lockNow(){ if(!this.user) return; this.pinLocked=true; this.pinEntry=''; this.renderPinRoot(); },
@@ -995,16 +1072,16 @@ const App = {
 
     return `
     <div class="hero">
-      <div class="row"><span class="label">${ic('wallet',15)}موجودی نقد</span><span class="val num">${fmt(this.cashBalance())} ${cur}</span></div>
-      <div class="row"><span class="label">${ic('boxes',15)}ارزش کالای انبار</span><span class="val num">${fmt(this.inventoryValue())} ${cur}</span></div>
-      <div class="row"><span class="label">${ic(todayProfit>=0?'trending-up':'trending-down',15)}سود امروز</span><span class="val num ${todayProfit>=0?'green':'red'}">${fmt(todayProfit)} ${cur}</span></div>
+      ${this.canSeeBooks()?`<div class="row"><span class="label">${ic('wallet',15)}موجودی نقد</span><span class="val num">${fmt(this.cashBalance())} ${cur}</span></div>`:`<div class="row"><span class="label">${ic('receipt',15)}فروش امروز</span><span class="val num">${fmt(sum(todaySales,'total'))} ${cur}</span></div>`}
+      ${this.canSeeBooks()?`<div class="row"><span class="label">${ic('boxes',15)}ارزش کالای انبار</span><span class="val num">${fmt(this.inventoryValue())} ${cur}</span></div>`:''}
+      ${this.canSeeBooks()?`<div class="row"><span class="label">${ic(todayProfit>=0?'trending-up':'trending-down',15)}سود امروز</span><span class="val num ${todayProfit>=0?'green':'red'}">${fmt(todayProfit)} ${cur}</span></div>`:''}
     </div>
     <div class="ledger-strip">
       <div class="chip"><div class="t">فروش امروز</div><div class="v num">${fmt(sum(todaySales,'total'))}</div></div>
-      <div class="chip"><div class="t">مصرف امروز</div><div class="v num">${fmt(sum(todayExpenses,'amount'))}</div></div>
+      ${this.canSeeBooks()?`<div class="chip"><div class="t">مصرف امروز</div><div class="v num">${fmt(sum(todayExpenses,'amount'))}</div></div>`:''}
       ${todayWithdrawals.length?`<div class="chip"><div class="t">${ic('hand-coins',12)}برداشت امروز</div><div class="v num">${fmt(sum(todayWithdrawals,'amount'))}</div></div>`:''}
       <div class="chip"><div class="t">طلب از مشتریان</div><div class="v num">${fmt(this.totalReceivable())}</div></div>
-      <div class="chip"><div class="t">قرض از عمده‌فروش (${cur})</div><div class="v num">${fmt(this.totalPayable())}</div></div>
+      ${this.canSeeBooks()?`<div class="chip"><div class="t">قرض از عمده‌فروش (${cur})</div><div class="v num">${fmt(this.totalPayable())}</div></div>`:''}
       ${this.totalPayableUSD()!==0?`<div class="chip"><div class="t">قرض از عمده‌فروش (دالر)</div><div class="v num">$${fmt2(this.totalPayableUSD())}</div></div>`:''}
       ${this.lowStockList().length?`<div class="chip warn" onclick="App.navigate('more','lowstock')" style="cursor:pointer;"><div class="t">${ic('alert-triangle',12)}کم‌موجودی</div><div class="v num">${this.lowStockList().length} کالا</div></div>`:''}
       ${this.totalPayableUSD()!==0 && this.usdRate()>0?`<div class="chip"><div class="t">مجموع کل قرض به ${cur}</div><div class="v num">${fmt(this.totalPayableCombinedAFN())}</div></div>`:''}
@@ -1012,8 +1089,8 @@ const App = {
     </div>
     <div class="quick-actions">
       <div class="qa-btn" onclick="App.navigate('sale')"><span class="ic">${ic('receipt',19)}</span>فروش جدید</div>
-      <div class="qa-btn neutral" onclick="App.navigate('purchase')"><span class="ic">${ic('package',19)}</span>خرید جدید</div>
-      <div class="qa-btn spend" onclick="App.navigate('more','expenses')"><span class="ic">${ic('banknote',19)}</span>ثبت مصرف</div>
+      ${this.canSeeBooks()?`<div class="qa-btn neutral" onclick="App.navigate('purchase')"><span class="ic">${ic('package',19)}</span>خرید جدید</div>`:''}
+      ${this.canSeeBooks()?`<div class="qa-btn spend" onclick="App.navigate('more','expenses')"><span class="ic">${ic('banknote',19)}</span>ثبت مصرف</div>`:''}
     </div>
     <div class="eyebrow"><span>آخرین معاملات</span>${this.state.sales.length+this.state.purchases.length+this.state.expenses.length>8?`<span onclick="App.navigate('more','history')" style="cursor:pointer;color:var(--gold-700);">تاریخچهٔ کامل</span>`:''}</div>
     <div class="card">${recentHtml}</div>
@@ -1113,31 +1190,27 @@ const App = {
     return '= '+fmtQty(it.qty)+' '+(it.unit||'عدد');
   },
   // نمایش برای فاکتور: فقط واحدهای بزرگتر، بدون عدد کوچک
+  /* نمایش مقدار در فاکتور. سه قانون:
+     ۱) اگر معامله سرِ راست به یک واحد بود («۳ قوطی») همان نشان داده شود؛
+     ۲) اگر چند واحد پایه از قلم کم شده باشد («۱ قوطی منهای ۲ عدد») صریح نوشته شود؛
+     ۳) هیچ‌وقت مقدارِ ناقص گرد نشود — قبلاً ۲۲ عدد به «۱ قوطی» گرد می‌شد و
+        باقی‌ماندهٔ واحد پایه در فاکتور کلاً حذف می‌شد، یعنی مشتری چیزی می‌دید که با مبلغ نمی‌خواند. */
   itemQtyLabelForInvoice(it, baseQtyOverride){
     const f=this.itemFactor(it);
     const q = baseQtyOverride!==undefined ? (Number(baseQtyOverride)||0) : (Number(it.qty)||0);
-    // اگر واحد معامله = واحد پایه، فقط یک واحد نشان بده
+    const baseName = it.unit || 'عدد';
     if(f===1) return fmtQty(q)+' '+this.itemUnitName(it);
-    // اگر تقسیم دقیق است، فقط واحد بزرگ نشان بده
+    const adj = Number(it.adjBase)||0;
+    if(baseQtyOverride===undefined && adj>0){
+      const whole=(q+adj)/f;
+      const wholeTxt = Math.abs(whole-Math.round(whole))<1e-9 ? fmtQty(Math.round(whole)) : fmtQty(round2(whole));
+      return wholeTxt+' '+this.itemUnitName(it)+' (منهای '+fmtQty(adj)+' '+baseName+')';
+    }
     const inUnit=q/f;
     if(Math.abs(inUnit-Math.round(inUnit))<1e-9) return fmtQty(Math.round(inUnit))+' '+this.itemUnitName(it);
-    // اگر نه، فقط بزرگترین واحدها نشان بده (بدون عدد)
     const p=this.state.products.find(x=>x.id===it.productId);
     if(!p) return fmtQty(round2(inUnit))+' '+this.itemUnitName(it);
-    
-    const ladder=this.productUnits(p);
-    const parts=[];
-    let remaining=q;
-    // از بزرگتر به کوچک‌تر، اما از شاخهٔ کارتن/بسته شروع کن
-    for(let i=0;i<ladder.length-1;i++){ // -1 تا واحد پایه (عدد) رو نادیده بگیر
-      const u=ladder[i];
-      const n=Math.floor(remaining/u.factor+1e-9);
-      if(n>0){
-        parts.push(fmtQty(n)+' '+u.name);
-        remaining-=n*u.factor;
-      }
-    }
-    return parts.length>0 ? parts.join(' و ') : fmtQty(Math.round(inUnit))+' '+this.itemUnitName(it);
+    return this.qtyBreakdown(p, q);
   },
 
   itemPricePerTxUnit(it){ return round2((Number(it.unitPrice)||0)*this.itemFactor(it)); },
@@ -1454,7 +1527,8 @@ const App = {
         <td class="num">${fmt(it.qty*it.unitPrice)}</td>
         <td class="no-print">${!cancelled?`<span class="menu-dots" onclick='App.openActionMenu([
           {label:"مرجوعی این قلم", icon:"rotate-ccw", onClick:()=>App.saleReturnItem("${sale.id}",${idx})},
-          {label:"افزودن تعداد", icon:"plus", onClick:()=>App.saleIncreaseItemQty("${sale.id}",${idx})}
+          {label:"افزودن تعداد", icon:"plus", onClick:()=>App.saleIncreaseItemQty("${sale.id}",${idx})},
+          {label:"کم کردن چند ${escapeHtml(it.unit||'عدد')} (کاستی)", icon:"minus", onClick:()=>App.saleShrinkItem("${sale.id}",${idx})}
         ])'>${ic('more-vertical',17)}</span>`:''}</td>
       </tr>`;
     }).join('');
@@ -1869,7 +1943,7 @@ const App = {
         const p = this.state.products.find(pp=>pp.id===it.productId);
         if(p){
           const newStock = p.stock + it.qty;
-          const newAvgCost = newStock>0 ? ((p.stock*p.avgCost)+(it.qty*unitCostAFN))/newStock : unitCostAFN;
+          const newAvgCost = newStock>0 ? round4(((p.stock*p.avgCost)+(it.qty*unitCostAFN))/newStock) : unitCostAFN;
           const fields = { stock: increment(it.qty), avgCost: newAvgCost };
           if(!p.sellPrice) fields.sellPrice = round2(unitCostAFN*1.15);
           batch.update(doc(cols.products, it.productId), fields);
@@ -2009,7 +2083,8 @@ const App = {
         <td class="num">${pur.currency==='USD'?fmt2(it.qty*it.unitCost):fmt(it.qty*it.unitCost)}</td>
         <td class="no-print">${!cancelled?`<span class="menu-dots" onclick='App.openActionMenu([
           {label:"واپس به فروشنده", icon:"rotate-ccw", onClick:()=>App.purchaseReturnItem("${pur.id}",${idx})},
-          {label:"افزودن تعداد", icon:"plus", onClick:()=>App.purchaseIncreaseItemQty("${pur.id}",${idx})}
+          {label:"افزودن تعداد", icon:"plus", onClick:()=>App.purchaseIncreaseItemQty("${pur.id}",${idx})},
+          {label:"کم کردن چند ${escapeHtml(it.unit||'عدد')} (کاستی)", icon:"minus", onClick:()=>App.purchaseShrinkItem("${pur.id}",${idx})}
         ])'>${ic('more-vertical',17)}</span>`:''}</td>
       </tr>`;
     }).join('');
@@ -2214,6 +2289,77 @@ const App = {
       }
     });
   },
+  /* =========================================================
+     «حالت استثنایی»: کم کردن چند واحد پایه از یک قلمِ ثبت‌شده
+     مثال: یک قوطی ۲۴ عددی که فقط ۲۲ عدد داشت.
+     نیازی نیست محصول برای همیشه «عددی» تعریف شود — فقط همین قلم اصلاح می‌شود.
+     دو حالت که تفاوتشان فقط سرِ انبار و قیمت تمام‌شده است:
+       gone : قوطی از اول کم داشت یا خودم مصرف کرده بودم → پول کم می‌شود، جنس برنمی‌گردد،
+              پس ضرر آن مستقیم از سود همین فاکتور کم می‌شود (که همان واقعیت است)
+       back : مشتری همین مقدار را کمتر گرفت → پول کم می‌شود و جنس هم به انبار برمی‌گردد
+     ========================================================= */
+  saleShrinkItem(saleId, idx){
+    if(!this.guardWrite()) return;
+    const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
+    if(sale.status==='cancelled'){ this.toast('این فاکتور باطل شده است.'); return; }
+    const it=sale.items[idx]; if(!it) return;
+    const baseName = it.unit || 'عدد';
+    const remaining = round2((Number(it.qty)||0)-(Number(it.returnedQty)||0));
+    if(remaining<=0){ this.toast('از این قلم چیزی نمانده است.'); return; }
+    const perBase = Number(it.unitPrice)||0;
+    this.openFormModal({
+      title:'کم کردن چند '+baseName+' از «'+it.name+'»',
+      sub:'این قلم الان: '+this.itemQtyLabel(it, remaining)+' · قیمت هر '+baseName+': '+fmt2(round2(perBase)),
+      fields:[
+        {key:'qty', label:'چند '+baseName+' کم شود؟', type:'number', step:'0.01', value:1,
+         hint:'مثلاً قوطیِ ۲۴ عددی که ۲ عدد آن نبود: عدد ۲ را بنویسید. مبلغ خودش کم می‌شود.'},
+        {key:'mode', label:'این کمبود چه بود؟', type:'select', value:'gone', options:[
+          {value:'gone', label:'قوطی/بسته کم داشت یا خودم مصرف کرده بودم — جنس برنمی‌گردد'},
+          {value:'back', label:'مشتری این مقدار را کمتر گرفت — جنس در انبار می‌ماند'}
+        ]},
+        {key:'note', label:'یادداشت (اختیاری)', placeholder:'مثلاً مصرف شخصی'}
+      ],
+      submitLabel:'کم کن و مبلغ را اصلاح کن',
+      onSubmit:(v)=>{
+        const qty=round2(Number(v.qty)||0);
+        if(!qty || qty<=0) throw new Error('عدد نامعتبر است.');
+        if(qty>remaining-1e-9) throw new Error('حداکثر '+fmtQty(remaining)+' '+baseName+' قابل کم کردن است؛ برای کل قلم از «مرجوعی این قلم» استفاده کنید.');
+        this._applySaleShrink(sale, idx, qty, v.mode==='back'?'back':'gone', (v.note||'').trim());
+        this.toast(fmtQty(qty)+' '+baseName+' کم شد');
+      }
+    });
+  },
+  _applySaleShrink(sale, idx, qty, mode, note){
+    const it=sale.items[idx];
+    const amount   = round2(qty*(Number(it.unitPrice)||0));                 // پولی که از فاکتور کم می‌شود
+    const costBack = mode==='back' ? round2(qty*(Number(it.cost)||0)) : 0;  // قیمت تمام‌شده فقط وقتی جنس برگشته
+    const oldRemaining  = (Number(sale.total)||0)-(Number(sale.paid)||0);
+    const debtReduction = Math.min(amount, Math.max(0, oldRemaining));
+    const cashRefund    = round2(amount-debtReduction);
+
+    const newItems = sale.items.map((x,i)=> i===idx
+      ? {...x, qty: round2((Number(x.qty)||0)-qty), adjBase: round2((Number(x.adjBase)||0)+qty), adjNote: note||x.adjNote||''}
+      : x);
+    const newTotal = round2((Number(sale.total)||0)-amount);
+    const newCost  = round2((Number(sale.totalCost)||0)-costBack);
+    const newPaid  = round2((Number(sale.paid)||0)-cashRefund);
+    const log = [...(sale.adjustments||[]), {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx,
+      name:it.name, qty, unit:(it.unit||'عدد'), mode, note:note||'', amount}];
+
+    const batch=writeBatch(db);
+    batch.update(doc(cols.sales, sale.id), {
+      items:newItems, adjustments:log,
+      total:newTotal, totalCost:newCost, profit:round2(newTotal-newCost),
+      paid:newPaid, remaining:round2(newTotal-newPaid), ...this.editMeta()
+    });
+    if(sale.customerId && debtReduction>0){
+      batch.update(doc(cols.customers, sale.customerId), { balance: increment(-debtReduction) });
+    }
+    if(mode==='back' && it.productId){
+      batch.update(doc(cols.products, it.productId), { stock: increment(qty) });
+    }
+    batch.commit().catch(e=>{ console.error(e); App.toastError('خطا در اصلاح این قلم؛ دوباره تلاش کنید.'); });
+  },
   // تبدیل بخشی یا کل «باقی‌مانده» یک فاکتور به «تخفیف» به‌جای بدهی مشتری.
   // مثال: مجموع ۱۳۰۵ شده ولی فقط ۱۳۰۰ از مشتری می‌گیرید — ۵ افغانی باقی‌مانده
   // را با این دکمه به‌عنوان تخفیف می‌بخشید تا در «طلب از مشتریان» باقی نماند.
@@ -2414,6 +2560,82 @@ const App = {
     batch.update(doc(cols.products, it.productId), { stock: increment(-qty) });
     batch.commit().catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
   },
+  /* «حالت استثنایی» روی بل خرید — دو معنیِ کاملاً جدا:
+       short : جنس کم آمده و پولش را هم نمی‌پردازم → مبلغ بل، بدهی به شرکت و انبار هر سه کم می‌شود
+       used  : پولش را پرداختم ولی جنس مصرف/ضایع شد → بل دست‌نخورده می‌ماند، فقط انبار کم می‌شود
+               و همان مبلغ به‌عنوان مصرف ثبت می‌شود تا سود واقعی به‌هم نخورد */
+  purchaseShrinkItem(purchaseId, idx){
+    if(!this.guardWrite()) return;
+    const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
+    if(pur.status==='cancelled'){ this.toast('این بل باطل شده است.'); return; }
+    const it=pur.items[idx]; if(!it) return;
+    const baseName = it.unit || 'عدد';
+    const remaining = round2((Number(it.qty)||0)-(Number(it.returnedQty)||0));
+    if(remaining<=0){ this.toast('از این قلم چیزی نمانده است.'); return; }
+    const curLbl = this.curLabel(pur.currency);
+    this.openFormModal({
+      title:'کم کردن چند '+baseName+' از «'+it.name+'»',
+      sub:'این قلم الان: '+this.itemQtyLabel(it, remaining)+' · قیمت هر '+baseName+': '+fmt2(round2(Number(it.unitCost)||0))+' '+curLbl,
+      fields:[
+        {key:'qty', label:'چند '+baseName+' کم شود؟', type:'number', step:'0.01', value:1,
+         hint:'مثلاً کارتنی که یک قوطی‌اش ۲ عدد کم داشت: عدد ۲ را بنویسید.'},
+        {key:'mode', label:'ماجرا چه بود؟', type:'select', value:'short', options:[
+          {value:'short', label:'جنس کم آمده و پولش را نمی‌پردازم — مبلغ بل هم کم شود'},
+          {value:'used',  label:'پولش را پرداختم، ولی مصرف/ضایع شد — فقط از انبار کم شود'}
+        ]},
+        {key:'note', label:'یادداشت (اختیاری)', placeholder:'مثلاً مصرف شخصی یا کمبود شرکت'}
+      ],
+      submitLabel:'ثبت اصلاح',
+      onSubmit:(v)=>{
+        const qty=round2(Number(v.qty)||0);
+        if(!qty || qty<=0) throw new Error('عدد نامعتبر است.');
+        if(qty>remaining-1e-9) throw new Error('حداکثر '+fmtQty(remaining)+' '+baseName+' قابل کم کردن است؛ برای کل قلم از «واپس به فروشنده» استفاده کنید.');
+        this._applyPurchaseShrink(pur, idx, qty, v.mode==='used'?'used':'short', (v.note||'').trim());
+        this.toast(fmtQty(qty)+' '+baseName+' کم شد');
+      }
+    });
+  },
+  _applyPurchaseShrink(pur, idx, qty, mode, note){
+    const it=pur.items[idx];
+    const rate = (Number(pur.rateAtPurchase)||this.usdRate())||0;
+    const costAFN = pur.currency==='USD' ? round4((Number(it.unitCost)||0)*rate) : round4(Number(it.unitCost)||0);
+    const batch=writeBatch(db);
+
+    if(mode==='short'){
+      const amount = round2(qty*(Number(it.unitCost)||0));   // به ارز همان بل
+      const oldRemaining  = (Number(pur.total)||0)-(Number(pur.paid)||0);
+      const debtReduction = Math.min(amount, Math.max(0, oldRemaining));
+      const cashBack      = round2(amount-debtReduction);
+      const newItems = pur.items.map((x,i)=> i===idx
+        ? {...x, qty: round2((Number(x.qty)||0)-qty), adjBase: round2((Number(x.adjBase)||0)+qty), adjNote: note||x.adjNote||''}
+        : x);
+      const newTotal = round2((Number(pur.total)||0)-amount);
+      const newPaid  = round2((Number(pur.paid)||0)-cashBack);
+      const log = [...(pur.adjustments||[]), {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx,
+        name:it.name, qty, unit:(it.unit||'عدد'), mode, note:note||'', amount}];
+      batch.update(doc(cols.purchases, pur.id), {
+        items:newItems, adjustments:log, total:newTotal, paid:newPaid,
+        remaining:round2(newTotal-newPaid), ...this.editMeta()
+      });
+      if(pur.supplierId && debtReduction>0){
+        const balField = pur.currency==='USD' ? 'balanceUSD' : 'balance';
+        batch.update(doc(cols.suppliers, pur.supplierId), { [balField]: increment(-debtReduction) });
+      }
+      if(it.productId) batch.update(doc(cols.products, it.productId), { stock: increment(-qty) });
+    } else {
+      // بل دست‌نخورده؛ فقط انبار و یک سند مصرف به قیمت تمام‌شده
+      const amountAFN = round2(qty*costAFN);
+      const log = [...(pur.adjustments||[]), {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx,
+        name:it.name, qty, unit:(it.unit||'عدد'), mode, note:note||'', amount:amountAFN}];
+      batch.update(doc(cols.purchases, pur.id), { adjustments:log, ...this.editMeta() });
+      if(it.productId) batch.update(doc(cols.products, it.productId), { stock: increment(-qty) });
+      const expId=uid();
+      batch.set(doc(cols.expenses, expId), {id:expId, ts:Date.now(), date:todayISO(),
+        category:'کاستی و ضایعات جنس', amount:amountAFN,
+        note:(note?note+' — ':'')+it.name+' · '+fmtQty(qty)+' '+(it.unit||'عدد'), ...this.recordMeta()});
+    }
+    batch.commit().catch(e=>{ console.error(e); App.toastError('خطا در اصلاح این قلم؛ دوباره تلاش کنید.'); });
+  },
   // نادیده‌گرفتن خردهٔ پولِ باقی‌ماندهٔ یک بل خرید (مثلاً وقتی ۷۷۹۳ افغانی شده ولی
   // ۷۷۹۰ پرداخت می‌کنید و طرفین ۳ افغانی باقی را نادیده می‌گیرند) — این مبلغ دیگر
   // به‌عنوان بدهیِ ما به عمده‌فروش ثبت نمی‌ماند.
@@ -2576,7 +2798,7 @@ const App = {
         const unitCostAFN = pur.currency==='USD' ? perBase*rate : perBase;
         const batch=writeBatch(db);
         const newStock=(Number(product.stock)||0)+qty;
-        const newAvgCost = newStock>0 ? round2((((Number(product.stock)||0)*(Number(product.avgCost)||0))+(qty*unitCostAFN))/newStock) : unitCostAFN;
+        const newAvgCost = newStock>0 ? round4((((Number(product.stock)||0)*(Number(product.avgCost)||0))+(qty*unitCostAFN))/newStock) : unitCostAFN;
         const pFields={ stock: increment(qty), avgCost: newAvgCost };
         if(!product.sellPrice) pFields.sellPrice = round2(unitCostAFN*1.15);
         batch.update(doc(cols.products, product.id), pFields);
@@ -2599,6 +2821,7 @@ const App = {
     if(this.detailId){
       return this.renderPartyDetail();
     }
+    if(sub==='suppliers' && !this.canSeeBooks()) return this.renderNoAccess('شرکت‌ها / عمده‌فروشان');
     const listArr = sub==='customers' ? this.state.customers : this.state.suppliers;
     const sorted = [...listArr].sort((a,b)=>(b.balance||0)-(a.balance||0));
     const totalKey = sub==='customers' ? this.totalReceivable() : this.totalPayable();
@@ -2629,7 +2852,7 @@ const App = {
     <h2 class="section-title" style="margin-top:0;">${ic('users',17)}مشتریان و فروشندگان</h2>
     <div class="tabbar-sub">
       <button class="${sub==='customers'?'active':''}" onclick="App.navigate('customers','customers')">مشتریان</button>
-      <button class="${sub==='suppliers'?'active':''}" onclick="App.navigate('customers','suppliers')">شرکت‌ها / عمده‌فروشان</button>
+      ${this.canSeeBooks()?`<button class="${sub==='suppliers'?'active':''}" onclick="App.navigate('customers','suppliers')">شرکت‌ها / عمده‌فروشان</button>`:''}
     </div>
     <button class="btn btn-outline" onclick="App.addPartyManual('${sub}')">${ic('user-plus',16)}افزودن ${sub==='customers'?'مشتری':'شرکت/عمده‌فروش'} جدید</button>
     <div class="card" style="text-align:center;margin-top:12px;">
@@ -2881,13 +3104,27 @@ const App = {
   },
 
   /* ---------- More menu ---------- */
+  /* آستانهٔ کم‌موجودی باید به «واحد فروش» سنجیده شود، نه به واحد پایه.
+     قبلاً موجودیِ خام (عدد) با آستانه (۱) مقایسه می‌شد؛ یعنی برای کالای کارتنی
+     تا وقتی ۱ عدد کیک هم مانده بود، هرگز هشدار کمبود نمی‌داد. */
+  isLowStock(p, threshold){
+    const t = threshold!==undefined ? threshold
+            : (this.state.settings.lowStockThreshold!==undefined ? this.state.settings.lowStockThreshold : 1);
+    const u = this.unitByName(p, p.defaultSaleUnit);
+    return this.stockInUnit(p, u) <= t;
+  },
   lowStockList(){
-    const threshold = this.state.settings.lowStockThreshold!==undefined ? this.state.settings.lowStockThreshold : 1;
-    return [...this.state.products].filter(p=>p.stock<=threshold).sort((a,b)=>a.stock-b.stock);
+    return [...this.state.products].filter(p=>this.isLowStock(p)).sort((a,b)=>(a.stock||0)-(b.stock||0));
   },
   renderMore(){
-    if((this.sub==='reports' || this.sub==='settings') && !this.isOwner()){
-      return `<div class="empty">این بخش فقط برای مالک/مدیر قابل‌دسترسی است.</div>`;
+    if(this.sub==='settings' && !this.isOwner()){
+      return this.renderNoAccess('تنظیمات');
+    }
+    if(this.sub==='reports' && !this.canSeeReports()){
+      return this.renderNoAccess('گزارش سود');
+    }
+    if((this.sub==='expenses' || this.sub==='lowstock') && !this.canSeeBooks() && this.sub==='expenses'){
+      return this.renderNoAccess('مصارف');
     }
     if(this.sub==='expenses') return this.renderExpenses();
     if(this.sub==='reports') return this.renderReports();
@@ -2901,8 +3138,8 @@ const App = {
     <div class="more-list">
       <button onclick="App.navigate('more','lowstock')"><span class="ic">${ic('alert-triangle',17)}</span><span class="lbl">کالاهای کم‌موجود/تمام‌شده ${lowCount?`<span class="stock-badge">${lowCount}</span>`:''}</span><span class="chev">${ic('chevron-left',17)}</span></button>
       <button onclick="App.navigate('more','history')"><span class="ic">${ic('history',17)}</span><span class="lbl">تاریخچهٔ کامل معاملات</span><span class="chev">${ic('chevron-left',17)}</span></button>
-      <button onclick="App.navigate('more','expenses')"><span class="ic">${ic('banknote',17)}</span><span class="lbl">مصارف روزانه و برداشت شخصی</span><span class="chev">${ic('chevron-left',17)}</span></button>
-      ${this.isOwner()?`<button onclick="App.navigate('more','reports')"><span class="ic">${ic('bar-chart',17)}</span><span class="lbl">گزارش سود روزانه / هفته‌وار / ماهوار</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
+      ${this.canSeeBooks()?`<button onclick="App.navigate('more','expenses')"><span class="ic">${ic('banknote',17)}</span><span class="lbl">مصارف روزانه و برداشت شخصی</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
+      ${this.canSeeReports()?`<button onclick="App.navigate('more','reports')"><span class="ic">${ic('bar-chart',17)}</span><span class="lbl">گزارش سود روزانه / هفته‌وار / ماهوار</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
       <button onclick="App.navigate('more','products')"><span class="ic">${ic('archive',17)}</span><span class="lbl">${this.isOwner()?'مدیریت محصولات و موجودی':'مشاهدهٔ محصولات و موجودی (فقط خواندنی)'}</span><span class="chev">${ic('chevron-left',17)}</span></button>
       ${this.isOwner()?`<button onclick="App.navigate('more','settings')"><span class="ic">${ic('settings',17)}</span><span class="lbl">تنظیمات و پشتیبان‌گیری</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
       ${this.user?`<button onclick="App.lockNow()"><span class="ic">${ic('lock',17)}</span><span class="lbl">قفل صفحه</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
@@ -3223,8 +3460,9 @@ const App = {
     const p=this._adjustProduct, ladder=this._adjustLadder;
     const unitOpts=ladder.map(u=>({value:u.name, label:u.name+(u.factor>1?(' (= '+fmtQty(u.factor)+' '+(p.unit||'عدد')+')'):'')}));
     const body=mode==='delta'
-      ? `<label>واحد</label><select id="adj-unit">${unitOpts.map(o=>'<option value="'+o.value+'">'+o.label+'</option>').join('')}</select><option value="${p.unit||'عدد'}">${p.unit||'عدد'}</option></select>
-        <label style="margin-top:10px;">تعداد (مثبت یا منفی)</label><input id="adj-delta" type="text" placeholder="مثال: +5 یا -3.2">`
+      ? `<label>واحد</label><select id="adj-unit">${unitOpts.map(o=>'<option value="'+escapeHtml(String(o.value))+'">'+escapeHtml(o.label)+'</option>').join('')}</select>
+        <label style="margin-top:10px;">تعداد (مثبت یا منفی)</label><input id="adj-delta" type="text" inputmode="decimal" placeholder="مثال: +5 یا -3.2">
+        <div class="field-note">برای کاستی/مصرف شخصی، واحد «${escapeHtml(p.unit||'عدد')}» را انتخاب کنید و عدد منفی بنویسید — مثلاً <b>-2</b>.</div>`
       : `<label>تغییر واحد پیش‌فرض نمایش موجودی به</label><select id="adj-newunit">${unitOpts.map(o=>'<option value="'+o.value+'">'+o.label+'</option>').join('')}</select><div class="field-note" style="margin-top:8px;">فقط واحد نمایش تغییر می‌کند، موجودی ثابت می‌ماند.</div>`;
     document.getElementById('adj-mode-content').innerHTML = body;
     ['adj-mode-delta','adj-mode-unit'].forEach(id=>{
@@ -3286,7 +3524,7 @@ const App = {
       const costLine  = ladder.map(u=>u.name+': '+fmt2(this.unitCost(p,u))).join(' · ');
       return `<div class="row-item"><div class="r-left"><b>${escapeHtml(p.name)}</b>${ladder.length>1?`<span class="sub">${escapeHtml(this.unitLadderLabel(p))}</span>`:''}<span class="sub">فروش — ${escapeHtml(priceLine)}</span><span class="sub">تمام‌شده — ${escapeHtml(costLine)}</span></div>
       <div class="r-right" style="display:flex;align-items:center;gap:10px;">
-        <span class="badge ${p.stock<=threshold?'red':'gold'} num">${fmtQty(stockInDef)} ${escapeHtml(defUnit.name)}</span>
+        <span class="badge ${this.isLowStock(p,threshold)?'red':'gold'} num" title="${escapeHtml(fmtQty(stockInDef)+' '+defUnit.name)}">${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</span>
         ${owner?`<span class="icon-btn" onclick="App.editProductUnits('${p.id}')" title="ویرایش واحدها و قیمت">${ic('sliders',16)}</span>`:''}
         ${owner?`<span class="menu-dots" onclick='App.openActionMenu([
           {label:"ویرایش واحدها و قیمت‌ها", icon:"sliders", onClick:()=>App.editProductUnits("${p.id}")},
