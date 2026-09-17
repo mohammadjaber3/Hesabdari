@@ -1098,44 +1098,42 @@ const App = {
   },
 
   /* =========================================================
-     واحدهای تو در تو — توابع کمکی مشترک بین خرید، فروش و انبار
-     ========================================================= */
-  // نردبان واحدها از بزرگ به کوچک؛ همیشه واحد پایه را هم شامل است
+     واحدهای فروش: ساختار جدید
+     - unit: واحد پایه فروش (قوطی، بسته، کارتن)
+     - unitQty: چند عدد داخل هر واحد پایه
+     - packUnit: واحد بزرگ (اختیاری)
+     - packPer: چند واحد پایه = یک واحد بزرگ
+     - stock: موجودی = به واحد پایه
+   ========================================================= */
   productUnits(p){
-    const base = (p && p.unit) ? p.unit : 'عدد';
+    const base = (p && p.unit) ? String(p.unit).trim() : 'عدد';
     const out = [];
-    const packSize = Number(p && p.packSize)||0;
-    const midPer   = Number(p && p.midPer)||0;
-    if(p && p.packUnit && packSize>1) out.push({key:'pack', name:p.packUnit, factor:packSize});
-    if(p && p.midUnit && midPer>1)    out.push({key:'mid',  name:p.midUnit,  factor:midPer});
+    const packPer = Number(p && p.packPer)||0;
+    const packUnit = p && p.packUnit ? String(p.packUnit).trim() : '';
+    if(packUnit && packPer>1) out.push({key:'pack', name:packUnit, factor:packPer});
     out.push({key:'base', name:base, factor:1});
-    out.sort((a,b)=>b.factor-a.factor);
-    return out.filter((u,i,a)=> a.findIndex(x=>x.factor===u.factor)===i && a.findIndex(x=>x.name===u.name)===i);
+    return out;
   },
   unitByName(p, name){
     const ladder=this.productUnits(p);
     return ladder.find(u=>u.name===name) || ladder[ladder.length-1];
   },
-  // قیمت فروش یک واحد: اگر دستی تنظیم شده همان، وگرنه خودکار = قیمت پایه × ظرفیت
   unitSellPrice(p, u){
     if(!p||!u) return 0;
     if(u.key==='pack' && Number(p.sellPricePack)>0) return Number(p.sellPricePack);
-    if(u.key==='mid'  && Number(p.sellPriceMid)>0)  return Number(p.sellPriceMid);
     return round2((Number(p.sellPrice)||0)*u.factor);
   },
   isUnitPriceManual(p,u){
     if(!p||!u) return false;
-    return (u.key==='pack' && Number(p.sellPricePack)>0) || (u.key==='mid' && Number(p.sellPriceMid)>0);
+    return (u.key==='pack' && Number(p.sellPricePack)>0);
   },
-  // قیمت تمام‌شدهٔ یک واحد، همیشه خودکار از قیمت تمام‌شدهٔ واحد پایه
-  unitCost(p, u){ return round2((Number(p&&p.avgCost)||0)*(u?u.factor:1)); },
-  // «۲ کارتن و ۳ قوطی و ۵ عدد»
+  unitCost(p, u){ return round4((Number(p&&p.avgCost)||0)*(u?u.factor:1)); },
+  
   qtyBreakdown(p, baseQty){
     const q0=Number(baseQty)||0;
     const neg=q0<0; let q=Math.abs(q0);
     const ladder=this.productUnits(p);
     const parts=[];
-    // Iterate from largest (first) to smallest (last)
     for(let i=0;i<ladder.length;i++){
       const u=ladder[i];
       const n=Math.floor(q/u.factor+1e-9);
@@ -1143,7 +1141,6 @@ const App = {
         parts.push(fmtQty(n)+' '+u.name); 
         q-=n*u.factor; 
       }
-      // If this is the last unit and there's remainder, show it
       if(i===ladder.length-1){
         const rest=Math.round(q*1000)/1000;
         if(rest>0.0001 && parts.length>0) parts.push(fmtQty(rest)+' '+u.name);
@@ -1153,18 +1150,20 @@ const App = {
     }
     return (neg?'-':'')+parts.join(' و ');
   },
+  
   unitLadderLabel(p){
-    const ladder=this.productUnits(p);
-    if(ladder.length<2) return '';
-    const parts=[];
-    for(let i=0;i<ladder.length-1;i++){
-      const child=ladder[i+1];
-      parts.push('۱ '+ladder[i].name+' = '+fmtQty(ladder[i].factor/child.factor)+' '+child.name);
-    }
-    if(ladder.length>2) parts.push('۱ '+ladder[0].name+' = '+fmtQty(ladder[0].factor)+' '+ladder[ladder.length-1].name);
+    const base = (p && p.unit) || 'عدد';
+    const unitQty = Number(p && p.unitQty)||0;
+    const packPer = Number(p && p.packPer)||0;
+    const packUnit = (p && p.packUnit) || '';
+    const parts = [];
+    if(unitQty>1) parts.push('۱ '+base+' = '+fmtQty(unitQty)+' عدد');
+    if(packUnit && packPer>1) parts.push('۱ '+packUnit+' = '+fmtQty(packPer)+' '+base);
+    if(packUnit && packPer>1 && unitQty>1) parts.push('۱ '+packUnit+' = '+fmtQty(packPer*unitQty)+' عدد');
     return parts.join(' · ');
   },
-  /* --- کمکی‌های نمایشِ اقلام فاکتور --- */
+
+  /* --- نمایش اقلام فاکتور --- */
   itemFactor(it){ const f=Number(it&&it.txFactor)||0; return f>0?f:1; },
   itemUnitName(it){ return (it&&it.txUnit) || (it&&it.unit) || 'عدد'; },
   itemUnits(it){
@@ -1183,18 +1182,11 @@ const App = {
     const p=this.state.products.find(x=>x.id===it.productId);
     return p ? this.qtyBreakdown(p,q) : fmtQty(round2(inUnit))+' '+this.itemUnitName(it);
   },
-  // معادل واحد پایه، فقط وقتی واحد معامله بزرگ‌تر از پایه بوده
   itemBaseNote(it){
     const f=this.itemFactor(it);
     if(f<=1) return '';
     return '= '+fmtQty(it.qty)+' '+(it.unit||'عدد');
   },
-  // نمایش برای فاکتور: فقط واحدهای بزرگتر، بدون عدد کوچک
-  /* نمایش مقدار در فاکتور. سه قانون:
-     ۱) اگر معامله سرِ راست به یک واحد بود («۳ قوطی») همان نشان داده شود؛
-     ۲) اگر چند واحد پایه از قلم کم شده باشد («۱ قوطی منهای ۲ عدد») صریح نوشته شود؛
-     ۳) هیچ‌وقت مقدارِ ناقص گرد نشود — قبلاً ۲۲ عدد به «۱ قوطی» گرد می‌شد و
-        باقی‌ماندهٔ واحد پایه در فاکتور کلاً حذف می‌شد، یعنی مشتری چیزی می‌دید که با مبلغ نمی‌خواند. */
   itemQtyLabelForInvoice(it, baseQtyOverride){
     const f=this.itemFactor(it);
     const q = baseQtyOverride!==undefined ? (Number(baseQtyOverride)||0) : (Number(it.qty)||0);
@@ -1216,8 +1208,10 @@ const App = {
   itemPricePerTxUnit(it){ return round2((Number(it.unitPrice)||0)*this.itemFactor(it)); },
   itemCostPerTxUnit(it){ return round2((Number(it.unitCost)||0)*this.itemFactor(it)); },
 
-  // موجودی در یک واحد خاص
   stockInUnit(p, unit){ if(!p) return 0; return round2((Number(p.stock)||0)/(unit?unit.factor:1)); },
+
+
+    stockInUnit(p, unit){ if(!p) return 0; return round2((Number(p.stock)||0)/(unit?unit.factor:1)); },
 
   /* --- فرم‌های خرید/فروش: خواندن محصول و واحد انتخاب‌شده از روی صفحه --- */
   formProduct(prefix){
@@ -1229,15 +1223,13 @@ const App = {
     const gs=id=>{ const el=document.getElementById(id); return el?String(el.value||'').trim():''; };
     const gn=id=>{ const el=document.getElementById(id); return el?(parseFloat(el.value)||0):0; };
     const base=gs(prefix+'-newunit')||'عدد';
-    const midUnit=gs(prefix+'-newmidunit'), midPer=gn(prefix+'-newmidper');
     const packUnit=gs(prefix+'-newpackunit'), packPer=gn(prefix+'-newpackper');
-    const hasMid = !!(midUnit && midPer>1);
-    const packSize = (packUnit && packPer>0) ? (hasMid ? packPer*midPer : packPer) : 0;
+    const unitQty = gn(prefix+'-newunitqty');
     return {
       name: gs(prefix+'-newname'), unit: base, stock:0, avgCost:0, sellPrice:0,
-      midUnit: hasMid?midUnit:'', midPer: hasMid?midPer:0,
-      packUnit: packSize>1?packUnit:'', packSize: packSize>1?packSize:0,
-      defaultSaleUnit: packSize>0?packUnit:(hasMid?midUnit:base)
+      // midUnit: hasMid?// midUnit:'', // midPer: hasMid?// midPer:0,
+      packUnit: packSize>1?packUnit:'', // packSize: packSize>1?// packSize:0,
+      defaultSaleUnit: packSize>0?packUnit:(hasMid?// midUnit:base)
     };
   },
   formUnit(prefix){
@@ -1393,7 +1385,7 @@ const App = {
       const draftP = draftProducts.find(dp=>dp.id===it.productId);
       if(draftP){
         batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, stock:-it.qty, avgCost:0, sellPrice:it.unitPrice,
-          midUnit:draftP.midUnit||'', midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', packSize:draftP.packSize||0,
+          // midUnit:draftP.midUnit||'', // midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', // packSize:draftP.packSize||0,
           defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||draftP.unit, sellPriceMid:0, sellPricePack:0});
       } else {
         batch.update(doc(cols.products, it.productId), { stock: increment(-it.qty) });
@@ -1936,8 +1928,8 @@ const App = {
       const unitCostAFN = currency==='USD' ? it.unitCost*rateAtPurchase : it.unitCost;
       const draftP = draftProducts.find(dp=>dp.id===it.productId);
       if(draftP){
-        batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, stock:it.qty, avgCost:unitCostAFN, sellPrice:round2(unitCostAFN*1.15),
-          midUnit:draftP.midUnit||'', midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', packSize:draftP.packSize||0,
+        batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, unitQty:draftP.unitQty||1, stock:it.qty, avgCost:unitCostAFN, sellPrice:round2(unitCostAFN*1.15),
+          // midUnit:draftP.midUnit||'', // midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', // packSize:draftP.packSize||0,
           defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||draftP.unit, sellPriceMid:0, sellPricePack:0, ...this.recordMeta()});
       } else {
         const p = this.state.products.find(pp=>pp.id===it.productId);
@@ -2363,6 +2355,113 @@ const App = {
   // تبدیل بخشی یا کل «باقی‌مانده» یک فاکتور به «تخفیف» به‌جای بدهی مشتری.
   // مثال: مجموع ۱۳۰۵ شده ولی فقط ۱۳۰۰ از مشتری می‌گیرید — ۵ افغانی باقی‌مانده
   // را با این دکمه به‌عنوان تخفیف می‌بخشید تا در «طلب از مشتریان» باقی نماند.
+  
+  /* فرم جدید: تعریف واحدها برای محصول (unit → unitQty → packUnit/packPer) */
+  editProductUnits(id){
+    const p=this.state.products.find(x=>x.id===id); if(!p) return;
+    this.openCustomModal({
+      title:'واحدها و قیمت‌های «'+p.name+'»',
+      sub:'واحد فروش شما چیست و در هر واحد فروش چند عدد است؟',
+      bodyHtml:`
+        <div class="grid2">
+          <div>
+            <label>واحد فروش پایه (مثلاً قوطی، بسته)</label>
+            <input id="pu-unit" type="text" value="${escapeHtml(p.unit||'عدد')}" placeholder="قوطی">
+          </div>
+          <div>
+            <label>در هر واحد پایه چند عدد است؟</label>
+            <input id="pu-unitqty" type="number" value="${Number(p.unitQty)||1}" min="1" step="0.01">
+          </div>
+        </div>
+        <div class="grid2">
+          <div>
+            <label>واحد بزرگ (اختیاری — مثلاً کارتن)</label>
+            <input id="pu-packunit" type="text" value="${escapeHtml(p.packUnit||'')}" placeholder="کارتن">
+          </div>
+          <div>
+            <label>هر واحد بزرگ چند واحد پایه دارد؟</label>
+            <input id="pu-packper" type="number" value="${Number(p.packPer)||1}" min="1" step="1">
+          </div>
+        </div>
+        <div id="pu-structure" class="field-note" style="margin-top:12px;"></div>
+        
+        <div style="margin-top:20px; border-top:1px solid var(--ink-200); padding-top:12px;">
+          <label>قیمت فروش هر واحد پایه</label>
+          <input id="pu-sellprice" type="number" inputmode="decimal" step="0.01" value="${Number(p.sellPrice)||0}">
+          
+          <label style="margin-top:10px;">قیمت فروش هر واحد بزرگ (اختیاری — خودکار محاسبه می‌شود)</label>
+          <input id="pu-sellpack" type="number" inputmode="decimal" step="0.01" value="${Number(p.sellPricePack)||0}">
+          <div id="pu-auto-pack" class="field-note"></div>
+        </div>
+      `,
+      submitLabel:'ذخیره',
+      onOpen: ()=>{ App.previewProductUnits(); },
+      onSubmit: ()=>{ App.submitProductUnits(id); }
+    });
+    
+    // لیسنرهای ورودی برای پیش‌نمایش
+    ['pu-unit','pu-unitqty','pu-packunit','pu-packper','pu-sellprice','pu-sellpack'].forEach(id=>{
+      const el = document.getElementById(id);
+      if(el) el.addEventListener('input', ()=>App.previewProductUnits());
+    });
+  },
+  
+  previewProductUnits(){
+    const unit = (document.getElementById('pu-unit')||{}).value || 'عدد';
+    const unitQty = parseFloat((document.getElementById('pu-unitqty')||{}).value) || 1;
+    const packUnit = (document.getElementById('pu-packunit')||{}).value || '';
+    const packPer = parseInt((document.getElementById('pu-packper')||{}).value) || 1;
+    const sellPrice = parseFloat((document.getElementById('pu-sellprice')||{}).value) || 0;
+    const sellPack = parseFloat((document.getElementById('pu-sellpack')||{}).value) || 0;
+    
+    const struct = document.getElementById('pu-structure');
+    const autoPack = document.getElementById('pu-auto-pack');
+    
+    const parts = [];
+    if(unitQty>1) parts.push('۱ '+unit+' = '+fmtQty(unitQty)+' عدد');
+    if(packUnit && packPer>1) parts.push('۱ '+packUnit+' = '+fmtQty(packPer)+' '+unit);
+    if(packUnit && packPer>1 && unitQty>1) parts.push('۱ '+packUnit+' = '+fmtQty(packPer*unitQty)+' عدد');
+    
+    if(struct) struct.textContent = parts.join(' · ') || unit;
+    
+    if(autoPack && packUnit && packPer>1 && sellPrice>0){
+      const auto = round2(sellPrice*packPer);
+      autoPack.textContent = sellPack>0 
+        ? ('قیمت دستی — بدون آن خودکار '+fmt2(auto)+' می‌شود')
+        : ('خودکار: '+fmt2(auto));
+    } else if(autoPack) {
+      autoPack.textContent = '';
+    }
+  },
+  
+  submitProductUnits(id){
+    const unit = ((document.getElementById('pu-unit')||{}).value||'').trim() || 'عدد';
+    const unitQty = parseFloat((document.getElementById('pu-unitqty')||{}).value) || 1;
+    const packUnit = ((document.getElementById('pu-packunit')||{}).value||'').trim();
+    const packPer = parseInt((document.getElementById('pu-packper')||{}).value) || 0;
+    const sellPrice = parseFloat((document.getElementById('pu-sellprice')||{}).value) || 0;
+    const sellPack = parseFloat((document.getElementById('pu-sellpack')||{}).value) || 0;
+    
+    if(!unit) throw new Error('واحد پایه خالی است');
+    if(unitQty<=0) throw new Error('تعداد عدد نمی‌تواند صفر یا منفی باشد');
+    if(packUnit && packPer<=1) throw new Error('واحد بزرگ فقط بدون معنا است؛ یا خالی بگذارید یا packPer≥۲');
+    if(!sellPrice) throw new Error('قیمت فروش را بنویسید');
+    
+    const updates = {
+      unit: unit,
+      unitQty: round4(unitQty),
+      packUnit: packUnit ? packUnit : '',
+      packPer: packUnit ? Math.max(2, packPer) : 0,
+      sellPrice: round2(sellPrice),
+      sellPricePack: (packUnit && packPer>1 && sellPack>0) ? round2(sellPack) : 0,
+      ...this.editMeta()
+    };
+    
+    return updateDoc(doc(cols.products, id), updates)
+      .then(()=>this.toast('واحدها و قیمت‌ها ذخیره شدند'))
+      .catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید'); });
+  },
+
   applySaleDiscount(saleId){
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
     if(sale.status==='cancelled'){ this.toast('این فاکتور باطل شده است.'); return; }
@@ -3238,9 +3337,9 @@ const App = {
     if(!name){ this.toast('نام محصول را بنویسید'); return; }
     const pid=uid();
     setDoc(doc(cols.products, pid), {id:pid, name, unit, stock, avgCost:cost, sellPrice:sell,
-      midUnit:hasMid?midUnit:'', midPer:hasMid?midPer:0,
-      packUnit:packSize>1?packUnit:'', packSize:packSize>1?packSize:0,
-      sellPriceMid:0, sellPricePack:0, defaultSaleUnit:packSize>0?packUnit:(hasMid?midUnit:unit),
+      // midUnit:hasMid?// midUnit:'', // midPer:hasMid?// midPer:0,
+      packUnit:packSize>1?packUnit:'', // packSize:packSize>1?// packSize:0,
+      sellPriceMid:0, sellPricePack:0, defaultSaleUnit:packSize>0?packUnit:(hasMid?// midUnit:unit),
       ...this.recordMeta()}).then(()=>this.toast('محصول اضافه شد')).catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
   },
   editProduct(id){
@@ -3394,7 +3493,7 @@ const App = {
       }).join('');
       pv.innerHTML = `<b style="font-size:13.5px;">پیش‌نمایش</b>
       <table class="inv-table"><thead><tr><th>واحد</th><th>ظرفیت</th><th>تمام‌شده</th><th>فروش</th><th>سود</th></tr></thead><tbody>${rows}</tbody></table>
-      <div class="field-note">${escapeHtml(this.unitLadderLabel({unit:r2.base, midUnit:r2.hasMid?r2.midName:'', midPer:r2.hasMid?r2.midPer:0, packUnit:r2.hasPack?r2.packName:'', packSize:r2.hasPack?r2.packSize:0})||'این محصول فقط یک واحد دارد.')}</div>`;
+      <div class="field-note">${escapeHtml(this.unitLadderLabel({unit:r2.base, // midUnit:r2.hasMid?r2.midName:'', // midPer:r2.hasMid?r2.// midPer:0, packUnit:r2.hasPack?r2.packName:'', // packSize:r2.hasPack?r2.// packSize:0})||'این محصول فقط یک واحد دارد.')}</div>`;
     }
   },
   saveProductUnits(id){
@@ -3416,8 +3515,8 @@ const App = {
     }
     const fields={
       unit:r.base,
-      midUnit: r.hasMid?r.midName:'', midPer: r.hasMid?r.midPer:0,
-      packUnit: r.hasPack?r.packName:'', packSize: r.hasPack?r.packSize:0,
+      // midUnit: r.hasMid?r.midName:'', // midPer: r.hasMid?r.// midPer:0,
+      packUnit: r.hasPack?r.packName:'', // packSize: r.hasPack?r.// packSize:0,
       avgCost,
       sellPrice: round2(basePrice),
       sellPriceMid: (r.hasMid && r.sellMid>0)?round2(r.sellMid):0,
