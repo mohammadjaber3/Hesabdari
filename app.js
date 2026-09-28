@@ -1,34 +1,17 @@
 /* ---------- Firebase ----------
-   بارگذاری مقاوم: اگر gstatic در شبکهٔ کاربر در دسترس نباشد، CDNهای جایگزین
-   امتحان می‌شوند. همچنین اگر IndexedDB/persistent cache مشکل داشته باشد،
-   Firestore به حالت عادی برمی‌گردد تا کل برنامه به خاطر cache از کار نیفتد.
+   نسخهٔ پایدار برای مرورگر: از import استاتیک استفاده می‌کنیم تا
+   parser مرورگر مجبور به پردازش dynamic import + top-level await نباشد.
+   Firebase مستندات رسمی استفاده از browser ESM را با gstatic ارائه می‌کند.
 */
-async function _importFallback(urls){
-  let last=null;
-  for(const url of urls){
-    try{ return await import(url); }
-    catch(e){ last=e; console.warn('Firebase CDN failed:',url,e); }
-  }
-  throw last || new Error('Firebase SDK بارگذاری نشد.');
-}
-const _fbAppModule = await _importFallback([
-  'https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js',
-  'https://cdn.jsdelivr.net/npm/firebase@12.15.0/firebase-app.js',
-  'https://unpkg.com/firebase@12.15.0/firebase-app.js'
-]);
-const _fbAuthModule = await _importFallback([
-  'https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js',
-  'https://cdn.jsdelivr.net/npm/firebase@12.15.0/firebase-auth.js',
-  'https://unpkg.com/firebase@12.15.0/firebase-auth.js'
-]);
-const _fbFirestoreModule = await _importFallback([
-  'https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js',
-  'https://cdn.jsdelivr.net/npm/firebase@12.15.0/firebase-firestore.js',
-  'https://unpkg.com/firebase@12.15.0/firebase-firestore.js'
-]);
-const { initializeApp } = _fbAppModule;
-const { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence } = _fbAuthModule;
-const { initializeFirestore, getFirestore, persistentLocalCache, persistentMultipleTabManager, doc, getDoc, getDocs, setDoc:_setDoc, updateDoc:_updateDoc, deleteDoc:_deleteDoc, onSnapshot, collection, writeBatch:_writeBatch, increment } = _fbFirestoreModule;
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
+import {
+  getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence
+} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
+import {
+  initializeFirestore, getFirestore, persistentLocalCache, persistentMultipleTabManager,
+  doc, getDoc, getDocs, setDoc as _setDoc, updateDoc as _updateDoc, deleteDoc as _deleteDoc, onSnapshot,
+  collection, writeBatch as _writeBatch, increment
+} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 
 /* ---------- قفل نرمِ نقش «شریک» (فقط دیدن) ----------
    دیوارِ اصلی همان firestore.rules است، ولی اگر همان‌جا جلوی نوشتن گرفته شود
