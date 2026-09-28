@@ -48,6 +48,17 @@
 
 <script type="module" src="./app.js"></script>
 <script>
+  window.addEventListener('error', () => {
+    const screen = document.getElementById('screen');
+    if (screen && !window.App) {
+      screen.innerHTML = '<div class="card" style="margin-top:24px;"><h2 class="section-title" style="margin-top:0;">خطا در باز کردن برنامه</h2><p>کد برنامه اجرا نشد. صفحه را دوباره بارگذاری کنید.</p><button class="btn btn-primary" onclick="location.reload()">تلاش دوباره</button></div>';
+      const sync = document.getElementById('sync-text');
+      if (sync) sync.textContent = 'خطا در اجرای برنامه';
+    }
+  });
+</script>
+
+<script>
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('./sw.js').catch(err => console.warn('SW register failed', err));

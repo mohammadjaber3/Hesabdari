@@ -1108,9 +1108,12 @@ const App = {
   productUnits(p){
     const base = (p && p.unit) ? String(p.unit).trim() : 'عدد';
     const out = [];
+    const midPer = Number(p && p.midPer)||0;
+    const midUnit = p && p.midUnit ? String(p.midUnit).trim() : '';
     const packPer = Number(p && p.packPer)||0;
     const packUnit = p && p.packUnit ? String(p.packUnit).trim() : '';
     if(packUnit && packPer>1) out.push({key:'pack', name:packUnit, factor:packPer});
+    if(midUnit && midPer>1) out.push({key:'mid', name:midUnit, factor:midPer});
     out.push({key:'base', name:base, factor:1});
     return out;
   },
@@ -1223,13 +1226,16 @@ const App = {
     const gs=id=>{ const el=document.getElementById(id); return el?String(el.value||'').trim():''; };
     const gn=id=>{ const el=document.getElementById(id); return el?(parseFloat(el.value)||0):0; };
     const base=gs(prefix+'-newunit')||'عدد';
+    const unitQty=gn(prefix+'-newunitqty')||1;
+    const midUnit=gs(prefix+'-newmidunit'), midPer=gn(prefix+'-newmidper');
     const packUnit=gs(prefix+'-newpackunit'), packPer=gn(prefix+'-newpackper');
-    const unitQty = gn(prefix+'-newunitqty');
+    const hasMid=!!(midUnit && midPer>1);
+    const packSize=(packUnit && packPer>0) ? (hasMid ? round2(packPer*midPer) : packPer) : 0;
     return {
-      name: gs(prefix+'-newname'), unit: base, stock:0, avgCost:0, sellPrice:0,
-      // midUnit: hasMid?// midUnit:'', // midPer: hasMid?// midPer:0,
-      packUnit: packSize>1?packUnit:'', // packSize: packSize>1?// packSize:0,
-      defaultSaleUnit: packSize>0?packUnit:(hasMid?// midUnit:base)
+      name: gs(prefix+'-newname'), unit: base, unitQty: round4(unitQty), stock:0, avgCost:0, sellPrice:0,
+      midUnit: hasMid ? midUnit : '', midPer: hasMid ? round4(midPer) : 0,
+      packUnit: packSize>1 ? packUnit : '', packPer: packSize>1 ? round4(packSize) : 0,
+      defaultSaleUnit: packSize>0 ? packUnit : (hasMid ? midUnit : base)
     };
   },
   formUnit(prefix){
@@ -3336,10 +3342,10 @@ const App = {
     const packSize=(packUnit && packPer>0) ? (hasMid?round2(packPer*midPer):packPer) : 0;
     if(!name){ this.toast('نام محصول را بنویسید'); return; }
     const pid=uid();
-    setDoc(doc(cols.products, pid), {id:pid, name, unit, stock, avgCost:cost, sellPrice:sell,
-      // midUnit:hasMid?// midUnit:'', // midPer:hasMid?// midPer:0,
-      packUnit:packSize>1?packUnit:'', // packSize:packSize>1?// packSize:0,
-      sellPriceMid:0, sellPricePack:0, defaultSaleUnit:packSize>0?packUnit:(hasMid?// midUnit:unit),
+    setDoc(doc(cols.products, pid), {id:pid, name, unit, unitQty:1, stock, avgCost:cost, sellPrice:sell,
+      midUnit:hasMid ? midUnit : '', midPer:hasMid ? round4(midPer) : 0,
+      packUnit:packSize>1 ? packUnit : '', packPer:packSize>1 ? round4(packSize) : 0,
+      sellPriceMid:0, sellPricePack:0, defaultSaleUnit:packSize>0 ? packUnit : (hasMid ? midUnit : unit),
       ...this.recordMeta()}).then(()=>this.toast('محصول اضافه شد')).catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
   },
   editProduct(id){
@@ -3515,13 +3521,15 @@ const App = {
     }
     const fields={
       unit:r.base,
-      // midUnit: r.hasMid?r.midName:'', // midPer: r.hasMid?r.// midPer:0,
-      packUnit: r.hasPack?r.packName:'', // packSize: r.hasPack?r.// packSize:0,
+      midUnit:r.hasMid ? r.midName : '',
+      midPer:r.hasMid ? round4(r.midPer) : 0,
+      packUnit:r.hasPack ? r.packName : '',
+      packPer:r.hasPack ? round4(r.packSize) : 0,
       avgCost,
       sellPrice: round2(basePrice),
       sellPriceMid: (r.hasMid && r.sellMid>0)?round2(r.sellMid):0,
       sellPricePack: (r.hasPack && r.sellPack>0)?round2(r.sellPack):0,
-      defaultSaleUnit: names.includes(r.defaultUnit)?r.defaultUnit:(r.packUnit||r.midUnit||r.base),
+      defaultSaleUnit: names.includes(r.defaultUnit)?r.defaultUnit:(r.hasPack?r.packName:(r.hasMid?r.midName:r.base)),
       ...this.editMeta()
     };
     return updateDoc(doc(cols.products, id), fields).then(()=>this.toast('واحدها و قیمت‌ها ذخیره شد'));
