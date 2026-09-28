@@ -1,13 +1,34 @@
-/* ---------- Firebase ---------- */
-import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
-import {
-  getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence
-} from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
-import {
-  initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
-  doc, getDoc, getDocs, setDoc as _setDoc, updateDoc as _updateDoc, deleteDoc as _deleteDoc, onSnapshot,
-  collection, writeBatch as _writeBatch, increment
-} from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
+/* ---------- Firebase ----------
+   بارگذاری مقاوم: اگر gstatic در شبکهٔ کاربر در دسترس نباشد، CDNهای جایگزین
+   امتحان می‌شوند. همچنین اگر IndexedDB/persistent cache مشکل داشته باشد،
+   Firestore به حالت عادی برمی‌گردد تا کل برنامه به خاطر cache از کار نیفتد.
+*/
+async function _importFallback(urls){
+  let last=null;
+  for(const url of urls){
+    try{ return await import(url); }
+    catch(e){ last=e; console.warn('Firebase CDN failed:',url,e); }
+  }
+  throw last || new Error('Firebase SDK بارگذاری نشد.');
+}
+const _fbAppModule = await _importFallback([
+  'https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js',
+  'https://cdn.jsdelivr.net/npm/firebase@12.15.0/firebase-app.js',
+  'https://unpkg.com/firebase@12.15.0/firebase-app.js'
+]);
+const _fbAuthModule = await _importFallback([
+  'https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js',
+  'https://cdn.jsdelivr.net/npm/firebase@12.15.0/firebase-auth.js',
+  'https://unpkg.com/firebase@12.15.0/firebase-auth.js'
+]);
+const _fbFirestoreModule = await _importFallback([
+  'https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js',
+  'https://cdn.jsdelivr.net/npm/firebase@12.15.0/firebase-firestore.js',
+  'https://unpkg.com/firebase@12.15.0/firebase-firestore.js'
+]);
+const { initializeApp } = _fbAppModule;
+const { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence } = _fbAuthModule;
+const { initializeFirestore, getFirestore, persistentLocalCache, persistentMultipleTabManager, doc, getDoc, getDocs, setDoc:_setDoc, updateDoc:_updateDoc, deleteDoc:_deleteDoc, onSnapshot, collection, writeBatch:_writeBatch, increment } = _fbFirestoreModule;
 
 /* ---------- قفل نرمِ نقش «شریک» (فقط دیدن) ----------
    دیوارِ اصلی همان firestore.rules است، ولی اگر همان‌جا جلوی نوشتن گرفته شود
@@ -42,9 +63,15 @@ const firebaseConfig = {
 };
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
-const db = initializeFirestore(fbApp, {
-  localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
-});
+let db;
+try{
+  db = initializeFirestore(fbApp, {
+    localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+  });
+}catch(e){
+  console.warn('Persistent Firestore cache unavailable; using normal Firestore:', e);
+  db = getFirestore(fbApp);
+}
 setPersistence(auth, browserLocalPersistence).catch(()=>{});
 
 const BIZ_ID = 'main';
@@ -3499,7 +3526,7 @@ const App = {
       }).join('');
       pv.innerHTML = `<b style="font-size:13.5px;">پیش‌نمایش</b>
       <table class="inv-table"><thead><tr><th>واحد</th><th>ظرفیت</th><th>تمام‌شده</th><th>فروش</th><th>سود</th></tr></thead><tbody>${rows}</tbody></table>
-      <div class="field-note">${escapeHtml(this.unitLadderLabel({unit:r2.base, // midUnit:r2.hasMid?r2.midName:'', // midPer:r2.hasMid?r2.// midPer:0, packUnit:r2.hasPack?r2.packName:'', // packSize:r2.hasPack?r2.// packSize:0})||'این محصول فقط یک واحد دارد.')}</div>`;
+      <div class="field-note">${escapeHtml(this.unitLadderLabel({unit:r2.base, unitQty:1, packUnit:r2.hasPack?r2.packName:'', packPer:r2.hasPack?r2.packSize:0})||'این محصول فقط یک واحد دارد.')}</div>`;
     }
   },
   saveProductUnits(id){
