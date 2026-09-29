@@ -362,6 +362,34 @@ function ic(name, size, extraClass){
 }
 
 /* ---------- App ---------- */
+function normalizeProductUnitsRecord(raw){
+  const p={...raw};
+  const oldUnit=String(p.unit||'عدد').trim();
+  const oldQty=Number(p.unitQty)||1;
+  // Legacy schema: unit was the smallest sellable package and unitQty was its
+  // contents. Convert only this unmistakable shape; modern products already use unit='عدد'.
+  if(oldUnit!=='عدد' && oldQty>1 && !p.midUnit){
+    const oldStock=Number(p.stock)||0;
+    const oldAvg=Number(p.avgCost)||0;
+    const oldSell=Number(p.sellPrice)||0;
+    p.unit='عدد';
+    p.unitQty=1;
+    p.midUnit=oldUnit;
+    p.midPer=oldQty;
+    p.stock=round4(oldStock*oldQty);
+    p.avgCost=round4(oldAvg/oldQty);
+    p.sellPrice=round2(oldSell/oldQty);
+    p.sellPriceMid=Number(p.sellPriceMid)>0?Number(p.sellPriceMid):round2(oldSell);
+    if(p.packUnit && Number(p.packPer)>0 && Number(p.packPer)<=oldQty){
+      p.packPer=round4(Number(p.packPer)*oldQty);
+    }
+    p.defaultSaleUnit=p.defaultSaleUnit===oldUnit ? oldUnit : (p.packUnit||oldUnit);
+    p.saleUnits=Array.isArray(p.saleUnits)?p.saleUnits:[p.packUnit||oldUnit];
+    p._unitSchemaMigrated=true;
+  }
+  return p;
+}
+
 const App = {
   state: { settings: defaultSettings(), products:[], customers:[], suppliers:[], sales:[], purchases:[], expenses:[], payments:[], openingEntries:[] },
   tab:'dashboard', sub:null,
@@ -536,7 +564,17 @@ const App = {
       const unsub = onSnapshot(cols[name], {includeMetadataChanges:true}, (snap)=>{
         const arr = [];
         snap.forEach(d=>arr.push(d.data()));
-        this.state[name] = arr;
+        if(name==='products'){
+          const normalized=arr.map(normalizeProductUnitsRecord);
+          this.state[name]=normalized;
+          // مهاجرت فقط برای مدیر نوشته می‌شود؛ کاربر شریک فقط نسخهٔ محاسباتیِ سازگار را می‌بیند.
+          if(this.isOwner()){
+            normalized.filter(p=>p._unitSchemaMigrated).forEach(p=>{
+              const { _unitSchemaMigrated, ...persisted }=p;
+              updateDoc(doc(cols.products,p.id), persisted).catch(e=>console.warn('product unit migration failed',e));
+            });
+          }
+        } else this.state[name] = arr;
         if(name==='sales' || name==='purchases') migrateRecordArrays(this.state.sales, this.state.purchases);
         this._loadedParts.add(name);
         markPart(name, snap.metadata.hasPendingWrites);
@@ -1116,10 +1154,14 @@ const App = {
      - stock: موجودی = به واحد پایه
    ========================================================= */
   productUnits(p){
-    const base = (p && p.unit) ? String(p.unit).trim() : 'عدد';
+    const rawUnit = (p && p.unit) ? String(p.unit).trim() : 'عدد';
+    // سازگاری با محصولات قدیمی: در نسخهٔ قبلی ممکن بود unit=قوطی و unitQty=24
+    // باشد. آن داده را بدون دست‌زدن به اسناد قبلی، هنگام محاسبه به «عدد ← قوطی» تفسیر می‌کنیم.
+    const legacyMid = !p?.midUnit && Number(p?.unitQty)>1 && rawUnit!=='عدد';
+    const base = legacyMid ? 'عدد' : rawUnit;
     const out = [];
-    const midPer = Number(p && p.midPer)||0;
-    const midUnit = p && p.midUnit ? String(p.midUnit).trim() : '';
+    const midPer = legacyMid ? Number(p.unitQty) : Number(p && p.midPer)||0;
+    const midUnit = legacyMid ? rawUnit : (p && p.midUnit ? String(p.midUnit).trim() : '');
     const packPer = Number(p && p.packPer)||0;
     const packUnit = p && p.packUnit ? String(p.packUnit).trim() : '';
     if(packUnit && packPer>1) out.push({key:'pack', name:packUnit, factor:packPer});
@@ -1127,6 +1169,12 @@ const App = {
     out.push({key:'base', name:base, factor:1});
     return out;
   },
+  saleUnits(p){
+    const all=this.productUnits(p);
+    const configured=Array.isArray(p&&p.saleUnits) ? p.saleUnits.map(String) : null;
+    return all.filter(u=>u.key!=='base' && (!configured || configured.includes(u.name)));
+  },
+  canSellFractional(p){ return !!(p && p.allowFractionalSale); },
   unitByName(p, name){
     const ladder=this.productUnits(p);
     return ladder.find(u=>u.name===name) || ladder[ladder.length-1];
@@ -1145,34 +1193,25 @@ const App = {
   qtyBreakdown(p, baseQty){
     const q0=Number(baseQty)||0;
     const neg=q0<0; let q=Math.abs(q0);
-    const ladder=this.productUnits(p);
+    const ladder=this.saleUnits(p);
+    if(!ladder.length) return (neg?'-':'')+fmtQty(q);
     const parts=[];
-    for(let i=0;i<ladder.length;i++){
-      const u=ladder[i];
+    for(const u of ladder){
       const n=Math.floor(q/u.factor+1e-9);
-      if(n>0){ 
-        parts.push(fmtQty(n)+' '+u.name); 
-        q-=n*u.factor; 
-      }
-      if(i===ladder.length-1){
-        const rest=Math.round(q*1000)/1000;
-        if(rest>0.0001 && parts.length>0) parts.push(fmtQty(rest)+' '+u.name);
-        else if(rest>0.0001 || parts.length===0) parts.push(fmtQty(rest)+' '+u.name);
-        break;
-      }
+      if(n>0){ parts.push(fmtQty(n)+' '+u.name); q-=n*u.factor; }
     }
+    if(!parts.length) parts.push('0 '+ladder[ladder.length-1].name);
     return (neg?'-':'')+parts.join(' و ');
   },
   
   unitLadderLabel(p){
-    const base = (p && p.unit) || 'عدد';
-    const unitQty = Number(p && p.unitQty)||0;
-    const packPer = Number(p && p.packPer)||0;
-    const packUnit = (p && p.packUnit) || '';
-    const parts = [];
-    if(unitQty>1) parts.push('۱ '+base+' = '+fmtQty(unitQty)+' عدد');
-    if(packUnit && packPer>1) parts.push('۱ '+packUnit+' = '+fmtQty(packPer)+' '+base);
-    if(packUnit && packPer>1 && unitQty>1) parts.push('۱ '+packUnit+' = '+fmtQty(packPer*unitQty)+' عدد');
+    const ladder=this.productUnits(p);
+    const parts=[];
+    for(let i=0;i<ladder.length-1;i++){
+      const bigger=ladder[i], smaller=ladder[i+1];
+      const ratio=bigger.factor/smaller.factor;
+      if(ratio>1) parts.push('۱ '+bigger.name+' = '+fmtQty(ratio)+' '+smaller.name);
+    }
     return parts.join(' · ');
   },
 
@@ -1245,7 +1284,9 @@ const App = {
       name: gs(prefix+'-newname'), unit: base, unitQty: round4(unitQty), stock:0, avgCost:0, sellPrice:0,
       midUnit: hasMid ? midUnit : '', midPer: hasMid ? round4(midPer) : 0,
       packUnit: packSize>1 ? packUnit : '', packPer: packSize>1 ? round4(packSize) : 0,
-      defaultSaleUnit: packSize>0 ? packUnit : (hasMid ? midUnit : base)
+      defaultSaleUnit: packSize>0 ? packUnit : (hasMid ? midUnit : base),
+      saleUnits: [packSize>0 ? packUnit : (hasMid ? midUnit : base)].filter(Boolean),
+      allowFractionalSale: false
     };
   },
   formUnit(prefix){
@@ -1257,14 +1298,14 @@ const App = {
   fillUnitSelect(prefix, keepPrice){
     const sel=document.getElementById(prefix+'-unit'); if(!sel) return;
     const p=this.formProduct(prefix);
-    const ladder = p ? this.productUnits(p) : [];
+    const ladder = p ? (prefix==='sp' ? this.saleUnits(p) : this.productUnits(p)) : [];
     const prev=sel.value;
     const baseName = p ? (p.unit||'عدد') : 'عدد';
     sel.innerHTML = ladder.map(u=>`<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}${u.factor>1?' — '+fmtQty(u.factor)+' '+escapeHtml(baseName):''}</option>`).join('');
     let def=prev;
     if(!ladder.some(u=>u.name===prev)){
       if(prefix==='pp') def = ladder.length?ladder[0].name:'';
-      else def = (p&&p.defaultSaleUnit && ladder.some(u=>u.name===p.defaultSaleUnit)) ? p.defaultSaleUnit : (ladder.length?ladder[ladder.length-1].name:'');
+      else def = (p&&p.defaultSaleUnit && ladder.some(u=>u.name===p.defaultSaleUnit)) ? p.defaultSaleUnit : (ladder.length?ladder[0].name:'');
     }
     sel.value=def;
     if(!keepPrice) this.autofillUnitPrice(prefix);
@@ -1336,6 +1377,8 @@ const App = {
     const qtyIn = parseFloat(document.getElementById('sp-qty').value);
     const priceIn = parseFloat(document.getElementById('sp-price').value);
     if(!qtyIn||qtyIn<=0){ this.toast('تعداد را درست بنویسید'); return; }
+    if(!u || u.key==='base'){ this.toast('واحد پایه فقط برای محاسبه است و در فروش عادی قابل انتخاب نیست.'); return; }
+    if(!this.canSellFractional(product) && Math.abs(qtyIn-Math.round(qtyIn))>1e-9){ this.toast('برای این محصول فروش کسری فعال نیست؛ تعداد را به واحد کامل بنویسید.'); return; }
     if(isNaN(priceIn)||priceIn<0){ this.toast('قیمت فروش را بنویسید'); return; }
     // همه‌چیز به واحد پایه تبدیل و ذخیره می‌شود؛ واحد انتخابی فقط برای نمایش نگه داشته می‌شود
     const qty = round2(qtyIn*u.factor);
@@ -1401,8 +1444,10 @@ const App = {
       const draftP = draftProducts.find(dp=>dp.id===it.productId);
       if(draftP){
         batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, stock:-it.qty, avgCost:0, sellPrice:it.unitPrice,
-          // midUnit:draftP.midUnit||'', // midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', // packSize:draftP.packSize||0,
-          defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||draftP.unit, sellPriceMid:0, sellPricePack:0});
+          midUnit:draftP.midUnit||'', midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', packPer:draftP.packPer||0,
+          defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||draftP.unit,
+          saleUnits:draftP.saleUnits||[draftP.packUnit||draftP.midUnit||draftP.unit].filter(Boolean), allowFractionalSale:!!draftP.allowFractionalSale,
+          sellPriceMid:0, sellPricePack:0});
       } else {
         batch.update(doc(cols.products, it.productId), { stock: increment(-it.qty) });
       }
@@ -1945,8 +1990,10 @@ const App = {
       const draftP = draftProducts.find(dp=>dp.id===it.productId);
       if(draftP){
         batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, unitQty:draftP.unitQty||1, stock:it.qty, avgCost:unitCostAFN, sellPrice:round2(unitCostAFN*1.15),
-          // midUnit:draftP.midUnit||'', // midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', // packSize:draftP.packSize||0,
-          defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||draftP.unit, sellPriceMid:0, sellPricePack:0, ...this.recordMeta()});
+          midUnit:draftP.midUnit||'', midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', packPer:draftP.packPer||0,
+          defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||draftP.unit,
+          saleUnits:draftP.saleUnits||[draftP.packUnit||draftP.midUnit||draftP.unit].filter(Boolean), allowFractionalSale:!!draftP.allowFractionalSale,
+          sellPriceMid:0, sellPricePack:0, ...this.recordMeta()});
       } else {
         const p = this.state.products.find(pp=>pp.id===it.productId);
         if(p){
@@ -2545,12 +2592,12 @@ const App = {
     const p=this._aiProduct();
     const sel=document.getElementById('ai-unit'); if(!sel) return;
     if(!p){ sel.innerHTML=''; const pe=document.getElementById('ai-price'); if(pe) pe.value=''; this.onAddItemUnitChange(true); return; }
-    const ladder=this.productUnits(p);
+    const ladder=this._aiMode==='sale' ? this.saleUnits(p) : this.productUnits(p);
     const base=p.unit||'عدد';
     sel.innerHTML=ladder.map(u=>`<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}${u.factor>1?' — '+fmtQty(u.factor)+' '+escapeHtml(base):''}</option>`).join('');
     sel.value = this._aiMode==='purchase'
       ? ladder[0].name
-      : ((p.defaultSaleUnit && ladder.some(u=>u.name===p.defaultSaleUnit)) ? p.defaultSaleUnit : ladder[ladder.length-1].name);
+      : ((p.defaultSaleUnit && ladder.some(u=>u.name===p.defaultSaleUnit)) ? p.defaultSaleUnit : ladder[0].name);
     this.onAddItemUnitChange();
   },
   onAddItemUnitChange(keepPrice){
@@ -2586,6 +2633,8 @@ const App = {
     const qtyIn=parseFloat(document.getElementById('ai-qty').value);
     const priceIn=parseFloat(document.getElementById('ai-price').value);
     if(!qtyIn||qtyIn<=0) throw new Error('تعداد نامعتبر است.');
+    if(this._aiMode==='sale' && (!u || u.key==='base')) throw new Error('واحد پایه فقط برای محاسبه است و در فروش عادی قابل انتخاب نیست.');
+    if(this._aiMode==='sale' && !this.canSellFractional(product) && Math.abs(qtyIn-Math.round(qtyIn))>1e-9) throw new Error('برای این محصول فروش کسری فعال نیست.');
     if(isNaN(priceIn)||priceIn<0) throw new Error('قیمت نامعتبر است.');
     const qty=round2(qtyIn*u.factor);
     const perBase=priceIn/u.factor;
@@ -3352,10 +3401,11 @@ const App = {
     const packSize=(packUnit && packPer>0) ? (hasMid?round2(packPer*midPer):packPer) : 0;
     if(!name){ this.toast('نام محصول را بنویسید'); return; }
     const pid=uid();
+    const defaultSaleUnit=packSize>0 ? packUnit : (hasMid ? midUnit : unit);
     setDoc(doc(cols.products, pid), {id:pid, name, unit, unitQty:1, stock, avgCost:cost, sellPrice:sell,
       midUnit:hasMid ? midUnit : '', midPer:hasMid ? round4(midPer) : 0,
       packUnit:packSize>1 ? packUnit : '', packPer:packSize>1 ? round4(packSize) : 0,
-      sellPriceMid:0, sellPricePack:0, defaultSaleUnit:packSize>0 ? packUnit : (hasMid ? midUnit : unit),
+      sellPriceMid:0, sellPricePack:0, defaultSaleUnit, saleUnits:defaultSaleUnit?[defaultSaleUnit]:[], allowFractionalSale:false,
       ...this.recordMeta()}).then(()=>this.toast('محصول اضافه شد')).catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
   },
   editProduct(id){
@@ -3403,11 +3453,13 @@ const App = {
       <div><label>نام واحد میانی (اختیاری)</label><input id="pu-mid" value="${escapeHtml(midU?midU.name:'')}" placeholder="قوطی / بسته" oninput="App.previewProductUnits()"></div>
       <div><label id="pu-midper-label">هر قوطی حاوی چند عدد؟</label><input id="pu-midper" type="number" inputmode="decimal" step="0.01" value="${midU?midU.factor:''}" placeholder="24" oninput="App.previewProductUnits()"></div>
     </div>
-    <div class="field-note">اگر کارتن مستقیم عدد دارد (مثل کوکو سطلی ۱۷ عددی)، واحد میانی را خالی بگذارید.</div>
+    <div class="field-note">اگر کارتن مستقیم عدد دارد، واحد میانی را خالی بگذارید. «عدد» فقط واحد داخلی است و در فروش عادی نشان داده نمی‌شود.</div>
+    <div style="margin-top:12px;"><label>واحدهای مجاز فروش</label><div id="pu-sale-units" class="grid2"></div></div>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:10px;"><input id="pu-fractional" type="checkbox" ${p.allowFractionalSale?'checked':''}> فروش کسری این محصول مجاز باشد (مثلاً ۰٫۵ بسته)</label>
     <hr class="divider">
     <b style="font-size:13.5px;">قیمت خرید (تمام‌شده)</b>
     <div class="grid2">
-      <div><label>مبلغ</label><input id="pu-cost" type="number" inputmode="decimal" step="0.01" value="${round2(p.avgCost||0)}" oninput="App.previewProductUnits()"></div>
+      <div><label>مبلغ</label><input id="pu-cost" type="number" inputmode="decimal" step="0.01" value="" oninput="this.dataset.touched='1'; App.previewProductUnits()"></div>
       <div><label>برای هر</label><select id="pu-costunit" onchange="App.previewProductUnits()"></select></div>
     </div>
     <div class="field-note">قیمت خرید یک کارتن را بنویسید و واحد «کارتن» را انتخاب کنید؛ قیمت تمام‌شدهٔ قوطی/بسته و عدد خودکار حساب می‌شود.</div>
@@ -3442,6 +3494,9 @@ const App = {
         const du=document.getElementById('pu-default');
         if(du) du.dataset.want = p.defaultSaleUnit || (p.packUnit || (midU?midU.name:(p.unit||'عدد')));
         App.previewProductUnits();
+        const costUnit=App.productUnits(p).find(u=>u.name===(cu&&cu.value)) || App.productUnits(p)[0];
+        const ce=document.getElementById('pu-cost');
+        if(ce && costUnit){ ce.value=App.unitCost(p,costUnit)>0?App.unitCost(p,costUnit):''; ce.dataset.touched=''; }
       },
       onSubmit: ()=> this.saveProductUnits(id)
     });
@@ -3463,7 +3518,9 @@ const App = {
     return {base, packName, packPer, midName, midPer, hasMid, hasPack, packSize, ladder,
       cost:gn('pu-cost'), costUnit:gs('pu-costunit'),
       sellPack:gn('pu-sell-pack'), sellMid:gn('pu-sell-mid'), sellBase:gn('pu-sell-base'),
-      defaultUnit:gs('pu-default')};
+      defaultUnit:gs('pu-default'),
+      saleUnits:Array.from(document.querySelectorAll('#pu-sale-units input[data-unit]')).filter(el=>el.checked).map(el=>el.dataset.unit),
+      allowFractionalSale:!!document.getElementById('pu-fractional')?.checked};
   },
   previewProductUnits(){
     const r=this._puRead();
@@ -3484,8 +3541,17 @@ const App = {
       sel.value = r.ladder.some(u=>u.name===want) ? want : r.ladder[0].name;
       delete sel.dataset.want;
     });
+    const su=document.getElementById('pu-sale-units');
+    if(su){
+      const current=this.state.products.find(x=>x.id===this._puId);
+      const selected=new Set(Array.isArray(current&&current.saleUnits)?current.saleUnits:r.ladder.filter(u=>u.key!=='base').map(u=>u.name));
+      su.innerHTML=r.ladder.filter(u=>u.key!=='base').map(u=>`<label style="display:flex;align-items:center;gap:7px;"><input type="checkbox" data-unit="${escapeHtml(u.name)}" ${selected.has(u.name)?'checked':''}> ${escapeHtml(u.name)} <span class="sub">(${fmtQty(u.factor)} ${escapeHtml(r.base)})</span></label>`).join('') || '<span class="sub">واحد بسته‌بندی‌شده‌ای برای فروش تعریف نشده است.</span>';
+    }
     const r2=this._puRead();
     const costUnit = r2.ladder.find(u=>u.name===r2.costUnit) || r2.ladder[r2.ladder.length-1];
+    const costEl=document.getElementById('pu-cost');
+    const currentProduct=this.state.products.find(x=>x.id===this._puId);
+    if(costEl && currentProduct && costUnit && costEl.dataset.touched!=='1') costEl.value=this.unitCost(currentProduct,costUnit)>0?this.unitCost(currentProduct,costUnit):'';
     const costPerBase = r2.cost>0 ? r2.cost/costUnit.factor : 0;
     // قیمت فروش پایه: اگر خالی باشد از واحد بزرگ‌تر حساب می‌شود
     let basePrice=r2.sellBase;
@@ -3521,8 +3587,9 @@ const App = {
     if(r.hasPack && r.hasMid && r.packSize<=r.midPer) throw new Error('کارتن باید از قوطی/بسته بزرگ‌تر باشد.');
     const names=r.ladder.map(u=>u.name);
     if(new Set(names).size!==names.length) throw new Error('نام واحدها باید با هم متفاوت باشد.');
+    if(!r.saleUnits.length) throw new Error('حداقل یک واحد فروش را انتخاب کنید.');
     const costUnit=r.ladder.find(u=>u.name===r.costUnit)||r.ladder[r.ladder.length-1];
-    const avgCost = r.cost>0 ? round2(r.cost/costUnit.factor) : 0;
+    const avgCost = r.cost>0 ? round4(r.cost/costUnit.factor) : 0;
     let basePrice=r.sellBase;
     if(!(basePrice>0)){
       if(r.hasMid && r.sellMid>0) basePrice=round2(r.sellMid/r.midPer);
@@ -3539,7 +3606,9 @@ const App = {
       sellPrice: round2(basePrice),
       sellPriceMid: (r.hasMid && r.sellMid>0)?round2(r.sellMid):0,
       sellPricePack: (r.hasPack && r.sellPack>0)?round2(r.sellPack):0,
-      defaultSaleUnit: names.includes(r.defaultUnit)?r.defaultUnit:(r.hasPack?r.packName:(r.hasMid?r.midName:r.base)),
+      saleUnits:r.saleUnits,
+      allowFractionalSale:!!r.allowFractionalSale,
+      defaultSaleUnit:r.saleUnits.includes(r.defaultUnit)?r.defaultUnit:r.saleUnits[0],
       ...this.editMeta()
     };
     return updateDoc(doc(cols.products, id), fields).then(()=>this.toast('واحدها و قیمت‌ها ذخیره شد'));
