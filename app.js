@@ -3445,8 +3445,7 @@ const App = {
     const currentProduct=this.state.products.find(x=>x.id===this._puId);
     if(costEl && currentProduct && costUnit && costEl.dataset.touched!=='1') costEl.value=this.unitCost(currentProduct,costUnit)>0?this.unitCost(currentProduct,costUnit):'';
     const costPerBase = costUnit && r2.cost>0 ? r2.cost/costUnit.factor : 0;
-    const currentProduct=this.state.products.find(x=>x.id===this._puId) || {};
-    const inferredBasePrice = r2.sellMid>0 ? r2.sellMid/r2.midPer : (r2.sellPack>0 ? r2.sellPack/r2.packSize : Number(currentProduct.sellPrice)||0);
+    const inferredBasePrice = r2.sellMid>0 ? r2.sellMid/r2.midPer : (r2.sellPack>0 ? r2.sellPack/r2.packSize : Number(currentProduct?.sellPrice)||0);
     const priceOf=u=>{
       if(u.key==='pack' && r2.sellPack>0) return r2.sellPack;
       if(u.key==='mid'  && r2.sellMid>0)  return r2.sellMid;
