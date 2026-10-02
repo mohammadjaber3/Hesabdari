@@ -3,15 +3,29 @@
    parser مرورگر مجبور به پردازش dynamic import + top-level await نباشد.
    Firebase مستندات رسمی استفاده از browser ESM را با gstatic ارائه می‌کند.
 */
-import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
 import {
-  getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence
-} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
-import {
+  initializeApp,
+  getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence,
   initializeFirestore, getFirestore, persistentLocalCache, persistentMultipleTabManager,
   doc, getDoc, getDocs, setDoc as _setDoc, updateDoc as _updateDoc, deleteDoc as _deleteDoc, onSnapshot,
-  collection, writeBatch as _writeBatch, increment
-} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
+  collection, writeBatch as _writeBatch, increment as _increment, runTransaction
+} from "./firebase-sdk.js";
+import {
+  round2, round4, fmtQty, todayISO, addDaysISO, daysBetweenISO, startOfWeekISO, startOfMonthISO, dateLabelFa,
+  setBusinessTimezone, calcInvoice, nextAvgCost, describeAuthError,
+  makePinRecord, verifyPin, pinStateAfterFailure, pinStateAfterSuccess, pinLockRemainingMs,
+  buildBackup, validateBackup
+} from "./core.js";
+import {
+  normalizeProductUnitsRecord, productUnits as _productUnits, saleUnits as _saleUnits,
+  transactionUnits as _transactionUnits, unitByName as _unitByName, unitSellPrice as _unitSellPrice,
+  qtyBreakdown as _qtyBreakdown
+} from "./units.js";
+import {
+  buildMovement, isNonCashExpense, cashExpensesTotal, buildPaymentReversal, allocatePayment,
+  reconcileCustomers, reconcileSuppliers, reconcileStock, reconcileInvoices, negativeStockProducts,
+  buildAuditEntry, summarizeDoc, WASTE_CATEGORY, DEFAULT_WAREHOUSE
+} from "./ledger.js";
 
 /* ---------- قفل نرمِ نقش «شریک» (فقط دیدن) ----------
    دیوارِ اصلی همان firestore.rules است، ولی اگر همان‌جا جلوی نوشتن گرفته شود
@@ -25,14 +39,63 @@ function _assertCanWrite(){
     throw new Error('حساب شما «شریک» است: همه‌چیز را می‌بینید، اما اجازهٔ تغییر، ثبت یا حذف ندارید.');
   }
 }
+/* increment() که مقدارش را هم روی خودش نگه می‌دارد تا لایهٔ Stock Ledger بتواند
+   «چقدر کم/زیاد شد» را بخواند (SDK خودش این عدد را نمایش نمی‌دهد). */
+function increment(n){ const v=_increment(n); try{ v.__delta=n; }catch(e){} return v; }
 const setDocRaw = _setDoc;
 function setDoc(...a){ _assertCanWrite(); return _setDoc(...a); }
 function updateDoc(...a){ _assertCanWrite(); return _updateDoc(...a); }
 function deleteDoc(...a){ _assertCanWrite(); return _deleteDoc(...a); }
-function writeBatch(d){
+/* هر batch که موجودی کالا را عوض کند، در همان batch (اتمی) یک رویداد Stock Ledger هم می‌نویسد.
+   نوع حرکت (SALE/PURCHASE/...) را کد عملیات قبل از ساخت batch با App._mv(...) مشخص می‌کند. */
+function writeBatch(d, opts){
   const b=_writeBatch(d);
-  const commit=b.commit.bind(b);
-  b.commit=function(){ try{ _assertCanWrite(); }catch(e){ return Promise.reject(e); } return commit(); };
+  const commit=b.commit.bind(b), _set=b.set.bind(b), _update=b.update.bind(b);
+  const noLedger = !!(opts && opts.noLedger);
+  let ctx=null;
+  try{ if(App){ ctx=App._mvCtx||null; App._mvCtx=null; } }catch(e){ ctx=null; }
+  const pending=[]; let refType='', refId='';
+  const noteRef=(ref)=>{
+    const m=/\/(sales|purchases)\/([^\/]+)$/.exec((ref&&ref.path)||'');
+    if(m && !refId){ refType = m[1]==='sales' ? 'sale' : 'purchase'; refId = m[2]; }
+  };
+  const prodId=(ref)=>{ const m=/\/products\/([^\/]+)$/.exec((ref&&ref.path)||''); return m?m[1]:null; };
+  b.update=function(ref,data,...rest){
+    noteRef(ref);
+    const pid=prodId(ref);
+    if(!noLedger && pid && data && data.stock && typeof data.stock.__delta==='number' && data.stock.__delta!==0){
+      pending.push({ pid, delta:data.stock.__delta, cost: (typeof data.avgCost==='number') ? data.avgCost : undefined });
+    }
+    return _update(ref,data,...rest);
+  };
+  b.set=function(ref,data,...rest){
+    noteRef(ref);
+    const pid=prodId(ref);
+    if(!noLedger && pid && data && typeof data.stock==='number' && data.stock!==0){
+      pending.push({ pid, delta:data.stock, cost:data.avgCost, created:true });
+    }
+    return _set(ref,data,...rest);
+  };
+  b.commit=function(){
+    try{ _assertCanWrite(); }catch(e){ return Promise.reject(e); }
+    try{
+      const running={};
+      pending.forEach(mv=>{
+        const p=(App.state.products||[]).find(x=>x.id===mv.pid);
+        const before = (mv.pid in running) ? running[mv.pid] : (mv.created ? 0 : (p ? (Number(p.stock)||0) : 0));
+        running[mv.pid] = before + mv.delta;
+        const type = (ctx && ctx.type) || (mv.created ? 'OPENING' : 'ADJUSTMENT');
+        const id = uid();
+        const cost = (typeof mv.cost==='number') ? mv.cost : (p ? (Number(p.avgCost)||0) : 0);
+        const m = buildMovement({ id, ts:Date.now(), date:todayISO(), productId:mv.pid, warehouseId:DEFAULT_WAREHOUSE,
+          type, quantityBase:mv.delta, unit:'عدد', unitCost:cost, userId:(App.user&&App.user.email)||'',
+          referenceType:(ctx&&ctx.refType)||refType||'manual', referenceId:(ctx&&ctx.refId)||refId||'',
+          reason:(ctx&&ctx.reason)||'', stockBefore:before });
+        _set(doc(cols.stockLedger, id), m);
+      });
+    }catch(e){ console.warn('stock ledger build failed', e); }
+    return commit();
+  };
   return b;
 }
 
@@ -63,6 +126,10 @@ const BIZ_ID = 'main';
 const COLLECTIONS = ['products','customers','suppliers','sales','purchases','expenses','payments','openingEntries'];
 const cols = {};
 COLLECTIONS.forEach(name => { cols[name] = collection(db, 'businesses', BIZ_ID, name); });
+/* کالکشن‌های «فقط‌افزودنی» — با listener زنده بارگذاری نمی‌شوند (حجمشان زیاد می‌شود)،
+   فقط هنگام نیاز (گزارش/تطبیق) با query خوانده می‌شوند. */
+const LEDGER_COLLECTIONS = ['stockLedger','auditLog'];
+LEDGER_COLLECTIONS.forEach(name => { cols[name] = collection(db, 'businesses', BIZ_ID, name); });
 const settingsDocRef   = doc(db, 'businesses', BIZ_ID, 'meta', 'settings');
 const migratedFlagRef  = doc(db, 'businesses', BIZ_ID, 'meta', 'migratedV2');
 const oldStateDocRef   = doc(db, 'businesses', BIZ_ID, 'data', 'state'); // ساختار قدیمی (فقط برای مهاجرت یک‌باره)
@@ -74,7 +141,6 @@ const pinDocRef = (uid_) => doc(db, 'businesses', BIZ_ID, 'pins', uid_);
 
 /* ---------- Helpers ---------- */
 function uid(){ return 'id_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8); }
-function todayISO(){ return new Date().toISOString().slice(0,10); }
 
 /* ---------- شناسهٔ دستگاه (گوشی) ----------
    هر گوشی/مرورگر یک شناسهٔ ثابت محلی می‌گیرد که در تمام رکوردهای ثبت‌شده از همان گوشی ذخیره می‌شود.
@@ -119,14 +185,8 @@ function fmt2(n){
      txFactor= چند واحد پایه در آن واحد است
    مقدار qty و unitPrice/unitCost همیشه به واحد پایه ذخیره می‌شوند تا همهٔ
    محاسبات قبلی (سود، مرجوعی، کنسل، موجودی) بدون تغییر و درست بمانند. */
-function round2(n){ return Math.round((Number(n)||0)*100)/100; }
 /* قیمت تمام‌شدهٔ واحد پایه هرگز نباید گرد شود: یک کارتن ۱۶۰۰ افغانی با ۱۴۴ عدد
    می‌شود ۱۱.۱۱۱۱ — اگر ۱۱.۱۱ ذخیره شود، ارزش انبار و سود به‌مرور جابه‌جا می‌شود. */
-function round4(n){ return Math.round((Number(n)||0)*10000)/10000; }
-function fmtQty(n){
-  const r = Math.round((Number(n)||0)*1000)/1000;
-  return Number.isInteger(r) ? r.toLocaleString('en-US') : String(r);
-}
 function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function sum(arr,key){ return arr.reduce((a,b)=>a+(Number(b[key])||0),0); }
 /* ---------- فشرده‌سازی عکس (بل شرکت / رسید پرداخت) ----------
@@ -168,26 +228,13 @@ async function compressImageForStorage(file){
   if(lastUrl.length < 950000) return lastUrl;
   throw new Error('حجم عکس بعد از فشرده‌سازی هنوز زیاد است؛ لطفاً با نور بهتر یا نزدیک‌تر دوباره عکس بگیرید.');
 }
-function dateLabel(d){
-  const dt=new Date(d+'T00:00:00');
-  const days=['یکشنبه','دوشنبه','سه‌شنبه','چهارشنبه','پنجشنبه','جمعه','شنبه'];
-  return days[dt.getDay()]+' '+d;
-}
-function startOfWeek(d){
-  const dt=new Date(d+'T00:00:00');
-  const day=dt.getDay();
-  dt.setDate(dt.getDate()-day);
-  return dt.toISOString().slice(0,10);
-}
-function startOfMonth(d){ return d.slice(0,7)+'-01'; }
-async function sha256Hex(str){
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(str)));
-  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
-}
+function dateLabel(d){ return dateLabelFa(d); }
+function startOfWeek(d){ return startOfWeekISO(d, 0); } // 0=یکشنبه (رفتار قبلی)؛ 6=شنبه
+function startOfMonth(d){ return startOfMonthISO(d); }
 
 function defaultSettings(){
   return { businessName:'فروشگاه صانع', currency:'افغانی', openingCash:0,
-    invoiceCounter:0, businessPhone:'', businessAddress:'', logoEmoji:'🏪', openingNote:'', usdRate:0, lowStockThreshold:1 };
+    invoiceCounter:0, businessPhone:'', businessAddress:'', logoEmoji:'🏪', openingNote:'', usdRate:0, lowStockThreshold:1, timezone:'Asia/Kabul' };
 }
 function migrateSettings(s){
   s = s || {};
@@ -201,6 +248,7 @@ function migrateSettings(s){
   if(s.openingNote===undefined) s.openingNote='';
   if(s.usdRate===undefined) s.usdRate=0;
   if(s.lowStockThreshold===undefined) s.lowStockThreshold=1;
+  if(s.timezone===undefined) s.timezone='Asia/Kabul';
   return s;
 }
 function migrateRecordArrays(sales, purchases){
@@ -362,33 +410,6 @@ function ic(name, size, extraClass){
 }
 
 /* ---------- App ---------- */
-function normalizeProductUnitsRecord(raw){
-  const p={...raw};
-  const oldUnit=String(p.unit||'عدد').trim();
-  const oldQty=Number(p.unitQty)||1;
-  // Legacy schema: unit was the smallest sellable package and unitQty was its
-  // contents. Convert only this unmistakable shape; modern products already use unit='عدد'.
-  if(oldUnit!=='عدد' && oldQty>1 && !p.midUnit){
-    const oldStock=Number(p.stock)||0;
-    const oldAvg=Number(p.avgCost)||0;
-    const oldSell=Number(p.sellPrice)||0;
-    p.unit='عدد';
-    p.unitQty=1;
-    p.midUnit=oldUnit;
-    p.midPer=oldQty;
-    p.stock=round4(oldStock*oldQty);
-    p.avgCost=round4(oldAvg/oldQty);
-    p.sellPrice=round2(oldSell/oldQty);
-    p.sellPriceMid=Number(p.sellPriceMid)>0?Number(p.sellPriceMid):round2(oldSell);
-    if(p.packUnit && Number(p.packPer)>0 && Number(p.packPer)<=oldQty){
-      p.packPer=round4(Number(p.packPer)*oldQty);
-    }
-    p.defaultSaleUnit=p.defaultSaleUnit===oldUnit ? oldUnit : (p.packUnit||oldUnit);
-    p.saleUnits=Array.isArray(p.saleUnits)?p.saleUnits:[p.packUnit||oldUnit];
-    p._unitSchemaMigrated=true;
-  }
-  return p;
-}
 
 const App = {
   state: { settings: defaultSettings(), products:[], customers:[], suppliers:[], sales:[], purchases:[], expenses:[], payments:[], openingEntries:[] },
@@ -475,6 +496,15 @@ const App = {
   },
 
   /* ---------- ثبت‌کنندهٔ رکورد (کاربر + گوشی) ---------- */
+  /* نوع حرکت انبار را برای batchِ بعدی مشخص می‌کند (قبل از writeBatch صدا زده می‌شود) */
+  _mv(type, reason, extra){ this._mvCtx = { type, reason:reason||'', ...(extra||{}) }; },
+  /* رویداد Audit داخل همان batch/transaction */
+  audit(target, { action, entityType, entityId, before, after }){
+    const id = uid();
+    const entry = buildAuditEntry({ id, ts:Date.now(), action, entityType, entityId,
+      userId:(this.user&&this.user.email)||'', userRole:this.role||'', before:summarizeDoc(before), after:summarizeDoc(after) });
+    target.set(doc(cols.auditLog, id), entry);
+  },
   recordMeta(){
     return {
       createdByEmail: (this.user && this.user.email) || '',
@@ -586,6 +616,7 @@ const App = {
     const unsubSettings = onSnapshot(settingsDocRef, {includeMetadataChanges:true}, async (snap)=>{
       if(snap.exists()){
         this.state.settings = migrateSettings(snap.data());
+        setBusinessTimezone(this.state.settings.timezone);
       } else {
         this.state.settings = defaultSettings();
         try{ await setDoc(settingsDocRef, this.state.settings); }catch(e){}
@@ -680,10 +711,11 @@ const App = {
     try{
       await signInWithEmailAndPassword(auth, email, pass);
     }catch(e){
-      errBox.textContent = 'ورود ناکام شد. ایمیل یا رمز عبور اشتباه است.';
+      console.warn('login failed', e && e.code);
+      errBox.textContent = describeAuthError(e).message;
     }
   },
-  resetSaleDraft(){ this.saleDraft = { items:[] }; },
+  resetSaleDraft(){ this.saleDraft = { items:[], txId:uid() }; }, // txId = کلید یکتا؛ ثبت دوباره همین فاکتور را نمی‌سازد
   onSaleCustomerNameChange(){
     const name=(document.getElementById('sale-customer-name').value||'').trim();
     const c=this.state.customers.find(x=>x.name===name);
@@ -691,7 +723,7 @@ const App = {
     const addrEl=document.getElementById('sale-customer-address');
     if(c){ phoneEl.value=c.phone||''; addrEl.value=c.address||''; }
   },
-  resetPurchaseDraft(){ this.purchaseDraft = { items:[], currency:'AFN' }; },
+  resetPurchaseDraft(){ this.purchaseDraft = { items:[], currency:'AFN', txId:uid() }; },
 
   navigate(tab,sub){ this.tab=tab; this.sub=sub||null; this.renderNav(); this.render(); window.scrollTo(0,0); },
 
@@ -959,11 +991,28 @@ const App = {
     if(this.pinEntry.length===4) setTimeout(()=>this.checkPin(),120);
   },
   pinBackspace(){ this.pinEntry=this.pinEntry.slice(0,-1); this.renderPinRoot(); },
+  _pinFailKey(){ return 'hesabdari_pinfail_'+(this.user?this.user.uid:'x'); },
+  _readPinFail(){
+    try{ return JSON.parse(localStorage.getItem(this._pinFailKey())||'null') || {fails:0,lockedUntil:0}; }
+    catch(e){ return {fails:0,lockedUntil:0}; }
+  },
+  _writePinFail(st){ try{ localStorage.setItem(this._pinFailKey(), JSON.stringify(st)); }catch(e){} },
   async checkPin(){
-    let savedHash;
+    // قفل موقت بعد از چند تلاش ناموفق (ضد حدس‌زدن)
+    const failState = this._readPinFail();
+    const waitMs = pinLockRemainingMs(failState, Date.now());
+    if(waitMs>0){
+      this.pinEntry='';
+      const sec=Math.ceil(waitMs/1000);
+      this.pinLockMsg='تلاش‌های ناموفق زیاد بود؛ '+(sec>=60?Math.ceil(sec/60)+' دقیقه':sec+' ثانیه')+' صبر کنید';
+      this.renderPinRoot();
+      setTimeout(()=>{ this.pinLockMsg=''; this.renderPinRoot(); }, Math.min(waitMs,5000));
+      return;
+    }
+    let rec;
     try{
-      savedHash = (this.myPinHash!==undefined) ? this.myPinHash : await this.getMyPinHash();
-      this.myPinHash = savedHash;
+      rec = (this.myPinHash!==undefined) ? this.myPinHash : await this.getMyPinHash();
+      this.myPinHash = rec;
     }catch(e){
       // نتوانستیم مطمئن شویم PIN قبلی چه بوده (مثلاً قطعی اینترنت) — به‌هیچ‌وجه نباید این را
       // به‌معنی «هنوز PIN نداریم» بگیریم، وگرنه هرکسی می‌تواند صفحه را با هر عددی باز/بازتنظیم کند.
@@ -971,36 +1020,58 @@ const App = {
       setTimeout(()=>{ this.pinCheckError=false; this.renderPinRoot(); }, 1800);
       return;
     }
-    if(!savedHash){
-      await this.setMyPinHash(this.pinEntry);
-      this.myPinHash = await sha256Hex(this.pinEntry);
+    if(!rec){
+      const saved = await this.setMyPinHash(this.pinEntry);
+      if(saved) this.myPinHash = saved;
       this.pinLocked=false; this.pinEntry=''; this.renderPinRoot();
-      this.toast('قفل PIN تنظیم شد');
+      if(saved) this.toast('قفل PIN تنظیم شد');
       return;
     }
-    const h = await sha256Hex(this.pinEntry);
-    if(h===savedHash){ this.pinLocked=false; this.pinEntry=''; this.renderPinRoot(); }
-    else { this.pinEntry=''; this.pinShake=true; this.renderPinRoot(); setTimeout(()=>{this.pinShake=false;},400); }
+    const res = await verifyPin(this.pinEntry, rec);
+    if(res.ok){
+      this._writePinFail(pinStateAfterSuccess());
+      if(res.legacy){
+        // ارتقای بی‌صدای هش قدیمیِ بدون salt به هش جدید
+        try{
+          const upgraded = await makePinRecord(this.pinEntry);
+          await setDocRaw(pinDocRef(this.user.uid), {...upgraded, uid:this.user.uid, ts:Date.now()}, {merge:true});
+          this.myPinHash = upgraded;
+        }catch(e){ console.warn('PIN upgrade failed (will retry next time)', e); }
+      }
+      this.pinLocked=false; this.pinEntry=''; this.renderPinRoot();
+      return;
+    }
+    const next = pinStateAfterFailure(failState, Date.now());
+    this._writePinFail(next);
+    this.pinEntry='';
+    if(next.forceLogout){
+      this._writePinFail(pinStateAfterSuccess());
+      this.pinLocked=false; this.renderPinRoot();
+      this.toastError('بیش از حد PIN اشتباه وارد شد؛ برای امنیت از حساب خارج شدید. با ایمیل و رمز عبور دوباره وارد شوید.');
+      signOut(auth);
+      return;
+    }
+    this.pinShake=true; this.renderPinRoot(); setTimeout(()=>{this.pinShake=false;},400);
   },
   async getMyPinHash(){
     if(!this.user) return null;
     const snap = await getDoc(pinDocRef(this.user.uid)); // اگر خطا بدهد، عمداً throw می‌کند (fail-safe نه fail-open)
-    if(snap.exists() && snap.data().pinHash) return snap.data().pinHash;
+    if(snap.exists() && snap.data().pinHash) return snap.data();
     // سازگاری با نسخهٔ قبلی که (بی‌اثر) در سند team ذخیره می‌کرد
     try{
       const old = await getDoc(teamDocRef(this.user.uid));
-      return old.exists() ? (old.data().pinHash||null) : null;
+      return (old.exists() && old.data().pinHash) ? { pinHash: old.data().pinHash } : null;
     }catch(e){ return null; }
   },
   async setMyPinHash(pin){
-    if(!this.user) return;
-    const h = await sha256Hex(pin);
-    try{ await setDocRaw(pinDocRef(this.user.uid), {pinHash:h, uid:this.user.uid, ts:Date.now()}, {merge:true}); }
-    catch(e){ this.toastError('PIN ذخیره نشد؛ اتصال اینترنت را بررسی کنید.'); }
+    if(!this.user) return null;
+    const rec = await makePinRecord(pin);
+    try{ await setDocRaw(pinDocRef(this.user.uid), {...rec, uid:this.user.uid, ts:Date.now()}, {merge:true}); return rec; }
+    catch(e){ this.toastError('PIN ذخیره نشد؛ اتصال اینترنت را بررسی کنید.'); return null; }
   },
   async resetPin(){
     if(!this.user) return;
-    try{ await setDocRaw(pinDocRef(this.user.uid), {pinHash:null}, {merge:true}); this.myPinHash=null; this.toast('قفل PIN حذف شد — دفعهٔ بعد یک PIN جدید تعیین کنید'); }
+    try{ await setDocRaw(pinDocRef(this.user.uid), {pinHash:null,pinSalt:null,pinAlgo:null,pinIter:null}, {merge:true}); this.myPinHash=null; this._writePinFail(pinStateAfterSuccess()); this.toast('قفل PIN حذف شد — دفعهٔ بعد یک PIN جدید تعیین کنید'); }
     catch(e){ this.toast('خطا در حذف PIN؛ اتصال اینترنت را بررسی کنید'); }
   },
   lockNow(){ if(!this.user) return; this.pinLocked=true; this.pinEntry=''; this.renderPinRoot(); },
@@ -1009,7 +1080,7 @@ const App = {
     if(!this.pinLocked){ root.innerHTML=''; return; }
     const dots = [0,1,2,3].map(i=>`<span class="${i<this.pinEntry.length?'filled':''}"></span>`).join('');
     const pad = ['1','2','3','4','5','6','7','8','9','','0','del'];
-    const msg = this.pinCheckError
+    const msg = this.pinLockMsg ? this.pinLockMsg : this.pinCheckError
       ? 'اتصال قطع است — نمی‌توان تأیید کرد، دوباره تلاش می‌شود...'
       : (this.pinShake ? 'کد اشتباه بود، دوباره' : 'کد ۴ رقمی خود را وارد کنید');
     root.innerHTML = `
@@ -1051,7 +1122,7 @@ const App = {
       const amtAFN = p.currency==='USD' ? (Number(p.amount)||0)*((Number(p.rate)||this.usdRate())||0) : (Number(p.amount)||0);
       cash -= amtAFN;
     });
-    cash -= sum(s.expenses,'amount');
+    cash -= cashExpensesTotal(s.expenses); // ضایعات پول نقد را کم نمی‌کند
     return cash;
   },
   inventoryValue(){
@@ -1153,61 +1224,20 @@ const App = {
      - packPer: چند واحد پایه = یک واحد بزرگ
      - stock: موجودی = به واحد پایه
    ========================================================= */
-  productUnits(p){
-    const rawUnit = (p && p.unit) ? String(p.unit).trim() : 'عدد';
-    // سازگاری با محصولات قدیمی: در نسخهٔ قبلی ممکن بود unit=قوطی و unitQty=24
-    // باشد. آن داده را بدون دست‌زدن به اسناد قبلی، هنگام محاسبه به «عدد ← قوطی» تفسیر می‌کنیم.
-    const legacyMid = !p?.midUnit && Number(p?.unitQty)>1 && rawUnit!=='عدد';
-    const base = legacyMid ? 'عدد' : rawUnit;
-    const out = [];
-    const midPer = legacyMid ? Number(p.unitQty) : Number(p && p.midPer)||0;
-    const midUnit = legacyMid ? rawUnit : (p && p.midUnit ? String(p.midUnit).trim() : '');
-    const packPer = Number(p && p.packPer)||0;
-    const packUnit = p && p.packUnit ? String(p.packUnit).trim() : '';
-    if(packUnit && packPer>1) out.push({key:'pack', name:packUnit, factor:packPer});
-    if(midUnit && midPer>1) out.push({key:'mid', name:midUnit, factor:midPer});
-    out.push({key:'base', name:base, factor:1});
-    return out;
-  },
-  saleUnits(p){
-    const all=this.productUnits(p);
-    const packaged=all.filter(u=>u.key!=='base');
-    const configured=Array.isArray(p&&p.saleUnits) ? p.saleUnits.map(String) : null;
-    return packaged.filter(u=>!configured || configured.includes(u.name));
-  },
-  transactionUnits(p){
-    // خرید/فروش معمولی فقط در واحدهای بسته‌بندی‌شده انجام می‌شود؛ «عدد» واحد داخلی است.
-    return this.productUnits(p).filter(u=>u.key!=='base');
-  },
+  productUnits(p){ return _productUnits(p); },
+  saleUnits(p){ return _saleUnits(p); },
+  // خرید/فروش معمولی فقط در واحدهای بسته‌بندی‌شده؛ «عدد» واحد داخلی است.
+  transactionUnits(p){ return _transactionUnits(p); },
   canSellFractional(p){ return !!(p && p.allowFractionalSale); },
-  unitByName(p, name){
-    const ladder=this.productUnits(p);
-    return ladder.find(u=>u.name===name) || ladder[ladder.length-1];
-  },
-  unitSellPrice(p, u){
-    if(!p||!u) return 0;
-    if(u.key==='pack' && Number(p.sellPricePack)>0) return Number(p.sellPricePack);
-    return round2((Number(p.sellPrice)||0)*u.factor);
-  },
+  unitByName(p, name){ return _unitByName(p, name); },
+  unitSellPrice(p, u){ return _unitSellPrice(p, u); },
   isUnitPriceManual(p,u){
     if(!p||!u) return false;
     return (u.key==='pack' && Number(p.sellPricePack)>0);
   },
   unitCost(p, u){ return round4((Number(p&&p.avgCost)||0)*(u?u.factor:1)); },
   
-  qtyBreakdown(p, baseQty){
-    const q0=Number(baseQty)||0;
-    const neg=q0<0; let q=Math.abs(q0);
-    const ladder=this.saleUnits(p);
-    if(!ladder.length) return (neg?'-':'')+fmtQty(q);
-    const parts=[];
-    for(const u of ladder){
-      const n=Math.floor(q/u.factor+1e-9);
-      if(n>0){ parts.push(fmtQty(n)+' '+u.name); q-=n*u.factor; }
-    }
-    if(!parts.length) parts.push('0 '+ladder[ladder.length-1].name);
-    return (neg?'-':'')+parts.join(' و ');
-  },
+  qtyBreakdown(p, baseQty){ return _qtyBreakdown(p, baseQty); },
   
   unitLadderLabel(p){
     const ladder=this.productUnits(p);
@@ -1412,6 +1442,8 @@ const App = {
 
   submitSale(){
     if(this.saleDraft.items.length===0){ this.toast('حداقل یک محصول اضافه کنید'); return; }
+    const txSaleId = this.saleDraft.txId || uid();
+    if(this.state.sales.some(s=>s.id===txSaleId)){ this.toast('این فاکتور قبلاً ثبت شده است.'); return; } // ثبت دوباره (دوبار لمس/آفلاین) فاکتور تکراری نمی‌سازد
     const total = round2(this.saleDraft.items.reduce((a,i)=>a+i.qty*i.unitPrice,0));
     const totalCost = round2(this.saleDraft.items.reduce((a,i)=>a+i.qty*i.cost,0));
     let paid = parseFloat(document.getElementById('sale-paid').value);
@@ -1425,7 +1457,7 @@ const App = {
     const note = (document.getElementById('sale-note').value||'').trim();
     const remaining = total-paid;
 
-    const batch = writeBatch(db);
+    App._mv('SALE','فروش'); const batch = writeBatch(db);
     let customerId=null, customerNameFinal='مشتری نقدی';
     if(custName){
       let customer=this.state.customers.find(c=>c.name===custName);
@@ -1458,7 +1490,7 @@ const App = {
       }
     });
 
-    const saleId = uid();
+    const saleId = txSaleId;
     const newSale = {
       id:saleId, ts:Date.now(), date, customerId, customerName:customerNameFinal,
       customerPhone: custPhone, customerAddress: custAddress,
@@ -1467,6 +1499,7 @@ const App = {
       ...this.recordMeta()
     };
     batch.set(doc(cols.sales, saleId), newSale);
+    this.audit(batch, { action:'create', entityType:'sale', entityId:saleId, before:null, after:newSale });
 
     batch.commit().catch(e=>{ console.error('submitSale error',e); App.toastError('خطا در ذخیرهٔ فاکتور؛ اتصال اینترنت را بررسی کنید (در حالت آفلاین هم باید ذخیره شود، دوباره تلاش کنید).'); });
 
@@ -1716,15 +1749,21 @@ const App = {
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
     if(sale.status==='cancelled'){ this.toast('این فاکتور باطل شده است و قابل ویرایش نیست.'); return; }
     this.editingInvoiceId=saleId;
+    this._editBaseTs = sale.lastEditedTs||0; // نسخهٔ فاکتور در لحظهٔ باز شدن فرم
     this.render();
   },
   cancelEditInvoice(){
-    this.editingInvoiceId=null;
+    this.editingInvoiceId=null; this._editBaseTs=undefined;
     this.render();
   },
   saveEditInvoice(saleId, confirmedNegative){
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
     if(sale.status==='cancelled'){ this.toast('این فاکتور باطل شده است.'); return; }
+    // تشخیص تداخل: اگر بعد از باز شدن فرم، دستگاه دیگری همین فاکتور را عوض کرده باشد، رونویسی نمی‌کنیم
+    if(this._editBaseTs!==undefined && (sale.lastEditedTs||0)!==this._editBaseTs){
+      App.toastError('تداخل (Conflict): این فاکتور بعد از باز شدن فرم توسط کاربر/دستگاه دیگری تغییر کرده است. چیزی ذخیره نشد؛ فرم را ببندید و دوباره باز کنید.');
+      return;
+    }
 
     const newItems = sale.items.map((it,idx)=>{
       const f=this.itemFactor(it);
@@ -1747,13 +1786,16 @@ const App = {
     const date=document.getElementById('edit-sale-date').value || sale.date;
     const note=(document.getElementById('edit-sale-note').value||'').trim();
 
-    const newTotal = round2(newItems.reduce((a,i)=>a+(i.qty-(i.returnedQty||0))*i.unitPrice,0));
     const newTotalCost = round2(newItems.reduce((a,i)=>a+(i.qty-(i.returnedQty||0))*(i.cost||0),0));
 
-    let paid=parseFloat(document.getElementById('edit-sale-paid').value);
-    if(isNaN(paid)||paid<0) paid=0;
-    if(paid>newTotal) paid=newTotal;
-    const newRemaining=newTotal-paid;
+    // مجموع، تخفیف، پرداختی و باقیمانده فقط از calcInvoice می‌آیند.
+    // تخفیفی که قبلاً روی فاکتور ثبت شده (sale.discount) با ویرایش از بین نمی‌رود.
+    let paidInput=parseFloat(document.getElementById('edit-sale-paid').value);
+    if(isNaN(paidInput)||paidInput<0) paidInput=0;
+    const calc = calcInvoice({ items:newItems, discount:sale.discount, paid:paidInput });
+    const newTotal=calc.total, paid=calc.paid, newRemaining=calc.remaining, overpaid=calc.overpaid;
+    // اضافه‌پرداخت (مشتری بیشتر از مجموع جدید داده) گم نمی‌شود: به‌عنوان اعتبار در حساب مشتری ثبت می‌شود
+    if(overpaid>0.001 && !custName){ this.toast('مبلغ دریافتی از مجموع فاکتور بیشتر است ('+fmt(overpaid)+'). برای ثبت اعتبار، نام مشتری را بنویسید یا مبلغ را کم کنید.'); return; }
 
     if(!custName && newRemaining>0.001){ this.toast('برای فروش قرضی (نسیه) باید نام مشتری مشخص باشد.'); return; }
 
@@ -1779,7 +1821,7 @@ const App = {
       return;
     }
 
-    const batch=writeBatch(db);
+    App._mv('SALE','ویرایش فاکتور فروش'); const batch=writeBatch(db);
     const oldCustomerId=sale.customerId;
     const oldRemaining=sale.remaining||0;
     let newCustomerId=null, newCustomerNameFinal='مشتری نقدی';
@@ -1793,7 +1835,7 @@ const App = {
     // اصلاح بدهی مشتری قدیم/جدید (delta-based، تا با ویرایش هم‌زمان تداخل نکند)
     if(oldCustomerId && newCustomerId && oldCustomerId===newCustomerId){
       const existing=this.state.customers.find(c=>c.id===oldCustomerId);
-      const fields={ balance: increment(newRemaining-oldRemaining) };
+      const fields={ balance: increment(newRemaining-oldRemaining-overpaid) };
       if(custPhone && custPhone!==(existing&&existing.phone)) fields.phone=custPhone;
       if(custAddress && custAddress!==(existing&&existing.address)) fields.address=custAddress;
       batch.update(doc(cols.customers,oldCustomerId), fields);
@@ -1805,12 +1847,12 @@ const App = {
         const existing=this.state.customers.find(c=>c.id===newCustomerId);
         if(existing){
           const fields={};
-          if(Math.abs(newRemaining)>0.0001) fields.balance=increment(newRemaining);
+          if(Math.abs(newRemaining-overpaid)>0.0001) fields.balance=increment(newRemaining-overpaid);
           if(custPhone && custPhone!==existing.phone) fields.phone=custPhone;
           if(custAddress && custAddress!==existing.address) fields.address=custAddress;
           if(Object.keys(fields).length) batch.update(doc(cols.customers,newCustomerId), fields);
         } else {
-          batch.set(doc(cols.customers,newCustomerId), {id:newCustomerId,name:custName,phone:custPhone,address:custAddress,balance:newRemaining, ...this.recordMeta()});
+          batch.set(doc(cols.customers,newCustomerId), {id:newCustomerId,name:custName,phone:custPhone,address:custAddress,balance:newRemaining-overpaid, ...this.recordMeta()});
         }
       }
     }
@@ -1822,12 +1864,14 @@ const App = {
     batch.update(doc(cols.sales, sale.id), {
       items:newItems, customerId:newCustomerId, customerName:newCustomerNameFinal,
       customerPhone:custPhone, customerAddress:custAddress, date, note,
-      total:newTotal, totalCost:newTotalCost, profit:newTotal-newTotalCost,
+      total:newTotal, discount:calc.discount, totalCost:newTotalCost, profit:round2(newTotal-newTotalCost),
       paid, remaining:newRemaining, ...this.editMeta()
     });
 
+    this.audit(batch, { action:'edit', entityType:'sale', entityId:sale.id, before:sale, after:{ ...sale, total:newTotal, discount:calc.discount, paid, remaining:newRemaining, items:newItems } });
     batch.commit().then(()=>{
-      this.editingInvoiceId=null;
+      this.editingInvoiceId=null; this._editBaseTs=undefined;
+      if(overpaid>0.001) this.toast('اضافه‌پرداخت '+fmt(overpaid)+' به‌عنوان اعتبار در حساب مشتری ثبت شد');
       this.render();
     }).catch(e=>{ console.error('saveEditInvoice error',e); this.toast('خطا در ذخیرهٔ ویرایش؛ اتصال اینترنت را بررسی کنید و دوباره تلاش کنید.'); });
   },
@@ -1955,7 +1999,14 @@ const App = {
   removePurchaseItem(idx){ this.purchaseDraft.items.splice(idx,1); this.render(); },
 
   async submitPurchase(){
+    if(this._purchaseBusy) return; // جلوگیری از ثبت دوبارهٔ بل خرید
+    this._purchaseBusy=true;
+    try{ await this._submitPurchaseInner(); } finally { this._purchaseBusy=false; }
+  },
+  async _submitPurchaseInner(){
     if(this.purchaseDraft.items.length===0){ this.toast('حداقل یک محصول اضافه کنید'); return; }
+    const txPurchaseId = this.purchaseDraft.txId || uid();
+    if(this.state.purchases.some(x=>x.id===txPurchaseId)){ this.toast('این بل خرید قبلاً ثبت شده است.'); return; }
     const total = round2(this.purchaseDraft.items.reduce((a,i)=>a+i.qty*i.unitCost,0));
     let paid = parseFloat(document.getElementById('purchase-paid').value);
     if(isNaN(paid)) paid=0;
@@ -1974,7 +2025,7 @@ const App = {
     const supplierInvoiceNo = (document.getElementById('purchase-supplier-invoice-no').value||'').trim();
     const remaining = total-paid;
 
-    const batch = writeBatch(db);
+    App._mv('PURCHASE','خرید'); const batch = writeBatch(db);
     let supplierId=null, supplierNameFinal=supName||'—';
     if(supName){
       let supplier=this.state.suppliers.find(c=>c.name===supName);
@@ -2002,8 +2053,7 @@ const App = {
       } else {
         const p = this.state.products.find(pp=>pp.id===it.productId);
         if(p){
-          const newStock = p.stock + it.qty;
-          const newAvgCost = newStock>0 ? round4(((p.stock*p.avgCost)+(it.qty*unitCostAFN))/newStock) : unitCostAFN;
+          const newAvgCost = nextAvgCost({ stockQty:p.stock, avgCost:p.avgCost, purchaseQty:it.qty, unitCost:unitCostAFN }).avgCost;
           const fields = { stock: increment(it.qty), avgCost: newAvgCost };
           if(!p.sellPrice) fields.sellPrice = round2(unitCostAFN*1.15);
           batch.update(doc(cols.products, it.productId), fields);
@@ -2019,7 +2069,7 @@ const App = {
       catch(err){ App.toastError(err.message||'خطا در پردازش عکس بل'); return; }
     }
 
-    const purchaseId = uid();
+    const purchaseId = txPurchaseId;
     const newPurchase = {
       id:purchaseId, ts:Date.now(), date, supplierId, supplierName:supplierNameFinal, currency, rateAtPurchase,
       items:this.purchaseDraft.items.map(it=>({...it,returnedQty:0})), total, paid, remaining, note, supplierInvoiceNo,
@@ -2028,6 +2078,7 @@ const App = {
     };
     if(billImage) newPurchase.billImage = billImage;
     batch.set(doc(cols.purchases, purchaseId), newPurchase);
+    this.audit(batch, { action:'create', entityType:'purchase', entityId:purchaseId, before:null, after:newPurchase });
 
     batch.commit().catch(e=>{ console.error('submitPurchase error',e); this.toast('خطا در ذخیرهٔ بل خرید؛ اتصال اینترنت را بررسی کنید.'); });
 
@@ -2248,7 +2299,7 @@ const App = {
     const newReturns = [...sale.returns, {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, qtyLabel: qtyLabel||this.itemQtyLabel(it,qty), unitPrice:it.unitPrice, amount:refund}];
 
     const newTotal = round2(sale.total-refund), newPaid = round2(sale.paid-cashRefund);
-    const batch = writeBatch(db);
+    App._mv('RETURN','مرجوعی فروش'); const batch = writeBatch(db);
     batch.update(doc(cols.sales, sale.id), {
       items: newItems, returns: newReturns,
       total: newTotal, totalCost: sale.totalCost-refundCost, profit: newTotal-(sale.totalCost-refundCost),
@@ -2258,6 +2309,7 @@ const App = {
       batch.update(doc(cols.customers, sale.customerId), { balance: increment(-debtReduction) });
     }
     batch.update(doc(cols.products, it.productId), { stock: increment(qty) });
+    this.audit(batch, { action:'return', entityType:'sale', entityId:sale.id, before:sale, after:{ ...sale, total:newTotal, paid:newPaid, remaining:newTotal-newPaid } });
     batch.commit().catch(e=>{ console.error(e); App.toastError('خطا در ثبت مرجوعی؛ دوباره تلاش کنید.'); });
   },
   cancelSale(saleId){
@@ -2291,7 +2343,7 @@ const App = {
       stockDeltas[it.productId]=(stockDeltas[it.productId]||0)+sellable;
     });
 
-    const batch=writeBatch(db);
+    App._mv('RETURN','ابطال فاکتور فروش'); const batch=writeBatch(db);
     batch.update(doc(cols.sales, sale.id), {
       items:newItems, returns:newReturns, status:'cancelled',
       total:runningTotal, totalCost:runningCost, profit:runningTotal-runningCost,
@@ -2303,6 +2355,7 @@ const App = {
     Object.keys(stockDeltas).forEach(pid=>{
       batch.update(doc(cols.products, pid), { stock: increment(stockDeltas[pid]) });
     });
+    this.audit(batch, { action:'cancel', entityType:'sale', entityId:sale.id, before:sale, after:{ ...sale, status:'cancelled', total:runningTotal, remaining:runningTotal-runningPaid } });
     batch.commit().then(()=>this.toast('فاکتور باطل شد')).catch(e=>{ console.error(e); App.toastError('خطا در باطل کردن فاکتور؛ دوباره تلاش کنید.'); });
   },
   saleIncreaseItemQty(saleId, idx){
@@ -2335,7 +2388,7 @@ const App = {
         const addCost = qty*(it.cost||0);
         const newTotal=sale.total+addAmount, newPaid=sale.paid+addPaid, newTotalCost=sale.totalCost+addCost;
 
-        const batch=writeBatch(db);
+        App._mv('SALE','افزایش تعداد قلم فاکتور'); const batch=writeBatch(db);
         batch.update(doc(cols.sales, sale.id), {
           items:newItems, total:newTotal, originalTotal: increment(addAmount),
           totalCost:newTotalCost, profit:newTotal-newTotalCost, paid:newPaid, remaining:newTotal-newPaid, ...this.editMeta()
@@ -2405,7 +2458,7 @@ const App = {
     const log = [...(sale.adjustments||[]), {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx,
       name:it.name, qty, unit:(it.unit||'عدد'), mode, note:note||'', amount}];
 
-    const batch=writeBatch(db);
+    App._mv('RETURN','کاستی/کم‌شدن قلم فاکتور فروش'); const batch=writeBatch(db);
     batch.update(doc(cols.sales, sale.id), {
       items:newItems, adjustments:log,
       total:newTotal, totalCost:newCost, profit:round2(newTotal-newCost),
@@ -2557,7 +2610,7 @@ const App = {
         const {product, u, qty, perBase, addAmount, addPaid} = this._aiReadCommon();
         if(addPaid<addAmount-0.001 && !sale.customerId) throw new Error('برای نسیه باید فاکتور برای یک مشتری مشخص باشد.');
         const cost=Number(product.avgCost)||0;
-        const batch=writeBatch(db);
+        App._mv('SALE','افزودن قلم به فاکتور فروش'); const batch=writeBatch(db);
         batch.update(doc(cols.products, product.id), { stock: increment(-qty) });
         const newItem={productId:product.id, name:product.name, unit:product.unit, qty, unitPrice:perBase, cost, returnedQty:0, txUnit:u.name, txFactor:u.factor};
         const newItems=[...sale.items, newItem];
@@ -2613,7 +2666,7 @@ const App = {
     const newReturns = [...pur.returns, {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, qtyLabel: qtyLabel||this.itemQtyLabel(it,qty), unitCost:it.unitCost, amount:refund}];
     const newTotal=round2(pur.total-refund), newPaid=round2(pur.paid-cashRefund);
 
-    const batch=writeBatch(db);
+    App._mv('RETURN','مرجوعی خرید به عمده‌فروش'); const batch=writeBatch(db);
     batch.update(doc(cols.purchases, pur.id), { items:newItems, returns:newReturns, total:newTotal, paid:newPaid, remaining:newTotal-newPaid, ...this.editMeta() });
     if(pur.supplierId && debtReduction>0){
       const balField = pur.currency==='USD' ? 'balanceUSD' : 'balance';
@@ -2661,7 +2714,7 @@ const App = {
     const it=pur.items[idx];
     const rate = (Number(pur.rateAtPurchase)||this.usdRate())||0;
     const costAFN = pur.currency==='USD' ? round4((Number(it.unitCost)||0)*rate) : round4(Number(it.unitCost)||0);
-    const batch=writeBatch(db);
+    App._mv(mode==='short'?'ADJUSTMENT':'WASTE', mode==='short'?'کاستی هنگام تحویل خرید':'مصرف/ضایعات جنس خریداری‌شده'); const batch=writeBatch(db);
 
     if(mode==='short'){
       const amount = round2(qty*(Number(it.unitCost)||0));   // به ارز همان بل
@@ -2693,7 +2746,9 @@ const App = {
       if(it.productId) batch.update(doc(cols.products, it.productId), { stock: increment(-qty) });
       const expId=uid();
       batch.set(doc(cols.expenses, expId), {id:expId, ts:Date.now(), date:todayISO(),
-        category:'کاستی و ضایعات جنس', amount:amountAFN,
+        category:WASTE_CATEGORY, amount:amountAFN, nonCash:true, kind:'waste',
+        wasteId:expId, productId:it.productId||'', quantity:qty, unit:(it.unit||'عدد'), cost:amountAFN,
+        warehouseId:DEFAULT_WAREHOUSE, reason:note||'مصرف/ضایعات', userId:(this.user&&this.user.email)||'', reference:pur.id,
         note:(note?note+' — ':'')+it.name+' · '+fmtQty(qty)+' '+(it.unit||'عدد'), ...this.recordMeta()});
     }
     batch.commit().catch(e=>{ console.error(e); App.toastError('خطا در اصلاح این قلم؛ دوباره تلاش کنید.'); });
@@ -2773,7 +2828,7 @@ const App = {
       stockDeltas[it.productId]=(stockDeltas[it.productId]||0)-returnable;
     });
 
-    const batch=writeBatch(db);
+    App._mv('RETURN','ابطال بل خرید'); const batch=writeBatch(db);
     batch.update(doc(cols.purchases, pur.id), { items:newItems, returns:newReturns, status:'cancelled', total:runningTotal, paid:runningPaid, remaining:runningTotal-runningPaid, ...this.editMeta() });
     if(pur.supplierId && supplierDebtReduction>0){
       const balField = pur.currency==='USD' ? 'balanceUSD' : 'balance';
@@ -2811,12 +2866,11 @@ const App = {
         const newItems = pur.items.map((x,i)=> i===idx ? {...x, qty:x.qty+qty} : x);
         const newTotal=pur.total+addAmount, newPaid=pur.paid+addPaid;
 
-        const batch=writeBatch(db);
+        App._mv('PURCHASE','افزایش تعداد قلم بل خرید'); const batch=writeBatch(db);
         batch.update(doc(cols.purchases, pur.id), { items:newItems, total:newTotal, originalTotal: increment(addAmount), paid:newPaid, remaining:newTotal-newPaid, ...this.editMeta() });
         if(p){
           const unitCostAFN = pur.currency==='USD' ? it.unitCost*((Number(pur.rateAtPurchase)||this.usdRate())||0) : it.unitCost;
-          const newStock=p.stock+qty;
-          const newAvgCost = newStock>0 ? ((p.stock*p.avgCost)+(qty*unitCostAFN))/newStock : unitCostAFN;
+          const newAvgCost = nextAvgCost({ stockQty:p.stock, avgCost:p.avgCost, purchaseQty:qty, unitCost:unitCostAFN }).avgCost;
           batch.update(doc(cols.products, it.productId), { stock: increment(qty), avgCost: newAvgCost });
         }
         if(pur.supplierId && addAmount-addPaid>0){
@@ -2858,9 +2912,8 @@ const App = {
         if(addPaid<addAmount-0.001 && !pur.supplierId) throw new Error('برای نسیه باید بل برای یک فروشنده/شرکت مشخص باشد.');
         const rate = (Number(pur.rateAtPurchase)||this.usdRate())||0;
         const unitCostAFN = pur.currency==='USD' ? perBase*rate : perBase;
-        const batch=writeBatch(db);
-        const newStock=(Number(product.stock)||0)+qty;
-        const newAvgCost = newStock>0 ? round4((((Number(product.stock)||0)*(Number(product.avgCost)||0))+(qty*unitCostAFN))/newStock) : unitCostAFN;
+        App._mv('PURCHASE','افزودن قلم به بل خرید'); const batch=writeBatch(db);
+        const newAvgCost = nextAvgCost({ stockQty:Number(product.stock)||0, avgCost:Number(product.avgCost)||0, purchaseQty:qty, unitCost:unitCostAFN }).avgCost;
         const pFields={ stock: increment(qty), avgCost: newAvgCost };
         if(!product.sellPrice) pFields.sellPrice = round2(unitCostAFN*1.15);
         batch.update(doc(cols.products, product.id), pFields);
@@ -2942,7 +2995,7 @@ const App = {
     } else {
       history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید'+(s.currency==='USD'?' (دالر)':''),amount:s.total,paid:s.paid,purchaseId:s.id,status:s.status,currency:s.currency||'AFN'}));
     }
-    const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:(x.type==='receive'?'دریافت پول':'پرداخت پول')+(x.currency==='USD'?' (دالر)':''),amount:x.amount,paid:null,isPayment:true,paymentId:x.id,receiptImage:x.receiptImage||null,who:this.whoLabel(x),currency:x.currency||'AFN'}));
+    const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:(x.reversalOf?'↩ ابطال — ':'')+(x.type==='receive'?'دریافت پول':'پرداخت پول')+(x.currency==='USD'?' (دالر)':''),amount:x.amount,paid:null,isPayment:true,paymentId:x.id,voided:!!x.voided,reversalOf:x.reversalOf||'',receiptImage:x.receiptImage||null,who:this.whoLabel(x),currency:x.currency||'AFN'}));
     const openings = (this.state.openingEntries||[]).filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:'بدهی افتتاحیه (قبل از سیستم)'+(x.currency==='USD'?' (دالر)':''),amount:x.amount,isOpening:true,currency:x.currency||'AFN'}));
     history = [...history,...pays,...openings].sort((a,b)=>(b.ts||0)-(a.ts||0));
 
@@ -2953,7 +3006,7 @@ const App = {
         const photoBtn = h.receiptImage
           ? `<span class="icon-btn" onclick="App.viewPaymentReceipt('${h.paymentId}')" title="مشاهده عکس رسید">${ic('image',15)}</span>`
           : `<span class="icon-btn" onclick="App.addPaymentReceiptPhoto('${h.paymentId}')" title="افزودن عکس رسید">${ic('camera',15)}</span>`;
-        return `<div class="row-item"><div class="r-left"><b>${h.label}</b>${photoBtn}<span class="sub">${h.date}</span>${h.who?`<span class="sub" style="opacity:.75;">${escapeHtml(h.who)}</span>`:''}</div><div class="r-right num" style="color:${color}">${f(h.amount)}</div></div>`;
+        return `<div class="row-item"><div class="r-left"><b>${h.label}</b>${photoBtn}${h.voided?' <span class="badge gold">باطل شده</span>':''}${(!h.voided && !h.reversalOf && App.isOwner())?`<span class="icon-btn" onclick="App.voidPayment('${h.paymentId}')" title="ابطال پرداخت">${ic('trash',15)}</span>`:''}<span class="sub">${h.date}</span>${h.who?`<span class="sub" style="opacity:.75;">${escapeHtml(h.who)}</span>`:''}</div><div class="r-right num" style="color:${color}">${f(h.amount)}</div></div>`;
       }
       if(h.isOpening){
         return `<div class="row-item"><div class="r-left"><b>${h.label}</b><span class="sub">${h.date}</span></div><div class="r-right num" style="color:var(--gold-d)">${f(h.amount)}</div></div>`;
@@ -2992,6 +3045,12 @@ const App = {
           <div class="field-note">نرخ فعلی دالر: <b class="num">${this.usdRate()>0?fmt2(this.usdRate()):'تنظیم نشده'}</b> <span onclick="App.quickSetUsdRate()" style="cursor:pointer;color:var(--gold-d);">ویرایش</span></div>` : ''}
           <label>${type==='customers'?'مبلغ دریافتی از مشتری':'مبلغ پرداختی به شرکت/عمده‌فروش'}</label>
           <input id="pay-amount" type="number" inputmode="decimal" step="0.01" placeholder="0">
+          ${type==='customers' ? (()=>{
+            const open=this.state.sales.filter(s=>s.customerId===p.id && s.status!=='cancelled' && (Number(s.remaining)||0)>0.001);
+            return open.length ? `<label>بابت کدام فاکتور؟</label>
+          <select id="pay-sale"><option value="">بدون تخصیص (حساب عمومی مشتری)</option>${open.map(s=>`<option value="${s.id}">فاکتور ${escapeHtml(this.invoiceNoLabel(s.id))} — باقی ${fmt(s.remaining)}</option>`).join('')}</select>
+          <div class="field-note">اگر فاکتور را انتخاب کنید، همان فاکتور تسویه می‌شود؛ مبلغ اضافه بدون تخصیص می‌ماند.</div>` : '';
+          })() : ''}
           <label>تاریخ</label>
           <input id="pay-date" type="date" value="${todayISO()}">
           <label>عکس رسید ${type==='suppliers'?'(پیشنهاد می‌شود ضمیمه کنید)':'(اختیاری)'}</label>
@@ -3009,10 +3068,70 @@ const App = {
   },
   recordPartyPayment(type,id){
     this.payFormOpen = true;
+    this._payTxId = uid(); // کلید یکتای همین فرم پرداخت
     this.render();
   },
   cancelPartyPaymentForm(){ this.payFormOpen=false; this.render(); },
+  /* ابطال پرداخت: پرداخت اصلی حذف نمی‌شود؛ یک رویداد معکوس (مبلغ منفی) ثبت می‌شود،
+     مانده طرف حساب و فاکتور برمی‌گردد، و Audit ثبت می‌شود. همه داخل یک transaction. */
+  voidPayment(paymentId){
+    if(!this.isOwner()){ this.toast('ابطال پرداخت فقط برای مالک مجاز است.'); return; }
+    const pay=this.state.payments.find(x=>x.id===paymentId);
+    if(!pay){ this.toast('پرداخت پیدا نشد.'); return; }
+    if(pay.voided||pay.reversalOf){ this.toast('این پرداخت قبلاً باطل شده است.'); return; }
+    this.openFormModal({
+      title:'ابطال پرداخت',
+      sub:(pay.type==='receive'?'دریافت از ':'پرداخت به ')+(pay.partyName||'')+' — '+fmt(pay.amount)+' — '+pay.date,
+      fields:[{key:'reason', label:'دلیل ابطال (الزامی)', type:'text', placeholder:'مثلاً مبلغ اشتباه ثبت شد'}],
+      submitLabel:'ابطال پرداخت', danger:true,
+      onSubmit:(v)=>{
+        const reason=(v.reason||'').trim();
+        if(!reason) throw new Error('دلیل ابطال را بنویسید.');
+        return this._runVoidPayment(paymentId, reason);
+      }
+    });
+  },
+  async _runVoidPayment(paymentId, reason){
+    const payRef=doc(cols.payments, paymentId);
+    const revId='rev_'+paymentId; // شناسهٔ ثابت: هرگز دو برگشت برای یک پرداخت ساخته نمی‌شود
+    try{
+      await runTransaction(db, async (tx)=>{
+        const snap=await tx.get(payRef);
+        if(!snap.exists()) throw new Error('پرداخت پیدا نشد.');
+        const original=snap.data();
+        const built = buildPaymentReversal({ original, id:revId, ts:Date.now(), date:todayISO(), userId:(this.user&&this.user.email)||'', reason });
+        const reversal=built.reversal, originalPatch=built.originalPatch;
+        const amt=Number(original.amount)||0;
+        const isCust=original.partyType==='customer';
+        const partyRef=doc(cols[isCust?'customers':'suppliers'], original.partyId);
+        const balField=(!isCust && original.currency==='USD') ? 'balanceUSD' : 'balance';
+        const alloc=Number(original.allocatedAmount)||0;
+        let saleSnap=null;
+        if(original.saleId && alloc>0) saleSnap=await tx.get(doc(cols.sales, original.saleId)); // همهٔ خواندن‌ها قبل از نوشتن
+        const clean={}; Object.keys(reversal).forEach(k=>{ if(reversal[k]!==undefined) clean[k]=reversal[k]; });
+        clean.allocatedAmount = -alloc;
+        tx.set(doc(cols.payments, revId), clean);
+        tx.update(payRef, originalPatch);
+        tx.update(partyRef, { [balField]: increment(amt) });
+        if(saleSnap && saleSnap.exists()){
+          const s=saleSnap.data();
+          tx.update(doc(cols.sales, original.saleId), { settled: increment(-alloc), remaining: increment(alloc), ...this.editMeta() });
+          this.audit(tx, { action:'reverse', entityType:'sale', entityId:original.saleId, before:s, after:{ ...s, remaining: round2((Number(s.remaining)||0)+alloc) } });
+        }
+        this.audit(tx, { action:'void', entityType:'payment', entityId:paymentId, before:original, after:{ ...original, ...originalPatch } });
+      });
+      this.toast('پرداخت باطل شد');
+    }catch(e){
+      console.error('void payment', e);
+      throw new Error((e&&e.message&&e.message.indexOf('باطل')>=0)?e.message:'ابطال پرداخت انجام نشد؛ اتصال اینترنت را بررسی کنید و دوباره تلاش کنید.');
+    }
+  },
   async submitPartyPayment(type,id){
+    if(this._payBusy) return; // جلوگیری از ثبت دوبارهٔ پرداخت با دوبار لمس
+    this._payBusy=true;
+    try{ await this._submitPartyPaymentInner(type,id); } finally { this._payBusy=false; }
+  },
+  async _submitPartyPaymentInner(type,id){
     const amt = parseFloat(document.getElementById('pay-amount').value);
     if(!amt || amt<=0){ this.toast('مبلغ را درست بنویسید'); return; }
     const date = document.getElementById('pay-date').value || todayISO();
@@ -3034,14 +3153,25 @@ const App = {
     }
     const colName = type==='customers' ? 'customers' : 'suppliers';
     const balField = (type==='suppliers' && currency==='USD') ? 'balanceUSD' : 'balance';
+    const paymentId=this._payTxId || uid();
+    if(this.state.payments.some(x=>x.id===paymentId)){ this.toast('این پرداخت قبلاً ثبت شده است.'); return; } // جلوگیری از ثبت دوبارهٔ پرداخت
     const batch=writeBatch(db);
     batch.update(doc(cols[colName], id), { [balField]: increment(-amt) });
-    const paymentId=uid();
-    const paymentDoc = {id:paymentId, ts:Date.now(), date, type: type==='customers'?'receive':'pay', partyType:type==='customers'?'customer':'supplier', partyId:id, partyName:p.name, amount:amt, currency, ...this.recordMeta()};
+    const saleSel = (type==='customers' && document.getElementById('pay-sale')) ? document.getElementById('pay-sale').value : '';
+    const allocSale = saleSel ? this.state.sales.find(s=>s.id===saleSel && s.customerId===id) : null;
+    const alloc = allocatePayment({ sale: allocSale, amount: amt });
+    const paymentDoc = {id:paymentId, ts:Date.now(), date, type: type==='customers'?'receive':'pay', partyType:type==='customers'?'customer':'supplier', partyId:id, partyName:p.name, amount:amt, currency, status:'posted', userId:(this.user&&this.user.email)||'', allocatedAmount:0, ...this.recordMeta()};
+    if(allocSale && alloc.applied>0){
+      paymentDoc.saleId = allocSale.id; paymentDoc.allocatedAmount = alloc.applied;
+      batch.update(doc(cols.sales, allocSale.id), { settled: increment(alloc.applied), remaining: increment(-alloc.applied), ...this.editMeta() });
+      this.audit(batch, { action:'allocate', entityType:'sale', entityId:allocSale.id, before:allocSale, after:{ ...allocSale, remaining: round2((Number(allocSale.remaining)||0)-alloc.applied) } });
+    }
+    this.audit(batch, { action:'create', entityType:'payment', entityId:paymentId, before:null, after:paymentDoc });
     if(currency==='USD') paymentDoc.rate = payRate;
     if(receiptImage) paymentDoc.receiptImage = receiptImage;
     batch.set(doc(cols.payments, paymentId), paymentDoc);
     batch.commit().catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
+    this._payTxId = undefined;
     this.payFormOpen = false;
     this.render();
   },
@@ -3300,11 +3430,14 @@ const App = {
     if(!hasMid && !(packUnit && packPer>1)){ this.toast('حداقل یک واحد میانی یا بزرگ با ظرفیت بیشتر از ۱ تعریف کنید.'); return; }
     const pid=uid();
     const defaultSaleUnit=packSize>0 ? packUnit : midUnit;
-    setDoc(doc(cols.products, pid), {id:pid, name, unit, unitQty:1, stock, avgCost:cost, sellPrice:0,
+    App._mv('OPENING','موجودی اول دوره / ثبت محصول جدید');
+    const _pb=writeBatch(db);
+    _pb.set(doc(cols.products, pid), {id:pid, name, unit, unitQty:1, stock, avgCost:cost, sellPrice:0,
       midUnit:hasMid ? midUnit : '', midPer:hasMid ? round4(midPer) : 0,
       packUnit:packSize>1 ? packUnit : '', packPer:packSize>1 ? round4(packSize) : 0,
       sellPriceMid:0, sellPricePack:0, defaultSaleUnit, saleUnits:[packSize>0?packUnit:'',hasMid?midUnit:''].filter(Boolean), allowFractionalSale:false,
-      ...this.recordMeta()}).then(()=>this.toast('محصول اضافه شد')).catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
+      ...this.recordMeta()});
+    _pb.commit().then(()=>this.toast('محصول اضافه شد')).catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
   },
   editProduct(id){
     if(!this.isOwner()){ this.toast('فقط مدیر می‌تواند اطلاعات محصول را ویرایش کند.'); return; }
@@ -3531,6 +3664,9 @@ const App = {
     const body=mode==='delta'
       ? `<label>واحد</label><select id="adj-unit">${unitOpts.map(o=>'<option value="'+escapeHtml(String(o.value))+'">'+escapeHtml(o.label)+'</option>').join('')}</select>
         <label style="margin-top:10px;">تعداد (مثبت یا منفی)</label><input id="adj-delta" type="text" inputmode="decimal" placeholder="مثال: +5 یا -3.2">
+        <label style="margin-top:10px;">دلیل</label>
+        <select id="adj-reason"><option value="count">اصلاح بعد از شمارش فیزیکی</option><option value="damaged">خراب/ضایع شده (زیان، بدون کم شدن پول نقد)</option><option value="personal">مصرف شخصی</option><option value="other">سایر</option></select>
+        <input id="adj-note" type="text" placeholder="توضیح (اختیاری)" style="margin-top:6px;">
         <div class="field-note">برای کاستی/مصرف شخصی، واحد فروش را انتخاب کنید و مقدار منفی بنویسید؛ مثلاً <b>-2 بسته</b>. عدد داخلی در اینجا انتخاب نمی‌شود.</div>`
       : `<label>تغییر واحد پیش‌فرض نمایش موجودی به</label><select id="adj-newunit">${unitOpts.map(o=>'<option value="'+o.value+'">'+o.label+'</option>').join('')}</select><div class="field-note" style="margin-top:8px;">فقط واحد نمایش تغییر می‌کند، موجودی ثابت می‌ماند.</div>`;
     document.getElementById('adj-mode-content').innerHTML = body;
@@ -3548,7 +3684,23 @@ const App = {
       const unitName=document.getElementById('adj-unit').value;
       const u=this.unitByName(p,unitName);
       const delta=round2(parseFloat(deltaStr)*u.factor);
-      return updateDoc(doc(cols.products, id), { stock: increment(delta) }).then(()=>this.toast((delta>0?'+':'-')+fmtQty(Math.abs(parseFloat(deltaStr)))+' '+u.name+' ثبت شد'));
+      if(!delta) throw new Error('مقدار صفر است.');
+      const kind=(document.getElementById('adj-reason')||{}).value||'count';
+      const noteTxt=((document.getElementById('adj-note')||{}).value||'').trim();
+      const reasonLbl={count:'اصلاح بعد از شمارش فیزیکی',damaged:'خراب/ضایع شده',personal:'مصرف شخصی',other:'سایر'}[kind]||'سایر';
+      const isWaste = kind==='damaged' && delta<0;
+      App._mv(isWaste?'WASTE':'ADJUSTMENT', reasonLbl+(noteTxt?(' — '+noteTxt):''), { refType:'manual' });
+      const batch=writeBatch(db);
+      batch.update(doc(cols.products, id), { stock: increment(delta), ...this.editMeta() });
+      if(isWaste){
+        // ضایعات: موجودی ↓ و زیان ↑ ، ولی پول نقد بدون تغییر (nonCash)
+        const expId=uid(); const cost=round2(Math.abs(delta)*(Number(p.avgCost)||0));
+        batch.set(doc(cols.expenses, expId), {id:expId, ts:Date.now(), date:todayISO(), category:WASTE_CATEGORY, amount:cost, nonCash:true, kind:'waste',
+          wasteId:expId, productId:id, quantity:Math.abs(delta), unit:'عدد', cost, warehouseId:DEFAULT_WAREHOUSE, reason:reasonLbl+(noteTxt?(' — '+noteTxt):''),
+          userId:(this.user&&this.user.email)||'', reference:'stock-adjustment', note:p.name+' · '+fmtQty(Math.abs(parseFloat(deltaStr)))+' '+u.name+(noteTxt?(' — '+noteTxt):''), ...this.recordMeta()});
+      }
+      this.audit(batch, { action:'adjust', entityType:'product', entityId:id, before:{ id, stock:p.stock }, after:{ id, stock:round4((Number(p.stock)||0)+delta) } });
+      return batch.commit().then(()=>this.toast((delta>0?'+':'-')+fmtQty(Math.abs(parseFloat(deltaStr)))+' '+u.name+' ثبت شد'));
     } else {
       const newUnit=document.getElementById('adj-newunit').value;
       if(!newUnit || !ladder.some(u=>u.name===newUnit)) throw new Error('واحد نامعتبر است.');
@@ -3733,14 +3885,13 @@ const App = {
     else if(this.reportPeriod==='month'){ start=startOfMonth(today); }
     else { start=this.reportStart||today; end=this.reportEnd||today; }
     // برای دورهٔ «امروز» یا بازه‌های خیلی کوتاه، ۷ روز آخر را نشان بده تا نمودار خالی نباشد
-    const dStart=new Date(start+'T00:00:00'), dEnd=new Date(end+'T00:00:00');
-    let days = Math.round((dEnd-dStart)/86400000)+1;
-    if(days<7){ dStart.setDate(dEnd.getDate()-6); days=7; }
-    if(days>60){ dStart.setTime(dEnd.getTime()-59*86400000); days=60; }
+    let dStartISO=start; const dEndISO=end;
+    let days = daysBetweenISO(dStartISO,dEndISO)+1;
+    if(days<7){ dStartISO=addDaysISO(dEndISO,-6); days=7; }
+    if(days>60){ dStartISO=addDaysISO(dEndISO,-59); days=60; }
     const labels=[], salesSeries=[], profitSeries=[];
     for(let i=0;i<days;i++){
-      const d=new Date(dStart); d.setDate(dStart.getDate()+i);
-      const iso=d.toISOString().slice(0,10);
+      const iso=addDaysISO(dStartISO,i);
       const daySales=this.salesInRange(iso,iso);
       labels.push(iso.slice(5));
       salesSeries.push(sum(daySales,'total'));
@@ -3884,8 +4035,10 @@ const App = {
       businessAddress:(document.getElementById('set-address').value||'').trim(),
       openingNote:(document.getElementById('set-opening-note').value||'').trim(),
       lowStockThreshold: parseFloat(document.getElementById('set-lowstock').value)||0,
+      timezone: (document.getElementById('set-timezone')||{}).value || 'Asia/Kabul',
     };
     updateDoc(settingsDocRef, fields).then(()=>{
+      setBusinessTimezone(fields.timezone);
       document.getElementById('biz-name').textContent=fields.businessName;
       this.toast('تنظیمات ذخیره شد');
     }).catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
@@ -3899,7 +4052,7 @@ const App = {
     URL.revokeObjectURL(url);
   },
   exportBackup(){
-    this._downloadJSON(this.state, 'backup-hesabdari-'+todayISO()+'.json');
+    this._downloadJSON(buildBackup({ businessId:BIZ_ID, state:this.state, appVersion:'hesabdari-app' }), 'backup-hesabdari-'+todayISO()+'.json');
   },
   async exportBackupExcel(){
     if(typeof XLSX==='undefined'){
@@ -3932,12 +4085,21 @@ const App = {
       let parsed;
       try{ parsed=JSON.parse(e.target.result); }
       catch(err){ console.error(err); this.toastError('فایل پشتیبان معتبر نیست.'); input.value=''; return; }
+      // بررسی کامل قبل از هر تغییری: ساختار، شناسه‌ها، نوع مقدارها، فیلدهای الزامی
+      const check = validateBackup(parsed);
+      if(!check.ok){
+        console.error('backup validation', check.errors);
+        this.toastError('فایل پشتیبان معتبر نیست: '+check.errors.slice(0,3).join(' | '));
+        input.value=''; return;
+      }
+      const normalized = (parsed.schemaVersion!==undefined) ? { ...parsed.collections, settings: parsed.settings||{} } : parsed;
+      this.toast('فایل بررسی شد — '+Object.keys(check.counts).map(k=>k+': '+check.counts[k]).join('، '));
       /* دو confirm() خام مرورگر با یک مودال داخلی جایگزین شد — همان دو هشدار، در یک متن */
       this.openConfirmModal({
         title:'بازیابی از فایل پشتیبان',
         msg:'این کار دیتابیس مشترک همهٔ کاربران (نه فقط همین گوشی) را با فایل انتخابی جایگزین می‌کند. قبل از جایگزینی، یک نسخهٔ پشتیبان از وضعیت فعلی خودکار دانلود می‌شود تا اگر اشتباهی رخ داد بتوانید برگردید. ادامه می‌دهید؟',
         danger:true, confirmLabel:'بله، بازیابی کن',
-        onConfirm: ()=>{ this._runImportBackup(parsed, input); }
+        onConfirm: ()=>{ this._runImportBackup(normalized, input); }
       });
       input.value='';
     };
@@ -3945,7 +4107,7 @@ const App = {
   },
   async _runImportBackup(parsed, input){
     try{
-      this._downloadJSON(this.state, 'auto-backup-before-import-'+Date.now()+'.json');
+      this._downloadJSON(buildBackup({ businessId:BIZ_ID, state:this.state, appVersion:'hesabdari-app' }), 'auto-backup-before-import-'+Date.now()+'.json');
 
         migrateSettings(parsed.settings);
         migrateRecordArrays(parsed.sales, parsed.purchases);
@@ -3954,8 +4116,8 @@ const App = {
           const existing = await getDocs(cols[name]);
           const importedIds = new Set((parsed[name]||[]).map(r=>r.id));
           const opsBatchLimit=400;
-          let batch=writeBatch(db); let opCount=0;
-          const flush=async()=>{ if(opCount>0){ await batch.commit(); batch=writeBatch(db); opCount=0; } };
+          let batch=writeBatch(db,{noLedger:true}); let opCount=0;
+          const flush=async()=>{ if(opCount>0){ await batch.commit(); batch=writeBatch(db,{noLedger:true}); opCount=0; } };
           for(const d of existing.docs){
             if(!importedIds.has(d.id)){ batch.delete(d.ref); opCount++; if(opCount>=opsBatchLimit) await flush(); }
           }
@@ -3966,6 +4128,9 @@ const App = {
           await flush();
         }
         await setDoc(settingsDocRef, migrateSettings(parsed.settings||{}));
+        // Stock Ledger از نو ساخته می‌شود: حرکت‌های قبلی پاک، و برای هر کالا «موجودی اول دوره» ثبت می‌شود
+        await this._resetStockLedger(parsed.products||[], 'بازیابی از فایل پشتیبان');
+        { const ab=writeBatch(db,{noLedger:true}); this.audit(ab,{ action:'restore', entityType:'backup', entityId:'import', before:null, after:{ id:'import' } }); await ab.commit(); }
         this.toast('بازیابی موفقانه انجام شد');
         this.navigate('dashboard');
     }catch(err){ console.error(err); this.toastError('بازیابی ناکام شد؛ فایل پشتیبان معتبر نیست یا خطایی رخ داد.'); }
@@ -3986,18 +4151,82 @@ const App = {
       })
     });
   },
+  async runReconcile(kind){
+    if(!this.isOwner()){ this.toast('این ابزار فقط برای مالک است.'); return; }
+    const s=this.state; let rows=[], title='', extra='';
+    try{
+      if(kind==='customers'){ title='تطبیق مانده مشتریان'; rows=reconcileCustomers({ customers:s.customers, sales:s.sales, payments:s.payments, openingEntries:s.openingEntries }); }
+      else if(kind==='suppliers'){ title='تطبیق مانده عمده‌فروشان'; rows=reconcileSuppliers({ suppliers:s.suppliers, purchases:s.purchases, payments:s.payments, openingEntries:s.openingEntries }); }
+      else if(kind==='invoices'){ title='تطبیق مجموع فاکتورها'; rows=reconcileInvoices({ sales:s.sales }); }
+      else if(kind==='stock'){
+        title='تطبیق موجودی انبار';
+        const snap=await getDocs(cols.stockLedger);
+        rows=reconcileStock({ products:s.products, movements:snap.docs.map(d=>d.data()) });
+        const neg=negativeStockProducts(s.products);
+        if(neg.length) extra='<div class="field-note" style="color:var(--red);">کالاهای با موجودی منفی: '+neg.map(n=>escapeHtml(n.name)+' ('+fmtQty(n.stock)+' عدد)').join('، ')+'</div>';
+      } else return;
+    }catch(e){ console.error(e); this.toastError('خطا در محاسبه؛ دوباره تلاش کنید.'); return; }
+    const isCust=kind==='customers';
+    const body = rows.length ? rows.map(r=>{
+      if(kind==='invoices') return '<div class="row-item"><div class="r-left"><b>فاکتور '+escapeHtml(this.invoiceNoLabel(r.id))+' — '+escapeHtml(r.name)+'</b><span class="sub">مجموع ثبت‌شده '+fmt(r.cachedTotal)+' · محاسبه‌شده '+fmt(r.expectedTotal)+' · باقی ثبت‌شده '+fmt(r.cachedRemaining)+' · محاسبه‌شده '+fmt(r.expectedRemaining)+'</span></div></div>';
+      const btn = kind==='stock'
+        ? '<button class="btn btn-outline" style="margin:0;width:auto;padding:6px 10px;" onclick="App.repairStock(\''+r.id+'\','+r.expected+')">اصلاح</button>'
+        : '<button class="btn btn-outline" style="margin:0;width:auto;padding:6px 10px;" onclick="App.repairBalance(\''+(isCust?'customers':'suppliers')+'\',\''+r.id+'\','+r.expected+','+(/\(\$\)$/.test(r.name)?'\'USD\'':'\'AFN\'')+')">اصلاح</button>';
+      return '<div class="row-item"><div class="r-left"><b>'+escapeHtml(r.name)+'</b><span class="sub">ثبت‌شده '+fmt(r.cached)+' · محاسبه‌شده '+fmt(r.expected)+' · اختلاف '+fmt(r.diff)+'</span></div>'+btn+'</div>';
+    }).join('') : '<div class="empty">هیچ اختلافی پیدا نشد ✓</div>';
+    this.openCustomModal({ title, sub: rows.length ? (rows.length+' مورد اختلاف') : 'همه‌چیز با تاریخچه می‌خواند', bodyHtml: extra+body, submitLabel:'بستن', onSubmit:()=>{} });
+  },
+  repairBalance(type,id,expected,cur){
+    this.openConfirmModal({ title:'اصلاح مانده', danger:true, confirmLabel:'اصلاح شود',
+      msg:'مانده ذخیره‌شده با مقدار محاسبه‌شده از تاریخچه ('+fmt(expected)+') جایگزین شود؟ (یک رکورد Audit ثبت می‌شود)',
+      onConfirm:()=>{
+        const arr=type==='customers'?this.state.customers:this.state.suppliers; const p=arr.find(x=>x.id===id); if(!p) return;
+        const f=(type==='suppliers'&&cur==='USD')?'balanceUSD':'balance';
+        const b=writeBatch(db);
+        b.update(doc(cols[type],id),{ [f]:expected, ...this.editMeta() });
+        this.audit(b,{ action:'adjust', entityType:type==='customers'?'customer':'supplier', entityId:id, before:{ id, [f]:p[f] }, after:{ id, [f]:expected } });
+        return b.commit().then(()=>this.toast('مانده اصلاح شد')).catch(e=>{ console.error(e); this.toastError('خطا؛ دوباره تلاش کنید.'); });
+      } });
+  },
+  repairStock(id,expected){
+    this.openConfirmModal({ title:'اصلاح موجودی', danger:true, confirmLabel:'اصلاح شود',
+      msg:'موجودی ذخیره‌شده با مجموع حرکت‌های انبار ('+fmtQty(expected)+' عدد) جایگزین شود؟ فقط وقتی انجام دهید که مطمئنید تاریخچهٔ حرکت‌ها کامل است.',
+      onConfirm:()=>{
+        const p=this.state.products.find(x=>x.id===id); if(!p) return;
+        const b=writeBatch(db,{noLedger:true});
+        b.update(doc(cols.products,id),{ stock:expected, ...this.editMeta() });
+        this.audit(b,{ action:'adjust', entityType:'product', entityId:id, before:{ id, stock:p.stock }, after:{ id, stock:expected } });
+        return b.commit().then(()=>this.toast('موجودی اصلاح شد')).catch(e=>{ console.error(e); this.toastError('خطا؛ دوباره تلاش کنید.'); });
+      } });
+  },
+  async _resetStockLedger(products, reason){
+    const existing = await getDocs(cols.stockLedger);
+    let batch=writeBatch(db,{noLedger:true}); let n=0;
+    const flush=async()=>{ if(n>0){ await batch.commit(); batch=writeBatch(db,{noLedger:true}); n=0; } };
+    for(const d of existing.docs){ batch.delete(d.ref); n++; if(n>=400) await flush(); }
+    for(const p of products){
+      const q=Number(p.stock)||0; if(!q) continue;
+      const id=uid();
+      batch.set(doc(cols.stockLedger,id), buildMovement({ id, ts:Date.now(), date:todayISO(), productId:p.id, warehouseId:DEFAULT_WAREHOUSE, type:'OPENING',
+        quantityBase:q, unit:'عدد', unitCost:Number(p.avgCost)||0, userId:(this.user&&this.user.email)||'', referenceType:'restore', reason }));
+      n++; if(n>=400) await flush();
+    }
+    await flush();
+  },
   async _runWipeAll(){
-    this._downloadJSON(this.state, 'auto-backup-before-wipe-'+Date.now()+'.json');
+    this._downloadJSON(buildBackup({ businessId:BIZ_ID, state:this.state, appVersion:'hesabdari-app' }), 'auto-backup-before-wipe-'+Date.now()+'.json');
     try{
       for(const name of COLLECTIONS){
         const existing = await getDocs(cols[name]);
-        let batch=writeBatch(db); let opCount=0;
+        let batch=writeBatch(db,{noLedger:true}); let opCount=0;
         for(const d of existing.docs){
           batch.delete(d.ref); opCount++;
-          if(opCount>=400){ await batch.commit(); batch=writeBatch(db); opCount=0; }
+          if(opCount>=400){ await batch.commit(); batch=writeBatch(db,{noLedger:true}); opCount=0; }
         }
         if(opCount>0) await batch.commit();
       }
+      await this._resetStockLedger([], 'پاک کردن همهٔ اطلاعات');
+      { const ab=writeBatch(db,{noLedger:true}); this.audit(ab,{ action:'wipe', entityType:'business', entityId:BIZ_ID, before:null, after:null }); await ab.commit(); }
       await setDoc(settingsDocRef, defaultSettings());
       this.navigate('dashboard');
     }catch(e){ console.error(e); App.toastError('خطا در پاک کردن اطلاعات؛ دوباره تلاش کنید.'); }
@@ -4013,6 +4242,14 @@ const App = {
       <div class="field-note">این نام فقط روی همین گوشی ذخیره می‌شود و کنار هر فروش/خرید/مصرفی که از این گوشی ثبت کنید نشان داده می‌شود. حساب ورودی فعلی: <b>${escapeHtml(this.user?this.user.email:'')}</b></div>
       <button class="btn btn-outline" onclick="App.saveDeviceLabelFromInput()">${ic('save',16)}ذخیرهٔ نام دستگاه</button>
     </div>
+    ${this.isOwner()?`<div class="card">
+      <b>ابزار تطبیق حساب‌ها (فقط مالک)</b>
+      <div class="field-note">مانده‌ها و موجودی را دوباره از تاریخچهٔ معاملات حساب می‌کند و اختلاف را گزارش می‌دهد. هیچ‌چیز بدون تأیید شما اصلاح نمی‌شود.</div>
+      <button class="btn btn-outline" onclick="App.runReconcile('customers')">${ic('clipboard',16)}تطبیق مانده مشتریان</button>
+      <button class="btn btn-outline" onclick="App.runReconcile('suppliers')">${ic('clipboard',16)}تطبیق مانده عمده‌فروشان</button>
+      <button class="btn btn-outline" onclick="App.runReconcile('stock')">${ic('clipboard',16)}تطبیق موجودی انبار</button>
+      <button class="btn btn-outline" onclick="App.runReconcile('invoices')">${ic('clipboard',16)}تطبیق مجموع فاکتورها</button>
+    </div>`:''}
     <div class="card">
       <label>نام کسب‌وکار</label>
       <input id="set-name" value="${escapeHtml(s.businessName)}">
@@ -4022,6 +4259,8 @@ const App = {
         <option value="دالر" ${s.currency==='دالر'?'selected':''}>دالر</option>
         <option value="کلدار" ${s.currency==='کلدار'?'selected':''}>کلدار پاکستانی</option>
       </select>
+      <label>منطقهٔ زمانی کسب‌وکار (برای «امروز» و گزارش‌ها)</label>
+      <select id="set-timezone">${[['Asia/Kabul','افغانستان (کابل)'],['Asia/Karachi','پاکستان (کراچی)'],['Asia/Tehran','ایران (تهران)'],['Asia/Dubai','امارات (دبی)'],['UTC','UTC']].map(z=>'<option value="'+z[0]+'"'+((s.timezone||'Asia/Kabul')===z[0]?' selected':'')+'>'+z[1]+'</option>').join('')}</select>
       <label>موجودی نقد آغازین صندوق</label>
       <input id="set-cash" type="number" value="${s.openingCash}">
       <label>نرخ فعلی دالر (۱ دالر = چند ${s.currency}؟)</label>

@@ -1,0 +1,14 @@
+{
+  "name": "hesabdari",
+  "private": true,
+  "type": "module",
+  "description": "حساب‌داری فروشگاه صانع — PWA (بدون build). این فایل فقط برای اجرای تست‌هاست.",
+  "scripts": {
+    "test": "node --test tests/core.test.mjs tests/ledger.test.mjs tests/smoke.test.mjs tests/sw.test.mjs tests/static.test.mjs",
+    "test:rules": "firebase emulators:exec --only firestore \"node --test tests/rules.test.mjs\""
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "latest",
+    "firebase-tools": "latest"
+  }
+}
