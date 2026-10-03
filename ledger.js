@@ -98,7 +98,7 @@ export function reconcileInvoices({ sales }){
   const out = [];
   (sales||[]).forEach(s=>{
     const sub = (s.items||[]).reduce((a,it)=>a+Math.max(0,(Number(it.qty)||0)-(Number(it.returnedQty)||0))*(Number(it.unitPrice)||0),0);
-    const expTotal = round2(sub - (Number(s.discount)||0));
+    const expTotal = Math.max(0, round2(sub - (Number(s.discount)||0)));
     const expRemaining = round2(expTotal - (Number(s.paid)||0) - (Number(s.settled)||0));
     const totalOff = Math.abs(round2(Number(s.total)||0) - expTotal) > EPS;
     const remOff = s.status!=='cancelled' && Math.abs(round2(Number(s.remaining)||0) - Math.max(0,expRemaining)) > EPS;
@@ -122,5 +122,79 @@ export function summarizeDoc(d){
   const keep = ['id','date','total','paid','settled','remaining','discount','status','amount','partyId','customerId','supplierId','stock','balance','balanceUSD'];
   const out = {}; keep.forEach(k=>{ if(d[k] !== undefined) out[k] = d[k]; });
   if(Array.isArray(d.items)) out.itemsCount = d.items.length;
+  return out;
+}
+
+
+/* =====================================================================
+   مرجوعی / لغو / کاستی به‌صورت «رویداد جدا» + گزارش ناخالص و خالص
+   ---------------------------------------------------------------------
+   فاکتور اصلی تاریخ خودش را حفظ می‌کند. هر مرجوعی/لغو/کاستی یک سند جدا در
+   کالکشن returns است (با تاریخ خودش). روی فاکتور فقط دو عددِ جمع‌شده
+   (returnedAmount و returnedCost) نگه داشته می‌شود که همیشه از رویدادها
+   قابل بازسازی و تطبیق است.
+   ===================================================================== */
+export const RETURN_KINDS = ['return','cancel','shortage'];
+
+/* amount = مقداری که «مجموع فاکتور» واقعاً از آن کم شد؛ cost = قیمت تمام‌شده‌ای که به انبار برگشت */
+export function buildReturnEvent({ id, ts, date, sale, kind, items, amount, cost, reason, userId, cashRefund, debtReduction, releasedSettled }){
+  if(!sale) throw new Error('فاکتور اصلی پیدا نشد.');
+  if(!RETURN_KINDS.includes(kind)) throw new Error('نوع رویداد نامعتبر: '+kind);
+  const list = (items||[]).map(it=>({
+    productId: it.productId || '', name: it.name || '', qty: round4(it.qty), unit: it.unit || 'عدد',
+    qtyLabel: it.qtyLabel || '', unitPrice: round2(it.unitPrice), cost: round4(it.cost || 0),
+    amount: round2(it.amount != null ? it.amount : (Number(it.qty)||0) * (Number(it.unitPrice)||0))
+  }));
+  return {
+    id, returnId: id, originalSaleId: sale.id, customerId: sale.customerId || '', customerName: sale.customerName || '',
+    ts, date, kind, items: list,
+    quantities: round4(list.reduce((a,x)=>a + x.qty, 0)),
+    amount: round2(amount), cost: round2(cost || 0), reason: reason || '', userId: userId || '',
+    cashRefund: round2(cashRefund || 0), debtReduction: round2(debtReduction || 0), releasedSettled: round2(releasedSettled || 0)
+  };
+}
+
+function sumBy(arr, f){ return (arr||[]).reduce((a,x)=>a + (Number(f(x))||0), 0); }
+/* مجموع مرجوعیِ یک فاکتور؛ اگر فیلد جمع‌شده نبود از آرایهٔ قدیمی sale.returns */
+export function saleReturnedAmount(s){
+  if(s && s.returnedAmount !== undefined && s.returnedAmount !== null) return Number(s.returnedAmount)||0;
+  return sumBy(s && s.returns, r=>r.amount);
+}
+export function saleReturnedCost(s){ return Number(s && s.returnedCost) || 0; }
+
+/* گزارش یک بازه:
+   فروش ناخالص (با تاریخ خود فاکتور، پیش از تخفیف و مرجوعی) − تخفیف − مرجوعی (با تاریخ خود مرجوعی) = فروش خالص
+   بهای تمام‌شده هم همین‌طور: بهای فروش‌های بازه − بهای کالاهای برگشتی در بازه. */
+export function salesSummary({ sales, returns, from, to }){
+  const inRange = (d)=> d >= from && d <= to;
+  const periodSales = (sales||[]).filter(s=>inRange(s.date));
+  const periodReturns = (returns||[]).filter(r=>inRange(r.date));
+  const gross = round2(sumBy(periodSales, s=>(Number(s.total)||0) + (Number(s.discount)||0) + saleReturnedAmount(s)));
+  const discounts = round2(sumBy(periodSales, s=>s.discount));
+  const returnsAmount = round2(sumBy(periodReturns, r=>r.amount));
+  const net = round2(gross - discounts - returnsAmount);
+  const cogsGross = round2(sumBy(periodSales, s=>(Number(s.totalCost)||0) + saleReturnedCost(s)));
+  const cogsReturned = round2(sumBy(periodReturns, r=>r.cost));
+  const cogs = round2(cogsGross - cogsReturned);
+  return {
+    gross, discounts, returns: returnsAmount, net,
+    cogsGross, cogsReturned, cogs, grossProfit: round2(net - cogs),
+    invoices: periodSales.filter(s=>s.status!=='cancelled').length,
+    cancelledInvoices: periodSales.filter(s=>s.status==='cancelled').length,
+    returnEvents: periodReturns.length
+  };
+}
+
+/* تطبیق: returnedAmount روی فاکتور باید با مجموع رویدادهای همان فاکتور برابر باشد */
+export function reconcileReturns({ sales, returns }){
+  const byId = {};
+  (returns||[]).forEach(r=>{ byId[r.originalSaleId] = (byId[r.originalSaleId]||0) + (Number(r.amount)||0); });
+  const out = [];
+  (sales||[]).forEach(s=>{
+    const cached = saleReturnedAmount(s), expected = byId[s.id] || 0;
+    if(Math.abs(cached - expected) > EPS) out.push({ id:s.id, name:s.customerName||'', cached:round2(cached), expected:round2(expected), diff:round2(cached-expected) });
+  });
+  const known = new Set((sales||[]).map(s=>s.id));
+  Object.keys(byId).forEach(id=>{ if(!known.has(id)) out.push({ id, name:'(فاکتور پیدا نشد)', cached:0, expected:round2(byId[id]), diff:round2(-byId[id]) }); });
   return out;
 }

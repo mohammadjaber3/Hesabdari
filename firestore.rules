@@ -160,6 +160,16 @@ service cloud.firestore {
         allow delete: if isOwner(biz);
       }
 
+      // ---------- مرجوعی / ابطال / کاستی فروش: رویداد جدا، فقط افزودنی ----------
+      match /returns/{id} {
+        allow read: if canReadSalesSide(biz);
+        allow create: if (isOwner(biz) || isManager(biz) || isStaff(biz) || isSalesman(biz))
+                      && idMatches(id) && num(request.resource.data.amount) && request.resource.data.amount >= 0
+                      && request.resource.data.originalSaleId is string;
+        allow update: if false;
+        allow delete: if isOwner(biz);   // فقط برای «بازیابی/پاک‌کردن همه»
+      }
+
       // ---------- Stock Ledger و Audit: فقط افزودنی ----------
       // ثبت: هر نقش عملیاتی (همراه با عملیات فروش/خرید/اصلاح). ویرایش: هرگز. حذف: فقط مالک (برای «بازیابی/پاک‌کردن همه»).
       match /stockLedger/{id} {

@@ -12,7 +12,7 @@ import {
 } from "./firebase-sdk.js";
 import {
   round2, round4, fmtQty, todayISO, addDaysISO, daysBetweenISO, startOfWeekISO, startOfMonthISO, dateLabelFa,
-  setBusinessTimezone, calcInvoice, nextAvgCost, describeAuthError,
+  setBusinessTimezone, calcInvoice, rebalanceAfterTotalChange, nextAvgCost, describeAuthError,
   makePinRecord, verifyPin, pinStateAfterFailure, pinStateAfterSuccess, pinLockRemainingMs,
   buildBackup, validateBackup
 } from "./core.js";
@@ -24,7 +24,8 @@ import {
 import {
   buildMovement, isNonCashExpense, cashExpensesTotal, buildPaymentReversal, allocatePayment,
   reconcileCustomers, reconcileSuppliers, reconcileStock, reconcileInvoices, negativeStockProducts,
-  buildAuditEntry, summarizeDoc, WASTE_CATEGORY, DEFAULT_WAREHOUSE
+  buildAuditEntry, summarizeDoc, WASTE_CATEGORY, DEFAULT_WAREHOUSE,
+  buildReturnEvent, salesSummary, reconcileReturns, saleReturnedAmount
 } from "./ledger.js";
 
 /* ---------- قفل نرمِ نقش «شریک» (فقط دیدن) ----------
@@ -123,7 +124,7 @@ setPersistence(auth, browserLocalPersistence).catch(()=>{});
 const BIZ_ID = 'main';
 /* هر نوع رکورد حالا کالکشن جدای خودش را دارد — دیگر یک سند مشترک بزرگ نیست.
    یعنی ویرایش یک فاکتور، رکورد فاکتور دیگری را از دست نمی‌برد. */
-const COLLECTIONS = ['products','customers','suppliers','sales','purchases','expenses','payments','openingEntries'];
+const COLLECTIONS = ['products','customers','suppliers','sales','purchases','expenses','payments','openingEntries','returns'];
 const cols = {};
 COLLECTIONS.forEach(name => { cols[name] = collection(db, 'businesses', BIZ_ID, name); });
 /* کالکشن‌های «فقط‌افزودنی» — با listener زنده بارگذاری نمی‌شوند (حجمشان زیاد می‌شود)،
@@ -412,7 +413,7 @@ function ic(name, size, extraClass){
 /* ---------- App ---------- */
 
 const App = {
-  state: { settings: defaultSettings(), products:[], customers:[], suppliers:[], sales:[], purchases:[], expenses:[], payments:[], openingEntries:[] },
+  state: { settings: defaultSettings(), products:[], customers:[], suppliers:[], sales:[], purchases:[], expenses:[], payments:[], openingEntries:[], returns:[] },
   tab:'dashboard', sub:null,
   saleDraft:null, purchaseDraft:null, editingInvoiceId:null,
   reportPeriod:'today', reportStart:null, reportEnd:null,
@@ -504,6 +505,20 @@ const App = {
     const entry = buildAuditEntry({ id, ts:Date.now(), action, entityType, entityId,
       userId:(this.user&&this.user.email)||'', userRole:this.role||'', before:summarizeDoc(before), after:summarizeDoc(after) });
     target.set(doc(cols.auditLog, id), entry);
+  },
+  /* وقتی بخشی از پرداختِ تخصیص‌یافته به یک فاکتور آزاد می‌شود (مرجوعی/لغو/کم‌شدن مجموع)،
+     مقدار تخصیص روی همان پرداخت‌ها (تازه‌ترین اول) کم می‌شود تا مانده‌ها همیشه با تاریخچه بخوانند. */
+  _releaseAllocations(target, saleId, amount){
+    let left=round2(amount);
+    const cands=(this.state.payments||[]).filter(p=>p.saleId===saleId && !p.voided && !p.reversalOf && (Number(p.allocatedAmount)||0)>0.001)
+      .sort((a,b)=>(b.ts||0)-(a.ts||0));
+    for(const p of cands){
+      if(left<=0.001) break;
+      const take=Math.min(left, Number(p.allocatedAmount)||0);
+      target.update(doc(cols.payments,p.id), { allocatedAmount: increment(-take) });
+      left=round2(left-take);
+    }
+    return round2(amount-left);
   },
   recordMeta(){
     return {
@@ -1165,7 +1180,8 @@ const App = {
     const todayExpensesAll = this.expensesInRange(today,today);
     const todayExpenses = todayExpensesAll.filter(e=>e.category!==WITHDRAWAL_CATEGORY);
     const todayWithdrawals = todayExpensesAll.filter(e=>e.category===WITHDRAWAL_CATEGORY);
-    const todayProfit = sum(todaySales,'profit') - sum(todayExpenses,'amount');
+    const todaySm = salesSummary({ sales:this.state.sales, returns:this.state.returns, from:today, to:today });
+    const todayProfit = todaySm.grossProfit - sum(todayExpenses,'amount');
     const cur = this.state.settings.currency;
 
     const recent = [
@@ -1196,7 +1212,7 @@ const App = {
       ${this.canSeeBooks()?`<div class="row"><span class="label">${ic(todayProfit>=0?'trending-up':'trending-down',15)}سود امروز</span><span class="val num ${todayProfit>=0?'green':'red'}">${fmt(todayProfit)} ${cur}</span></div>`:''}
     </div>
     <div class="ledger-strip">
-      <div class="chip"><div class="t">فروش امروز</div><div class="v num">${fmt(sum(todaySales,'total'))}</div></div>
+      <div class="chip"><div class="t">فروش خالص امروز</div><div class="v num">${fmt(todaySm.net)}</div></div>
       ${this.canSeeBooks()?`<div class="chip"><div class="t">مصرف امروز</div><div class="v num">${fmt(sum(todayExpenses,'amount'))}</div></div>`:''}
       ${todayWithdrawals.length?`<div class="chip"><div class="t">${ic('hand-coins',12)}برداشت امروز</div><div class="v num">${fmt(sum(todayWithdrawals,'amount'))}</div></div>`:''}
       <div class="chip"><div class="t">طلب از مشتریان</div><div class="v num">${fmt(this.totalReceivable())}</div></div>
@@ -1495,7 +1511,7 @@ const App = {
       id:saleId, ts:Date.now(), date, customerId, customerName:customerNameFinal,
       customerPhone: custPhone, customerAddress: custAddress,
       items:this.saleDraft.items.map(it=>({...it,returnedQty:0})), total, totalCost, profit: round2(total-totalCost),
-      paid, remaining, note, status:'active', returns:[], originalTotal: total, discount:0,
+      paid, remaining, note, status:'active', returns:[], originalTotal: total, discount:0, returnedAmount:0, returnedCost:0,
       ...this.recordMeta()
     };
     batch.set(doc(cols.sales, saleId), newSale);
@@ -1576,6 +1592,7 @@ const App = {
     if(sale.discount>0.5) lines.push('🏷 تخفیف داده‌شده: '+fmt(sale.discount)+' '+s.currency);
     lines.push('مجموع فاکتور: '+fmt(sale.total)+' '+s.currency);
     lines.push('پرداخت‌شده: '+fmt(sale.paid)+' '+s.currency);
+    if((Number(sale.settled)||0)>0.5) lines.push('پرداخت‌های بعدی: '+fmt(sale.settled)+' '+s.currency);
     if(sale.status==='cancelled') lines.push('وضعیت: باطل شده ❌');
     else if(sale.remaining>0.5) lines.push('باقیمانده (قرض): '+fmt(sale.remaining)+' '+s.currency);
     else lines.push('وضعیت: تسویه‌شده ✅');
@@ -1670,6 +1687,7 @@ const App = {
         ${sale.discount>0.5?`<div class="row-item"><div class="r-left">تخفیف داده‌شده</div><div class="r-right num" style="color:var(--gold-d)">-${fmt(sale.discount)} ${s.currency}</div></div>`:''}
         <div class="row-item"><div class="r-left">مجموع فعلی فاکتور</div><div class="r-right num">${fmt(sale.total)} ${s.currency}</div></div>
         <div class="row-item"><div class="r-left">مبلغ دریافت‌شده</div><div class="r-right num" style="color:var(--green)">${fmt(sale.paid)} ${s.currency}</div></div>
+        ${(Number(sale.settled)||0)>0.5?`<div class="row-item"><div class="r-left">پرداخت‌های بعدی (تخصیص‌یافته)</div><div class="r-right num" style="color:var(--green)">${fmt(sale.settled)} ${s.currency}</div></div>`:''}
         <div class="row-item"><div class="r-left"><b>${sale.remaining>0.5?'باقیمانده (قرض)':'وضعیت'}</b></div><div class="r-right num" style="color:${sale.remaining>0.5?'var(--red)':'var(--green)'}"><b>${cancelled?'باطل شده':(sale.remaining>0.5?fmt(sale.remaining)+' '+s.currency:`<span class="inv-stamp">${ic('check',12)}تسویه‌شده</span>`)}</b></div></div>
       </div>
       ${sale.note?`<div class="inv-note">یادداشت: ${escapeHtml(sale.note)}</div>`:''}
@@ -1731,6 +1749,7 @@ const App = {
       <label>مبلغ دریافت‌شده (نقد)</label>
       <input id="edit-sale-paid" type="number" inputmode="decimal" value="${sale.paid}">
       <div class="field-note">اگر مبلغ دریافتی کمتر از مجموع باشد، باقیمانده به عنوان بدهی مشتری ثبت می‌شود.</div>
+      ${(Number(sale.settled)||0)>0.001?`<div class="field-note">پرداخت‌های بعدیِ تخصیص‌یافته به این فاکتور (${fmt(sale.settled)}) جداگانه حفظ می‌شود و در عدد بالا نیست.</div>`:''}
 
       <label>یادداشت</label>
       <input id="edit-sale-note" value="${escapeHtml(sale.note||'')}">
@@ -1792,7 +1811,7 @@ const App = {
     // تخفیفی که قبلاً روی فاکتور ثبت شده (sale.discount) با ویرایش از بین نمی‌رود.
     let paidInput=parseFloat(document.getElementById('edit-sale-paid').value);
     if(isNaN(paidInput)||paidInput<0) paidInput=0;
-    const calc = calcInvoice({ items:newItems, discount:sale.discount, paid:paidInput });
+    const calc = calcInvoice({ items:newItems, discount:sale.discount, paid:paidInput, settled:sale.settled||0 });
     const newTotal=calc.total, paid=calc.paid, newRemaining=calc.remaining, overpaid=calc.overpaid;
     // اضافه‌پرداخت (مشتری بیشتر از مجموع جدید داده) گم نمی‌شود: به‌عنوان اعتبار در حساب مشتری ثبت می‌شود
     if(overpaid>0.001 && !custName){ this.toast('مبلغ دریافتی از مجموع فاکتور بیشتر است ('+fmt(overpaid)+'). برای ثبت اعتبار، نام مشتری را بنویسید یا مبلغ را کم کنید.'); return; }
@@ -1865,9 +1884,10 @@ const App = {
       items:newItems, customerId:newCustomerId, customerName:newCustomerNameFinal,
       customerPhone:custPhone, customerAddress:custAddress, date, note,
       total:newTotal, discount:calc.discount, totalCost:newTotalCost, profit:round2(newTotal-newTotalCost),
-      paid, remaining:newRemaining, ...this.editMeta()
+      paid, settled:calc.settled, remaining:newRemaining, ...this.editMeta()
     });
 
+    { const rel=round2((Number(sale.settled)||0)-calc.settled); if(rel>0.001) this._releaseAllocations(batch, sale.id, rel); }
     this.audit(batch, { action:'edit', entityType:'sale', entityId:sale.id, before:sale, after:{ ...sale, total:newTotal, discount:calc.discount, paid, remaining:newRemaining, items:newItems } });
     batch.commit().then(()=>{
       this.editingInvoiceId=null; this._editBaseTs=undefined;
@@ -2275,41 +2295,49 @@ const App = {
       sub:'حداکثر قابل مرجوعی: '+this.itemQtyLabel(it, sellable),
       fields:[
         {key:'unit', label:'واحد مرجوعی', type:'select', options:unitOptions, value:defUnit, hint:'مشتری ممکن است کارتن گرفته باشد ولی فقط چند قوطی یا چند عدد را واپس بدهد.'},
-        {key:'qty', label:'تعداد مرجوعی', type:'number', step:'0.01', value:round2(sellable/defFactor)}
+        {key:'qty', label:'تعداد مرجوعی', type:'number', step:'0.01', value:round2(sellable/defFactor)},
+        {key:'reason', label:'دلیل مرجوعی (اختیاری)', type:'text', value:''}
       ],
       submitLabel:'ثبت مرجوعی',
       onSubmit: (v)=>{
         const u=ladder.find(x=>x.name===v.unit)||ladder[ladder.length-1];
         const baseQty=round2((Number(v.qty)||0)*u.factor);
         if(!baseQty || baseQty<=0 || baseQty>sellable+1e-9) throw new Error('تعداد نامعتبر است — حداکثر '+this.itemQtyLabel(it,sellable)+'.');
-        this._applySaleReturn(sale, idx, baseQty, fmtQty(v.qty)+' '+u.name);
+        this._applySaleReturn(sale, idx, baseQty, fmtQty(v.qty)+' '+u.name, (v.reason||'').trim());
         this.toast('مرجوعی ثبت شد');
       }
     });
   },
-  _applySaleReturn(sale, idx, qty, qtyLabel){
+  _applySaleReturn(sale, idx, qty, qtyLabel, reason){
     const it=sale.items[idx];
     const refund = round2(qty*it.unitPrice);
     const refundCost = round2(qty*(it.cost||0));
-    const oldRemaining = sale.total-sale.paid;
-    const debtReduction = Math.min(refund, Math.max(0,oldRemaining));
-    const cashRefund = refund-debtReduction;
+    const rb = rebalanceAfterTotalChange({ total:sale.total, paid:sale.paid, settled:sale.settled||0, newTotal:round2(sale.total-refund) });
 
     const newItems = sale.items.map((x,i)=> i===idx ? {...x, returnedQty:(x.returnedQty||0)+qty} : x);
     const newReturns = [...sale.returns, {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, qtyLabel: qtyLabel||this.itemQtyLabel(it,qty), unitPrice:it.unitPrice, amount:refund}];
 
-    const newTotal = round2(sale.total-refund), newPaid = round2(sale.paid-cashRefund);
-    App._mv('RETURN','مرجوعی فروش'); const batch = writeBatch(db);
+    const newTotal = round2(sale.total-refund), newPaid = rb.paid;
+    // رویدادِ جدا برای این مرجوعی (فاکتور اصلی تاریخ خودش را حفظ می‌کند)
+    const evId=uid();
+    const ev=buildReturnEvent({ id:evId, ts:Date.now(), date:todayISO(), sale, kind:'return',
+      items:[{ productId:it.productId, name:it.name, qty, unit:it.unit||'عدد', qtyLabel:qtyLabel||this.itemQtyLabel(it,qty), unitPrice:it.unitPrice, cost:it.cost||0, amount:refund }],
+      amount:refund, cost:refundCost, reason:reason||'', userId:(this.user&&this.user.email)||'',
+      cashRefund:rb.cashRefund, debtReduction:Math.max(0, round2((Number(sale.remaining)||0)-rb.remaining)), releasedSettled:rb.releasedSettled });
+    App._mv('RETURN','مرجوعی فروش'+(reason?(' — '+reason):''), { refType:'return', refId:evId }); const batch = writeBatch(db);
+    batch.set(doc(cols.returns, evId), ev);
     batch.update(doc(cols.sales, sale.id), {
       items: newItems, returns: newReturns,
       total: newTotal, totalCost: sale.totalCost-refundCost, profit: newTotal-(sale.totalCost-refundCost),
-      paid: newPaid, remaining: newTotal-newPaid, ...this.editMeta()
+      paid: newPaid, settled: rb.settled, remaining: rb.remaining,
+      returnedAmount: increment(refund), returnedCost: increment(refundCost), ...this.editMeta()
     });
-    if(sale.customerId && debtReduction>0){
-      batch.update(doc(cols.customers, sale.customerId), { balance: increment(-debtReduction) });
+    if(sale.customerId && Math.abs(rb.customerDelta)>0.0001){
+      batch.update(doc(cols.customers, sale.customerId), { balance: increment(rb.customerDelta) });
     }
+    if(rb.releasedSettled>0.001) this._releaseAllocations(batch, sale.id, rb.releasedSettled);
     batch.update(doc(cols.products, it.productId), { stock: increment(qty) });
-    this.audit(batch, { action:'return', entityType:'sale', entityId:sale.id, before:sale, after:{ ...sale, total:newTotal, paid:newPaid, remaining:newTotal-newPaid } });
+    this.audit(batch, { action:'return', entityType:'sale', entityId:sale.id, before:sale, after:{ ...sale, total:newTotal, paid:newPaid, settled:rb.settled, remaining:rb.remaining } });
     batch.commit().catch(e=>{ console.error(e); App.toastError('خطا در ثبت مرجوعی؛ دوباره تلاش کنید.'); });
   },
   cancelSale(saleId){
@@ -2325,37 +2353,43 @@ const App = {
   _doCancelSale(saleId){
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
     let runningTotal=sale.total, runningPaid=sale.paid, runningCost=sale.totalCost;
-    let customerDebtReduction=0;
     const newItems=[...sale.items];
     const newReturns=[...sale.returns];
-    const stockDeltas={};
+    const stockDeltas={}; const evItems=[]; let refundCostSum=0;
     sale.items.forEach((it,idx)=>{
       const sellable=it.qty-(it.returnedQty||0);
       if(sellable<=0) return;
       const refund=sellable*it.unitPrice, refundCost=sellable*(it.cost||0);
-      const oldRemaining=runningTotal-runningPaid;
-      const debtReduction=Math.min(refund, Math.max(0,oldRemaining));
-      const cashRefund=refund-debtReduction;
       newItems[idx]={...it, returnedQty:(it.returnedQty||0)+sellable};
       newReturns.push({id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty:sellable, qtyLabel:this.itemQtyLabel(it,sellable), unitPrice:it.unitPrice, amount:refund});
-      runningTotal-=refund; runningPaid-=cashRefund; runningCost-=refundCost;
-      customerDebtReduction+=debtReduction;
+      runningTotal-=refund; runningCost-=refundCost; refundCostSum+=refundCost;
+      evItems.push({ productId:it.productId, name:it.name, qty:sellable, unit:it.unit||'عدد', qtyLabel:this.itemQtyLabel(it,sellable), unitPrice:it.unitPrice, cost:it.cost||0, amount:refund });
       stockDeltas[it.productId]=(stockDeltas[it.productId]||0)+sellable;
     });
 
-    App._mv('RETURN','ابطال فاکتور فروش'); const batch=writeBatch(db);
+    // لغو کامل: مجموع جدید صفر است؛ پول نقدِ هنگام فروش مسترد می‌شود و پرداخت‌های تخصیص‌یافته به اعتبار مشتری تبدیل می‌شوند
+    const rb = rebalanceAfterTotalChange({ total:sale.total, paid:sale.paid, settled:sale.settled||0, newTotal:Math.max(0,round2(runningTotal)) });
+    runningTotal = Math.max(0, round2(runningTotal)); runningPaid = rb.paid;
+    const evId=uid(); const dropped=round2((Number(sale.total)||0)-runningTotal);
+    const ev=buildReturnEvent({ id:evId, ts:Date.now(), date:todayISO(), sale, kind:'cancel', items:evItems,
+      amount:dropped, cost:refundCostSum, reason:'ابطال کامل فاکتور', userId:(this.user&&this.user.email)||'',
+      cashRefund:rb.cashRefund, debtReduction:Math.max(0, round2((Number(sale.remaining)||0)-rb.remaining)), releasedSettled:rb.releasedSettled });
+    App._mv('RETURN','ابطال فاکتور فروش', { refType:'return', refId:evId }); const batch=writeBatch(db);
+    batch.set(doc(cols.returns, evId), ev);
     batch.update(doc(cols.sales, sale.id), {
-      items:newItems, returns:newReturns, status:'cancelled',
+      items:newItems, returns:newReturns, status:'cancelled', cancelledTs:Date.now(), cancelledDate:todayISO(), cancelledBy:(this.user&&this.user.email)||'',
+      returnedAmount: increment(dropped), returnedCost: increment(round2(refundCostSum)),
       total:runningTotal, totalCost:runningCost, profit:runningTotal-runningCost,
-      paid:runningPaid, remaining:runningTotal-runningPaid, ...this.editMeta()
+      paid:runningPaid, settled:rb.settled, remaining:rb.remaining, ...this.editMeta()
     });
-    if(sale.customerId && customerDebtReduction>0){
-      batch.update(doc(cols.customers, sale.customerId), { balance: increment(-customerDebtReduction) });
+    if(sale.customerId && Math.abs(rb.customerDelta)>0.0001){
+      batch.update(doc(cols.customers, sale.customerId), { balance: increment(rb.customerDelta) });
     }
+    if(rb.releasedSettled>0.001) this._releaseAllocations(batch, sale.id, rb.releasedSettled);
     Object.keys(stockDeltas).forEach(pid=>{
       batch.update(doc(cols.products, pid), { stock: increment(stockDeltas[pid]) });
     });
-    this.audit(batch, { action:'cancel', entityType:'sale', entityId:sale.id, before:sale, after:{ ...sale, status:'cancelled', total:runningTotal, remaining:runningTotal-runningPaid } });
+    this.audit(batch, { action:'cancel', entityType:'sale', entityId:sale.id, before:sale, after:{ ...sale, status:'cancelled', total:runningTotal, settled:rb.settled, remaining:rb.remaining } });
     batch.commit().then(()=>this.toast('فاکتور باطل شد')).catch(e=>{ console.error(e); App.toastError('خطا در باطل کردن فاکتور؛ دوباره تلاش کنید.'); });
   },
   saleIncreaseItemQty(saleId, idx){
@@ -2391,7 +2425,7 @@ const App = {
         App._mv('SALE','افزایش تعداد قلم فاکتور'); const batch=writeBatch(db);
         batch.update(doc(cols.sales, sale.id), {
           items:newItems, total:newTotal, originalTotal: increment(addAmount),
-          totalCost:newTotalCost, profit:newTotal-newTotalCost, paid:newPaid, remaining:newTotal-newPaid, ...this.editMeta()
+          totalCost:newTotalCost, profit:newTotal-newTotalCost, paid:newPaid, remaining:round2(newTotal-newPaid-(Number(sale.settled)||0)), ...this.editMeta()
         });
         if(p) batch.update(doc(cols.products, it.productId), { stock: increment(-qty) });
         if(sale.customerId && addAmount-addPaid>0){
@@ -2445,28 +2479,35 @@ const App = {
     const it=sale.items[idx];
     const amount   = round2(qty*(Number(it.unitPrice)||0));                 // پولی که از فاکتور کم می‌شود
     const costBack = mode==='back' ? round2(qty*(Number(it.cost)||0)) : 0;  // قیمت تمام‌شده فقط وقتی جنس برگشته
-    const oldRemaining  = (Number(sale.total)||0)-(Number(sale.paid)||0);
-    const debtReduction = Math.min(amount, Math.max(0, oldRemaining));
-    const cashRefund    = round2(amount-debtReduction);
+    const rb = rebalanceAfterTotalChange({ total:Number(sale.total)||0, paid:Number(sale.paid)||0, settled:sale.settled||0, newTotal:round2((Number(sale.total)||0)-amount) });
 
     const newItems = sale.items.map((x,i)=> i===idx
       ? {...x, qty: round2((Number(x.qty)||0)-qty), adjBase: round2((Number(x.adjBase)||0)+qty), adjNote: note||x.adjNote||''}
       : x);
     const newTotal = round2((Number(sale.total)||0)-amount);
     const newCost  = round2((Number(sale.totalCost)||0)-costBack);
-    const newPaid  = round2((Number(sale.paid)||0)-cashRefund);
+    const newPaid  = rb.paid;
     const log = [...(sale.adjustments||[]), {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx,
       name:it.name, qty, unit:(it.unit||'عدد'), mode, note:note||'', amount}];
 
-    App._mv('RETURN','کاستی/کم‌شدن قلم فاکتور فروش'); const batch=writeBatch(db);
+    const evId=uid();
+    const ev=buildReturnEvent({ id:evId, ts:Date.now(), date:todayISO(), sale, kind:'shortage',
+      items:[{ productId:it.productId, name:it.name, qty, unit:(it.unit||'عدد'), qtyLabel:this.itemQtyLabel(it,qty), unitPrice:it.unitPrice, cost:(mode==='back'?(it.cost||0):0), amount }],
+      amount, cost:costBack, reason:(note||'')+(mode==='back'?' (کالا به انبار برگشت)':' (کالا برنگشت)'), userId:(this.user&&this.user.email)||'',
+      cashRefund:rb.cashRefund, debtReduction:Math.max(0, round2((Number(sale.remaining)||0)-rb.remaining)), releasedSettled:rb.releasedSettled });
+    ev.mode=mode;
+    App._mv('RETURN','کاستی/کم‌شدن قلم فاکتور فروش', { refType:'return', refId:evId }); const batch=writeBatch(db);
+    batch.set(doc(cols.returns, evId), ev);
     batch.update(doc(cols.sales, sale.id), {
       items:newItems, adjustments:log,
       total:newTotal, totalCost:newCost, profit:round2(newTotal-newCost),
-      paid:newPaid, remaining:round2(newTotal-newPaid), ...this.editMeta()
+      paid:newPaid, settled:rb.settled, remaining:rb.remaining,
+      returnedAmount: increment(amount), returnedCost: increment(costBack), ...this.editMeta()
     });
-    if(sale.customerId && debtReduction>0){
-      batch.update(doc(cols.customers, sale.customerId), { balance: increment(-debtReduction) });
+    if(sale.customerId && Math.abs(rb.customerDelta)>0.0001){
+      batch.update(doc(cols.customers, sale.customerId), { balance: increment(rb.customerDelta) });
     }
+    if(rb.releasedSettled>0.001) this._releaseAllocations(batch, sale.id, rb.releasedSettled);
     if(mode==='back' && it.productId){
       batch.update(doc(cols.products, it.productId), { stock: increment(qty) });
     }
@@ -2617,7 +2658,7 @@ const App = {
         const newTotal=round2(sale.total+addAmount), newPaid=round2(sale.paid+addPaid), newTotalCost=round2(sale.totalCost+qty*cost);
         batch.update(doc(cols.sales, sale.id), {
           items:newItems, total:newTotal, originalTotal: increment(addAmount),
-          totalCost:newTotalCost, profit:round2(newTotal-newTotalCost), paid:newPaid, remaining:round2(newTotal-newPaid), ...this.editMeta()
+          totalCost:newTotalCost, profit:round2(newTotal-newTotalCost), paid:newPaid, remaining:round2(newTotal-newPaid-(Number(sale.settled)||0)), ...this.editMeta()
         });
         if(sale.customerId && addAmount-addPaid>0.001){
           batch.update(doc(cols.customers, sale.customerId), { balance: increment(round2(addAmount-addPaid)) });
@@ -2991,7 +3032,7 @@ const App = {
     if(!p){ this.detailId=null; return this.renderCustomers(); }
     let history=[];
     if(type==='customers'){
-      history = this.state.sales.filter(s=>s.customerId===p.id).map(s=>({date:s.date,ts:s.ts,label:'فروش '+this.invoiceNoLabel(s.id),amount:s.total,paid:s.paid,saleId:s.id,status:s.status,currency:'AFN'}));
+      history = this.state.sales.filter(s=>s.customerId===p.id).map(s=>({date:s.date,ts:s.ts,label:'فروش '+this.invoiceNoLabel(s.id),amount:s.total,paid:(Number(s.paid)||0)+(Number(s.settled)||0),saleId:s.id,status:s.status,currency:'AFN'}));
     } else {
       history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید'+(s.currency==='USD'?' (دالر)':''),amount:s.total,paid:s.paid,purchaseId:s.id,status:s.status,currency:s.currency||'AFN'}));
     }
@@ -3894,8 +3935,9 @@ const App = {
       const iso=addDaysISO(dStartISO,i);
       const daySales=this.salesInRange(iso,iso);
       labels.push(iso.slice(5));
-      salesSeries.push(sum(daySales,'total'));
-      profitSeries.push(sum(daySales,'profit') - sum(this.expensesInRange(iso,iso).filter(e=>e.category!==WITHDRAWAL_CATEGORY),'amount'));
+      const dsm=salesSummary({ sales:this.state.sales, returns:this.state.returns, from:iso, to:iso });
+      salesSeries.push(dsm.net);
+      profitSeries.push(dsm.grossProfit - sum(this.expensesInRange(iso,iso).filter(e=>e.category!==WITHDRAWAL_CATEGORY),'amount'));
     }
     if(this._trendChartInstance){ this._trendChartInstance.destroy(); }
     this._trendChartInstance = new Chart(canvas.getContext('2d'), {
@@ -3917,15 +3959,21 @@ const App = {
     const purchases=this.purchasesInRange(start,end).filter(p=>p.status!=='cancelled');
     const expenses=this.expensesInRange(start,end);
     const wb=XLSX.utils.book_new();
-    const salesRows=sales.map(s=>({ 'شماره فاکتور':this.invoiceNoLabel(s.id), 'تاریخ':s.date, 'مشتری':s.customerName, 'مجموع':s.total, 'پرداخت‌شده':s.paid, 'باقیمانده':s.remaining, 'سود':s.profit }));
+    const salesRows=sales.map(s=>({ 'شماره فاکتور':this.invoiceNoLabel(s.id), 'تاریخ':s.date, 'مشتری':s.customerName, 'مجموع':s.total, 'پرداخت‌شده':(Number(s.paid)||0)+(Number(s.settled)||0), 'باقیمانده':s.remaining, 'سود':s.profit }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(salesRows), 'فروش');
     const purchRows=purchases.map(p=>({ 'تاریخ':p.date, 'شماره بل عمده‌فروش':p.supplierInvoiceNo||'', 'عمده‌فروش':p.supplierName||'نقدی', 'ارز':p.currency||'AFN', 'مجموع':p.total, 'پرداخت‌شده':p.paid, 'باقیمانده':p.remaining }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(purchRows), 'خرید');
     const expRows=expenses.map(e=>({ 'تاریخ':e.date, 'نوع':e.category, 'مبلغ':e.amount, 'یادداشت':e.note||'' }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(expRows), 'مصارف');
-    const revenue=sum(sales,'total'), cogs=sum(sales,'totalCost'), expTotal=sum(expenses.filter(e=>e.category!==WITHDRAWAL_CATEGORY),'amount');
+    const sm=salesSummary({ sales:this.state.sales, returns:this.state.returns, from:start, to:end });
+    const revenue=sm.net, cogs=sm.cogs, expTotal=sum(expenses.filter(e=>e.category!==WITHDRAWAL_CATEGORY),'amount');
+    const retRows=this.state.returns.filter(r=>r.date>=start&&r.date<=end).sort((a,b)=>(a.ts||0)-(b.ts||0)).map(r=>({ 'تاریخ مرجوعی':r.date, 'نوع':({return:'مرجوعی',cancel:'ابطال فاکتور',shortage:'کاستی'})[r.kind]||r.kind, 'فاکتور':this.invoiceNoLabel(r.originalSaleId), 'مشتری':r.customerName||'', 'مبلغ':r.amount, 'بهای کالای برگشتی':r.cost, 'دلیل':r.reason||'' }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(retRows), 'مرجوعی');
     const summaryRows=[
-      {'شرح':'مجموع فروش','مبلغ':revenue},
+      {'شرح':'فروش ناخالص (پیش از تخفیف و مرجوعی)','مبلغ':sm.gross},
+      {'شرح':'تخفیف‌ها','مبلغ':-sm.discounts},
+      {'شرح':'مرجوعی و ابطال و کاستی','مبلغ':-sm.returns},
+      {'شرح':'فروش خالص','مبلغ':revenue},
       {'شرح':'قیمت تمام‌شدهٔ کالای فروخته‌شده','مبلغ':cogs},
       {'شرح':'سود ناخالص','مبلغ':revenue-cogs},
       {'شرح':'مجموع مصارف','مبلغ':expTotal},
@@ -3947,9 +3995,10 @@ const App = {
     const expensesAll=this.expensesInRange(start,end);
     const expenses=expensesAll.filter(e=>e.category!==WITHDRAWAL_CATEGORY);
     const withdrawals=expensesAll.filter(e=>e.category===WITHDRAWAL_CATEGORY);
-    const revenue=sum(sales,'total');
-    const cogs=sum(sales,'totalCost');
-    const grossProfit=revenue-cogs;
+    const sm=salesSummary({ sales:this.state.sales, returns:this.state.returns, from:start, to:end });
+    const revenue=sm.net;
+    const cogs=sm.cogs;
+    const grossProfit=sm.grossProfit;
     const expTotal=sum(expenses,'amount');
     const netProfit=grossProfit-expTotal;
     const withdrawalTotal=sum(withdrawals,'amount');
@@ -3994,7 +4043,10 @@ const App = {
     <div class="card">
       <div class="field-note">بازه: ${label} (${start} تا ${end})</div>
       <div class="field-note">تمام ارقام این گزارش به ${this.state.settings.currency} است؛ خریدهای دالری نیز به نرخ روز خودشان به ${this.state.settings.currency} تبدیل شده‌اند.</div>
-      <div class="row-item"><div class="r-left">مجموع فروش</div><div class="r-right num">${fmt(revenue)}</div></div>
+      <div class="row-item"><div class="r-left">فروش ناخالص <span class="sub">(پیش از تخفیف و مرجوعی)</span></div><div class="r-right num">${fmt(sm.gross)}</div></div>
+      ${sm.discounts>0.001?`<div class="row-item"><div class="r-left">تخفیف‌ها</div><div class="r-right num" style="color:var(--red)">- ${fmt(sm.discounts)}</div></div>`:''}
+      <div class="row-item"><div class="r-left">مرجوعی، ابطال و کاستی <span class="sub">(${sm.returnEvents} مورد در این بازه)</span></div><div class="r-right num" style="color:var(--red)">- ${fmt(sm.returns)}</div></div>
+      <div class="row-item"><div class="r-left"><b>فروش خالص</b></div><div class="r-right num"><b>${fmt(revenue)}</b></div></div>
       <div class="row-item"><div class="r-left">قیمت تمام‌شدهٔ کالای فروخته‌شده</div><div class="r-right num">${fmt(cogs)}</div></div>
       <div class="row-item"><div class="r-left"><b>سود ناخالص</b></div><div class="r-right num" style="color:var(--green)"><b>${fmt(grossProfit)}</b></div></div>
       <div class="row-item"><div class="r-left">مجموع مصارف کسب‌وکار (بدون برداشت شخصی)</div><div class="r-right num" style="color:var(--red)">-${fmt(expTotal)}</div></div>
@@ -4158,6 +4210,7 @@ const App = {
       if(kind==='customers'){ title='تطبیق مانده مشتریان'; rows=reconcileCustomers({ customers:s.customers, sales:s.sales, payments:s.payments, openingEntries:s.openingEntries }); }
       else if(kind==='suppliers'){ title='تطبیق مانده عمده‌فروشان'; rows=reconcileSuppliers({ suppliers:s.suppliers, purchases:s.purchases, payments:s.payments, openingEntries:s.openingEntries }); }
       else if(kind==='invoices'){ title='تطبیق مجموع فاکتورها'; rows=reconcileInvoices({ sales:s.sales }); }
+      else if(kind==='returns'){ title='تطبیق مرجوعی‌ها'; rows=reconcileReturns({ sales:s.sales, returns:s.returns }); }
       else if(kind==='stock'){
         title='تطبیق موجودی انبار';
         const snap=await getDocs(cols.stockLedger);
@@ -4169,6 +4222,7 @@ const App = {
     const isCust=kind==='customers';
     const body = rows.length ? rows.map(r=>{
       if(kind==='invoices') return '<div class="row-item"><div class="r-left"><b>فاکتور '+escapeHtml(this.invoiceNoLabel(r.id))+' — '+escapeHtml(r.name)+'</b><span class="sub">مجموع ثبت‌شده '+fmt(r.cachedTotal)+' · محاسبه‌شده '+fmt(r.expectedTotal)+' · باقی ثبت‌شده '+fmt(r.cachedRemaining)+' · محاسبه‌شده '+fmt(r.expectedRemaining)+'</span></div></div>';
+      if(kind==='returns') return '<div class="row-item"><div class="r-left"><b>'+escapeHtml(r.name)+' — فاکتور '+escapeHtml(this.invoiceNoLabel(r.id))+'</b><span class="sub">جمع مرجوعیِ ثبت‌شده روی فاکتور '+fmt(r.cached)+' · مجموع رویدادها '+fmt(r.expected)+'</span></div></div>';
       const btn = kind==='stock'
         ? '<button class="btn btn-outline" style="margin:0;width:auto;padding:6px 10px;" onclick="App.repairStock(\''+r.id+'\','+r.expected+')">اصلاح</button>'
         : '<button class="btn btn-outline" style="margin:0;width:auto;padding:6px 10px;" onclick="App.repairBalance(\''+(isCust?'customers':'suppliers')+'\',\''+r.id+'\','+r.expected+','+(/\(\$\)$/.test(r.name)?'\'USD\'':'\'AFN\'')+')">اصلاح</button>';
@@ -4249,6 +4303,7 @@ const App = {
       <button class="btn btn-outline" onclick="App.runReconcile('suppliers')">${ic('clipboard',16)}تطبیق مانده عمده‌فروشان</button>
       <button class="btn btn-outline" onclick="App.runReconcile('stock')">${ic('clipboard',16)}تطبیق موجودی انبار</button>
       <button class="btn btn-outline" onclick="App.runReconcile('invoices')">${ic('clipboard',16)}تطبیق مجموع فاکتورها</button>
+      <button class="btn btn-outline" onclick="App.runReconcile('returns')">${ic('clipboard',16)}تطبیق مرجوعی‌ها</button>
     </div>`:''}
     <div class="card">
       <label>نام کسب‌وکار</label>

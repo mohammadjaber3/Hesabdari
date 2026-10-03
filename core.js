@@ -103,6 +103,30 @@ export function calcInvoice({ items, discount, paid, settled }){
   return { subtotal, discount: disc, total, paid: p, settled: st, remaining, overpaid, status };
 }
 
+/* ---------- تغییر مجموع فاکتور بعد از ثبت (مرجوعی، کاستی، لغو) ----------
+   پولی که مشتری تا الان داده: E = paid (نقد هنگام فروش) + settled (پرداخت‌های بعدیِ تخصیص‌یافته).
+   اگر مجموع جدید از E کمتر شود، «اضافه» ابتدا از paid برمی‌گردد (استرداد نقد، مثل قبل)
+   و بقیه از settled آزاد می‌شود و به اعتبار (پرداخت تخصیص‌نیافته) مشتری تبدیل می‌شود.
+   customerDelta = تغییری که باید روی مانده مشتری اعمال شود. */
+export function rebalanceAfterTotalChange({ total, paid, settled, newTotal }){
+  const P = Math.max(0, num(paid)), S = Math.max(0, num(settled));
+  const T = num(total), N = Math.max(0, num(newTotal));
+  const E = P + S;
+  const oldRemaining = Math.max(0, T - E);
+  const newRemaining = Math.max(0, N - E);
+  const excess = Math.max(0, E - N);
+  const fromPaid = Math.min(P, excess);
+  const fromSettled = Math.min(S, Math.max(0, excess - fromPaid));
+  return {
+    paid: round2(P - fromPaid),
+    settled: round2(S - fromSettled),
+    remaining: round2(newRemaining),
+    cashRefund: round2(fromPaid),
+    releasedSettled: round2(fromSettled),
+    customerDelta: round2((newRemaining - oldRemaining) - fromSettled)
+  };
+}
+
 /* ---------- هزینهٔ تمام‌شده (میانگین موزون) ----------
    قبلاً: (stock*avg + qty*cost)/newStock — وقتی موجودی منفی بود، عدد غیرواقعی می‌داد.
    مثال: موجودی −10 با میانگین 5، خرید 30 با قیمت 6 → فرمول قدیم 6.5 می‌داد (غلط)،
@@ -221,7 +245,7 @@ export function pinStateAfterSuccess(){ return { fails:0, lockedUntil:0 }; }
 
 /* ---------- اعتبارسنجی فایل پشتیبان ---------- */
 export const BACKUP_SCHEMA_VERSION = 2;
-export const BACKUP_COLLECTIONS = ['products','customers','suppliers','sales','purchases','expenses','payments','openingEntries'];
+export const BACKUP_COLLECTIONS = ['products','customers','suppliers','sales','purchases','expenses','payments','openingEntries','returns'];
 
 export function buildBackup({ businessId, state, now, appVersion }){
   const collections = {};
@@ -255,7 +279,8 @@ export function validateBackup(b){
   if(errors.length) return { ok:false, errors, warnings, counts };
   const required = { products:['id','name'], customers:['id','name'], suppliers:['id','name'],
     sales:['id','date','items','total'], purchases:['id','date','items','total'],
-    expenses:['id','date','amount'], payments:['id','date','amount','partyId'], openingEntries:['id','partyId','amount'] };
+    expenses:['id','date','amount'], payments:['id','date','amount','partyId'], openingEntries:['id','partyId','amount'],
+    returns:['id','originalSaleId','date','amount'] };
   BACKUP_COLLECTIONS.forEach(name=>{
     const arr = cols[name];
     if(arr === undefined){ counts[name] = 0; return; }
