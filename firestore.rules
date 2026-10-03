@@ -63,6 +63,13 @@ service cloud.firestore {
     // اعتبارسنجی ساده: شناسهٔ سند = فیلد id، و مبلغ عدد معتبر
     function idMatches(docId) { return request.resource.data.id == docId; }
     function num(v) { return v is number; }
+    function immutableIdentity() {
+      return request.resource.data.id == resource.data.id
+        && (!resource.data.keys().hasAny(['invoiceNo']) || request.resource.data.invoiceNo == resource.data.invoiceNo)
+        && (!resource.data.keys().hasAny(['createdByEmail']) || request.resource.data.createdByEmail == resource.data.createdByEmail)
+        && (!resource.data.keys().hasAny(['createdByDevice']) || request.resource.data.createdByDevice == resource.data.createdByDevice)
+        && (!resource.data.keys().hasAny(['ts']) || request.resource.data.ts == resource.data.ts);
+    }
 
     // فقط این کلیدها تغییر کرده‌اند
     function onlyChanges(keys) {
@@ -127,19 +134,21 @@ service cloud.firestore {
       match /sales/{id} {
         allow read: if canReadSalesSide(biz);
         allow create: if (isOwner(biz) || isManager(biz) || isStaff(biz) || isSalesman(biz))
-                      && idMatches(id) && num(request.resource.data.total) && request.resource.data.total >= 0
+                      && idMatches(id) && request.resource.data.invoiceNo is string && request.resource.data.invoiceNo.size() > 0
+                      && num(request.resource.data.total) && request.resource.data.total >= 0
                       && request.resource.data.items is list;
-        allow update: if isOwner(biz) || isManager(biz) || isStaff(biz) || isSalesman(biz);
-        allow delete: if isOwner(biz);   // فقط برای «پاک‌کردن همه/بازیابی»؛ مرحلهٔ بعد: لغو با reversal
+        allow update: if (isOwner(biz) || isManager(biz) || isStaff(biz) || isSalesman(biz)) && immutableIdentity();
+        allow delete: if isOwner(biz);   // فقط برای بازیابی/پاک‌سازی
       }
 
       // ---------- دفترها: خرید، عمده‌فروشان، مصارف، مانده‌های افتتاحیه ----------
       match /purchases/{id} {
         allow read: if canReadBooks(biz);
         allow create: if (isOwner(biz) || isManager(biz) || isStaff(biz) || isWarehouse(biz))
-                      && idMatches(id) && num(request.resource.data.total) && request.resource.data.total >= 0
+                      && idMatches(id) && request.resource.data.invoiceNo is string && request.resource.data.invoiceNo.size() > 0
+                      && num(request.resource.data.total) && request.resource.data.total >= 0
                       && request.resource.data.items is list;
-        allow update: if isOwner(biz) || isManager(biz) || isStaff(biz) || isWarehouse(biz);
+        allow update: if (isOwner(biz) || isManager(biz) || isStaff(biz) || isWarehouse(biz)) && immutableIdentity();
         allow delete: if isOwner(biz);
       }
       match /suppliers/{id} {

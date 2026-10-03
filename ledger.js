@@ -119,7 +119,7 @@ export function buildAuditEntry({ id, ts, action, entityType, entityId, userId, 
 /* خلاصهٔ کم‌حجم از فاکتور/خرید برای before/after */
 export function summarizeDoc(d){
   if(!d) return null;
-  const keep = ['id','date','total','paid','settled','remaining','discount','status','amount','partyId','customerId','supplierId','stock','balance','balanceUSD'];
+  const keep = ['id','date','total','paid','settled','remaining','discount','status','amount','partyId','customerId','supplierId','stock','balance','balanceUSD','invoiceNo','lastEditReason','cancelledTs'];
   const out = {}; keep.forEach(k=>{ if(d[k] !== undefined) out[k] = d[k]; });
   if(Array.isArray(d.items)) out.itemsCount = d.items.length;
   return out;

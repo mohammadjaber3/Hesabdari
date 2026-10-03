@@ -137,7 +137,7 @@ export function nextAvgCost({ stockQty, avgCost, purchaseQty, unitCost }){
   if(q <= 0) return { newStock, avgCost: round4(avg), coveredNegative: 0 };
   if(stock <= 0){
     // موجودی صفر یا منفی: هیچ ارزشی در انبار نیست؛ قیمت از خریدِ جدید شروع می‌شود
-    return { newStock, avgCost: round4(c), coveredNegative: Math.min(q, -stock) };
+    return { newStock, avgCost: round4(c), coveredNegative: Math.max(0, Math.min(q, -stock)) };
   }
   return { newStock, avgCost: round4((stock*avg + q*c)/newStock), coveredNegative: 0 };
 }

@@ -142,6 +142,12 @@ const pinDocRef = (uid_) => doc(db, 'businesses', BIZ_ID, 'pins', uid_);
 
 /* ---------- Helpers ---------- */
 function uid(){ return 'id_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8); }
+function immutableInvoiceNo(id,prefix){
+  const raw=String(id||'').replace(/[^a-zA-Z0-9]/g,'').toUpperCase();
+  const stamp=raw.slice(2,8) || Date.now().toString(36).slice(-6).toUpperCase();
+  const tail=raw.slice(-6) || Math.random().toString(36).slice(2,8).toUpperCase();
+  return String(prefix||'S')+'-'+stamp+'-'+tail;
+}
 
 /* ---------- شناسهٔ دستگاه (گوشی) ----------
    هر گوشی/مرورگر یک شناسهٔ ثابت محلی می‌گیرد که در تمام رکوردهای ثبت‌شده از همان گوشی ذخیره می‌شود.
@@ -620,7 +626,10 @@ const App = {
             });
           }
         } else this.state[name] = arr;
-        if(name==='sales' || name==='purchases') migrateRecordArrays(this.state.sales, this.state.purchases);
+        if(name==='sales' || name==='purchases') {
+          migrateRecordArrays(this.state.sales, this.state.purchases);
+          if(name==='sales' || name==='purchases') this._migrateImmutableInvoiceNumbers(name).catch(e=>console.warn('invoice number migration failed',e));
+        }
         this._loadedParts.add(name);
         markPart(name, snap.metadata.hasPendingWrites);
         checkReady();
@@ -651,6 +660,26 @@ const App = {
   _recomputeSyncState(){
     if(!navigator.onLine){ this.setSyncState('offline'); return; }
     this.setSyncState(this._pendingParts && this._pendingParts.size>0 ? 'pending' : 'ok');
+  },
+  _markWriteResult(ok, err){
+    if(ok){ this._lastWriteError=''; this._recomputeSyncState(); return; }
+    this._lastWriteError=(err&&err.message)||'خطای ناشناخته';
+    this.setSyncState('error');
+  },
+  invoiceNoForNew(id,prefix){ return immutableInvoiceNo(id,prefix||'S'); },
+  invoiceNoValue(rec,prefix){ return rec && rec.invoiceNo ? String(rec.invoiceNo) : immutableInvoiceNo(rec&&rec.id,prefix||'S'); },
+  async _migrateImmutableInvoiceNumbers(name){
+    if(!this.isOwner()) return;
+    const arr=this.state[name]||[];
+    const prefix=name==='sales'?'S':'B';
+    const missing=arr.filter(x=>x && !x.invoiceNo);
+    if(!missing.length) return;
+    let batch=writeBatch(db,{noLedger:true}), n=0;
+    for(const rec of missing){
+      batch.update(doc(cols[name],rec.id),{invoiceNo:this.invoiceNoForNew(rec.id,prefix)});
+      if(++n>=400){ await batch.commit(); batch=writeBatch(db,{noLedger:true}); n=0; }
+    }
+    if(n) await batch.commit();
   },
 
   // فقط کسی «مالک» حساب می‌شود که هم نقش «owner» در Firestore داشته باشد و هم دقیقاً
@@ -996,7 +1025,7 @@ const App = {
     const el=document.getElementById('sync-badge'); const txt=document.getElementById('sync-text');
     if(!el||!txt) return;
     el.className = 'sync-badge '+st;
-    txt.textContent = st==='ok' ? 'آنلاین' : st==='pending' ? 'در حال همگام‌سازی...' : 'آفلاین';
+    txt.textContent = st==='ok' ? 'همگام شده' : st==='pending' ? 'در حال همگام‌سازی...' : st==='error' ? 'خطا در همگام‌سازی' : 'آفلاین';
   },
 
   pinDigit(d){
@@ -1456,96 +1485,187 @@ const App = {
   },
   removeSaleItem(idx){ this.saleDraft.items.splice(idx,1); this.render(); },
 
-  submitSale(){
+  async submitSale(){
+    if(this._saleBusy) return; // جلوگیری از ثبت دوباره با دوبار لمس
     if(this.saleDraft.items.length===0){ this.toast('حداقل یک محصول اضافه کنید'); return; }
-    const txSaleId = this.saleDraft.txId || uid();
-    if(this.state.sales.some(s=>s.id===txSaleId)){ this.toast('این فاکتور قبلاً ثبت شده است.'); return; } // ثبت دوباره (دوبار لمس/آفلاین) فاکتور تکراری نمی‌سازد
-    const total = round2(this.saleDraft.items.reduce((a,i)=>a+i.qty*i.unitPrice,0));
-    const totalCost = round2(this.saleDraft.items.reduce((a,i)=>a+i.qty*i.cost,0));
-    let paid = parseFloat(document.getElementById('sale-paid').value);
-    if(isNaN(paid)) paid=0;
-    if(paid>total) paid=total;
-    if(paid<0) paid=0;
-    const custName = (document.getElementById('sale-customer-name').value||'').trim();
-    const custPhone = (document.getElementById('sale-customer-phone').value||'').trim();
-    const custAddress = (document.getElementById('sale-customer-address').value||'').trim();
-    const date = document.getElementById('sale-date').value || todayISO();
-    const note = (document.getElementById('sale-note').value||'').trim();
-    const remaining = total-paid;
+    this._saleBusy=true;
+    try{
+      const txSaleId = this.saleDraft.txId || uid();
+      if(this.state.sales.some(s=>s.id===txSaleId)){ this.toast('این فاکتور قبلاً ثبت شده است.'); return; }
+      const total = round2(this.saleDraft.items.reduce((a,i)=>a+i.qty*i.unitPrice,0));
+      let paid = parseFloat(document.getElementById('sale-paid').value);
+      if(isNaN(paid)) paid=0;
+      if(paid>total) paid=total;
+      if(paid<0) paid=0;
+      const custName = (document.getElementById('sale-customer-name').value||'').trim();
+      const custPhone = (document.getElementById('sale-customer-phone').value||'').trim();
+      const custAddress = (document.getElementById('sale-customer-address').value||'').trim();
+      const date = document.getElementById('sale-date').value || todayISO();
+      const note = (document.getElementById('sale-note').value||'').trim();
+      const remaining = total-paid;
+      const draftProducts = this.saleDraft._draftProducts || [];
+      const saleId = txSaleId;
 
-    App._mv('SALE','فروش'); const batch = writeBatch(db);
-    let customerId=null, customerNameFinal='مشتری نقدی';
-    if(custName){
-      let customer=this.state.customers.find(c=>c.name===custName);
-      if(!customer){
-        customerId=uid(); customerNameFinal=custName;
-        batch.set(doc(cols.customers,customerId), {id:customerId,name:custName,phone:custPhone,address:custAddress,balance:remaining, ...this.recordMeta()});
-      } else {
-        customerId=customer.id; customerNameFinal=customer.name;
-        const fields={ balance: increment(remaining) };
-        if(custPhone && !customer.phone) fields.phone=custPhone;
-        if(custAddress && !customer.address) fields.address=custAddress;
-        batch.update(doc(cols.customers,customer.id), fields);
+      const commitOfflineBatch = async()=>{
+        App._mv('SALE','فروش'); const batch = writeBatch(db);
+        let customerId=null, customerNameFinal='مشتری نقدی';
+        if(custName){
+          const customer=this.state.customers.find(c=>c.name===custName);
+          if(!customer){
+            customerId=uid(); customerNameFinal=custName;
+            batch.set(doc(cols.customers,customerId), {id:customerId,name:custName,phone:custPhone,address:custAddress,balance:remaining, ...this.recordMeta()});
+          } else {
+            customerId=customer.id; customerNameFinal=customer.name;
+            const fields={ balance: increment(remaining) };
+            if(custPhone && !customer.phone) fields.phone=custPhone;
+            if(custAddress && !customer.address) fields.address=custAddress;
+            batch.update(doc(cols.customers,customer.id), fields);
+          }
+        } else if(remaining>0.001){
+          throw new Error('برای فروش قرضی (نسیه) باید نام مشتری را بنویسید');
+        }
+        let totalCost=0;
+        this.saleDraft.items.forEach(it=>{
+          const draftP=draftProducts.find(dp=>dp.id===it.productId);
+          if(draftP){
+            totalCost += it.qty*0;
+            batch.set(doc(cols.products,draftP.id), {id:draftP.id,name:draftP.name,unit:draftP.unit,stock:-it.qty,avgCost:0,sellPrice:it.unitPrice,
+              midUnit:draftP.midUnit||'',midPer:draftP.midPer||0,packUnit:draftP.packUnit||'',packPer:draftP.packPer||0,
+              defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||'',
+              saleUnits:draftP.saleUnits||[draftP.packUnit||draftP.midUnit||''].filter(Boolean),allowFractionalSale:!!draftP.allowFractionalSale,
+              sellPriceMid:0,sellPricePack:0});
+          } else {
+            const p=this.state.products.find(pp=>pp.id===it.productId);
+            const cost=Number(p&&p.avgCost)||Number(it.cost)||0;
+            totalCost += it.qty*cost;
+            batch.update(doc(cols.products,it.productId), { stock: increment(-it.qty) });
+          }
+        });
+        totalCost=round2(totalCost);
+        const newSale={id:saleId,invoiceNo:this.invoiceNoForNew(saleId,'S'),ts:Date.now(),date,customerId,customerName:customerNameFinal,
+          customerPhone:custPhone,customerAddress:custAddress,
+          items:this.saleDraft.items.map(it=>({...it,cost:Number((this.state.products.find(p=>p.id===it.productId)||{}).avgCost)||0,returnedQty:0})),
+          total,totalCost,profit:round2(total-totalCost),paid,remaining,note,status:'active',returns:[],originalTotal:total,discount:0,returnedAmount:0,returnedCost:0,...this.recordMeta()};
+        batch.set(doc(cols.sales,saleId),newSale);
+        this.audit(batch,{action:'create',entityType:'sale',entityId:saleId,before:null,after:newSale});
+        await batch.commit();
+      };
+
+      const commitOnlineTransaction=async()=>{
+        const productRefs=this.saleDraft.items.filter(it=>!draftProducts.some(dp=>dp.id===it.productId)).map(it=>doc(cols.products,it.productId));
+        const uniqueRefs=[...new Map(productRefs.map(r=>[r.path,r])).values()];
+        const customerMatch=custName ? this.state.customers.find(c=>c.name===custName) : null;
+        const customerId=customerMatch ? customerMatch.id : (custName ? uid() : null);
+        const customerRef=customerId ? doc(cols.customers,customerId) : null;
+        await runTransaction(db, async(tx)=>{
+          const reads=[];
+          if(customerRef && customerMatch) reads.push(tx.get(customerRef));
+          uniqueRefs.forEach(r=>reads.push(tx.get(r)));
+          const snaps=await Promise.all(reads);
+          let k=0;
+          const customerSnap=(customerRef&&customerMatch)?snaps[k++]:null;
+          const productSnaps=new Map(uniqueRefs.map(r=>[r.path,snaps[k++]]));
+          if(remaining>0.001 && !custName) throw new Error('برای فروش قرضی (نسیه) باید نام مشتری را بنویسید');
+          let customerNameFinal='مشتری نقدی';
+          if(custName){
+            customerNameFinal=customerMatch ? customerMatch.name : custName;
+            if(customerMatch){
+              if(!customerSnap || !customerSnap.exists()) throw new Error('مشتری انتخاب‌شده در سرور پیدا نشد.');
+              const fields={balance:increment(remaining)};
+              const current=customerSnap.data();
+              if(custPhone && !current.phone) fields.phone=custPhone;
+              if(custAddress && !current.address) fields.address=custAddress;
+              tx.update(customerRef,fields);
+            }else{
+              tx.set(customerRef,{id:customerId,name:custName,phone:custPhone,address:custAddress,balance:remaining,...this.recordMeta()});
+            }
+          }
+          let totalCost=0;
+          const finalItems=this.saleDraft.items.map(it=>{
+            const draftP=draftProducts.find(dp=>dp.id===it.productId);
+            let cost=0;
+            if(!draftP){
+              const snap=productSnaps.get(doc(cols.products,it.productId).path);
+              if(!snap || !snap.exists()) throw new Error('محصول «'+it.name+'» در سرور پیدا نشد.');
+              cost=Number(snap.data().avgCost)||0;
+            }
+            totalCost += it.qty*cost;
+            return {...it,cost,returnedQty:0};
+          });
+          const ledgerRunning=new Map();
+          for(const it of this.saleDraft.items){
+            const draftP=draftProducts.find(dp=>dp.id===it.productId);
+            const pref=doc(cols.products,it.productId);
+            if(draftP){
+              tx.set(pref,{id:draftP.id,name:draftP.name,unit:draftP.unit,stock:-it.qty,avgCost:0,sellPrice:it.unitPrice,
+                midUnit:draftP.midUnit||'',midPer:draftP.midPer||0,packUnit:draftP.packUnit||'',packPer:draftP.packPer||0,
+                defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||'',
+                saleUnits:draftP.saleUnits||[draftP.packUnit||draftP.midUnit||''].filter(Boolean),allowFractionalSale:!!draftP.allowFractionalSale,
+                sellPriceMid:0,sellPricePack:0,...this.recordMeta()});
+            }else{
+              tx.update(pref,{stock:increment(-it.qty)});
+            }
+            const pSnap=draftP ? null : productSnaps.get(pref.path);
+            const initialStock=draftP ? 0 : Number(pSnap.data().stock)||0;
+            const stockBefore=ledgerRunning.has(it.productId) ? ledgerRunning.get(it.productId) : initialStock;
+            ledgerRunning.set(it.productId,stockBefore-it.qty);
+            const cost=finalItems.find(x=>x.productId===it.productId)?.cost||0;
+            const lmId=uid();
+            tx.set(doc(cols.stockLedger,lmId),buildMovement({id:lmId,ts:Date.now(),date:todayISO(),productId:it.productId,warehouseId:DEFAULT_WAREHOUSE,type:'SALE',quantityBase:-it.qty,unit:'عدد',unitCost:cost,userId:(this.user&&this.user.email)||'',referenceType:'sale',referenceId:saleId,reason:'فروش',stockBefore}));
+          }
+          totalCost=round2(totalCost);
+          const newSale={id:saleId,invoiceNo:this.invoiceNoForNew(saleId,'S'),ts:Date.now(),date,customerId,customerName:customerNameFinal,customerPhone:custPhone,customerAddress:custAddress,
+            items:finalItems,total,totalCost,profit:round2(total-totalCost),paid,remaining,note,status:'active',returns:[],originalTotal:total,discount:0,returnedAmount:0,returnedCost:0,...this.recordMeta()};
+          tx.set(doc(cols.sales,saleId),newSale);
+          this.audit(tx,{action:'create',entityType:'sale',entityId:saleId,before:null,after:newSale});
+        });
+      };
+
+      if(navigator.onLine){
+        try{ await commitOnlineTransaction(); }
+        catch(e){
+          // نتیجهٔ تراکنش ممکن است در خطای شبکه نامعلوم باشد؛ هرگز Batch جایگزین اجرا نمی‌کنیم
+          // چون می‌تواند موجودی را دوباره کم کند. فقط اگر مطمئن هستیم دستگاه آفلاین شده، پیام خطا می‌دهیم.
+          this._markWriteResult(false,e);
+          App.toastError('ذخیرهٔ فاکتور فروش انجام نشد یا وضعیت اتصال نامعلوم است؛ دوباره ثبت نکنید تا وضعیت همگام‌سازی مشخص شود. '+(e.message||''));
+          return;
+        }
+      }else{
+        await commitOfflineBatch();
       }
-    } else if(remaining>0.001){
-      this.toast('برای فروش قرضی (نسیه) باید نام مشتری را بنویسید'); return;
+      this._markWriteResult(true);
+      this.resetSaleDraft();
+      this.viewInvoiceId=saleId;
+      this.navigate('invoice');
+    }catch(e){
+      console.error('submitSale error',e);
+      this._markWriteResult(false,e);
+      App.toastError('خطا در ذخیرهٔ فاکتور؛ فاکتور ثبت نشد. '+(e.message||''));
+    }finally{
+      this._saleBusy=false;
     }
-
-    // محصولات جدیدی که فقط در پیش‌نویس بودند، حالا برای اولین بار ذخیره می‌شوند
-    const draftProducts = this.saleDraft._draftProducts || [];
-    this.saleDraft.items.forEach(it=>{
-      const draftP = draftProducts.find(dp=>dp.id===it.productId);
-      if(draftP){
-        batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, stock:-it.qty, avgCost:0, sellPrice:it.unitPrice,
-          midUnit:draftP.midUnit||'', midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', packPer:draftP.packPer||0,
-          defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||'',
-          saleUnits:draftP.saleUnits||[draftP.packUnit||draftP.midUnit||''].filter(Boolean), allowFractionalSale:!!draftP.allowFractionalSale,
-          sellPriceMid:0, sellPricePack:0});
-      } else {
-        batch.update(doc(cols.products, it.productId), { stock: increment(-it.qty) });
-      }
-    });
-
-    const saleId = txSaleId;
-    const newSale = {
-      id:saleId, ts:Date.now(), date, customerId, customerName:customerNameFinal,
-      customerPhone: custPhone, customerAddress: custAddress,
-      items:this.saleDraft.items.map(it=>({...it,returnedQty:0})), total, totalCost, profit: round2(total-totalCost),
-      paid, remaining, note, status:'active', returns:[], originalTotal: total, discount:0, returnedAmount:0, returnedCost:0,
-      ...this.recordMeta()
-    };
-    batch.set(doc(cols.sales, saleId), newSale);
-    this.audit(batch, { action:'create', entityType:'sale', entityId:saleId, before:null, after:newSale });
-
-    batch.commit().catch(e=>{ console.error('submitSale error',e); App.toastError('خطا در ذخیرهٔ فاکتور؛ اتصال اینترنت را بررسی کنید (در حالت آفلاین هم باید ذخیره شود، دوباره تلاش کنید).'); });
-
-    this.resetSaleDraft();
-    this.viewInvoiceId = saleId;
-    this.navigate('invoice');
   },
 
   /* ---------- Invoice view / print / whatsapp ---------- */
   viewInvoice(id){ this.viewInvoiceId=id; this.navigate('invoice'); },
   printInvoice(){ window.print(); },
-  // شمارهٔ فاکتور دیگر یک شمارندهٔ مشترک نیست (که در حالت آفلاین/هم‌زمان می‌توانست
-  // برای دو فاکتور مختلف یک عدد تکراری بسازد)، بلکه از ترتیب زمانی خود فاکتورها
-  // محاسبه می‌شود. چون هر فاکتور یک id یکتا دارد، هیچ‌وقت دو فاکتور شمارهٔ یکسان نمی‌گیرند،
-  // حتی اگر چند نفر هم‌زمان و آفلاین فاکتور ثبت کرده باشند.
+  // شمارهٔ فاکتور جدید از خود ID یکتا ساخته و داخل رکورد ذخیره می‌شود؛
+  // بنابراین با حذف/مرتب‌سازی/همگام‌سازی دوباره تغییر نمی‌کند و دو دستگاه آفلاین
+  // نیز شمارهٔ یکسان تولید نمی‌کنند. رکوردهای قدیمی تا زمان مهاجرت، شمارهٔ قبلی خود را دارند.
   saleSeqNo(saleId){
-    const sorted = [...this.state.sales].sort((a,b)=> (a.ts||0)-(b.ts||0) || (a.id<b.id?-1:1));
-    const idx = sorted.findIndex(s=>s.id===saleId);
-    return idx>=0 ? idx+1 : 0;
+    const s=this.state.sales.find(x=>x.id===saleId);
+    if(s && s.invoiceNo) return s.invoiceNo;
+    const idx=this.state.sales.findIndex(x=>x.id===saleId);
+    return idx>=0 ? String(idx+1).padStart(5,'0') : '00000';
   },
-  invoiceNoLabel(saleId){ return '#'+String(this.saleSeqNo(saleId)).padStart(5,'0'); },
-  // همان منطق شماره‌گذاری فاکتور فروش، برای فاکتورهای خرید نیز (جدا از شمارهٔ فروش).
+  invoiceNoLabel(saleId){ const s=this.state.sales.find(x=>x.id===saleId); return '#'+this.invoiceNoValue(s,'S'); },
   purchaseSeqNo(purchaseId){
-    const sorted = [...this.state.purchases].sort((a,b)=> (a.ts||0)-(b.ts||0) || (a.id<b.id?-1:1));
-    const idx = sorted.findIndex(s=>s.id===purchaseId);
-    return idx>=0 ? idx+1 : 0;
+    const p=this.state.purchases.find(x=>x.id===purchaseId);
+    if(p && p.invoiceNo) return p.invoiceNo;
+    const idx=this.state.purchases.findIndex(x=>x.id===purchaseId);
+    return idx>=0 ? String(idx+1).padStart(5,'0') : '00000';
   },
-  purchaseNoLabel(purchaseId){ return '#'+String(this.purchaseSeqNo(purchaseId)).padStart(5,'0'); },
-  // برای نمایش، اگر شمارهٔ بلِ واقعی عمده‌فروش ثبت شده باشد همان نشان داده می‌شود
-  // (چون این همان چیزی است که کاربر می‌شناسد)، وگرنه شمارهٔ داخلی برنامه به‌عنوان جایگزین.
+  purchaseNoLabel(purchaseId){ const p=this.state.purchases.find(x=>x.id===purchaseId); return '#'+this.invoiceNoValue(p,'B'); },
   purchaseBillLabel(pur){ return pur.supplierInvoiceNo ? ('بل #'+pur.supplierInvoiceNo) : this.purchaseNoLabel(pur.id); },
   editPurchaseInvoiceNo(purchaseId){
     const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
@@ -1751,10 +1871,12 @@ const App = {
       <div class="field-note">اگر مبلغ دریافتی کمتر از مجموع باشد، باقیمانده به عنوان بدهی مشتری ثبت می‌شود.</div>
       ${(Number(sale.settled)||0)>0.001?`<div class="field-note">پرداخت‌های بعدیِ تخصیص‌یافته به این فاکتور (${fmt(sale.settled)}) جداگانه حفظ می‌شود و در عدد بالا نیست.</div>`:''}
 
+      <label>دلیل اصلاح <span style="color:var(--red)">*</span></label>
+      <input id="edit-sale-reason" placeholder="مثلاً مشتری ۲ قوطی خواسته بود، ۳ ثبت شده بود" value="">
       <label>یادداشت</label>
       <input id="edit-sale-note" value="${escapeHtml(sale.note||'')}">
 
-      <div class="field-note">با ذخیره: مجموع فاکتور، بدهی مشتری (چه مشتری قبلی و چه جدید) و موجودی انبار همگی بر اساس مقادیر جدید دوباره محاسبه می‌شوند.</div>
+      <div class="field-note">این «اصلاح فاکتور» است، نه حذف فاکتور. شماره فاکتور ثابت می‌ماند، تغییرات با کاربر/دستگاه/زمان و دلیل اصلاح در Audit ثبت می‌شود و موجودی و بدهی بر اساس مقدار جدید دوباره تنظیم می‌شوند.</div>
 
       <div class="inv-actions" style="margin-top:12px;">
         <button class="btn btn-primary" onclick="App.saveEditInvoice('${sale.id}')">${ic('save',17)}ذخیرهٔ ویرایش</button>
@@ -1794,24 +1916,29 @@ const App = {
       return {...it, qty, unitPrice};
     });
     for(const it of newItems){
-      if(isNaN(it.qty)||it.qty<=0){ App.toastError('تعداد نامعتبر برای «'+it.name+'»'); return; }
+      if(isNaN(it.qty)||it.qty<0){ App.toastError('تعداد نامعتبر برای «'+it.name+'»'); return; }
       if(isNaN(it.unitPrice)||it.unitPrice<0){ App.toastError('قیمت نامعتبر برای «'+it.name+'»'); return; }
       if(it.qty < (it.returnedQty||0)-1e-9){ App.toastError('تعداد «'+it.name+'» نمی‌تواند کمتر از مقدار مرجوعی‌شدهٔ آن ('+App.itemQtyLabel(it,it.returnedQty||0)+') باشد.'); return; }
     }
 
+    const correctedItems = newItems.filter(it=>it.qty>0 || (it.returnedQty||0)>0);
+    if(!correctedItems.length){ this.toast('فاکتور نمی‌تواند بدون قلم بماند؛ برای لغو کامل از «کنسل کامل فاکتور» استفاده کنید.'); return; }
     const custName=(document.getElementById('edit-customer-name').value||'').trim();
     const custPhone=(document.getElementById('edit-customer-phone').value||'').trim();
     const custAddress=(document.getElementById('edit-customer-address').value||'').trim();
     const date=document.getElementById('edit-sale-date').value || sale.date;
     const note=(document.getElementById('edit-sale-note').value||'').trim();
+    const correctionReason=(document.getElementById('edit-sale-reason').value||'').trim();
+    if(!correctionReason){ this.toast('برای اصلاح فاکتور، دلیل اصلاح را بنویسید.'); return; }
 
-    const newTotalCost = round2(newItems.reduce((a,i)=>a+(i.qty-(i.returnedQty||0))*(i.cost||0),0));
+    const finalItems = correctedItems;
+    const newTotalCost = round2(finalItems.reduce((a,i)=>a+(i.qty-(i.returnedQty||0))*(i.cost||0),0));
 
     // مجموع، تخفیف، پرداختی و باقیمانده فقط از calcInvoice می‌آیند.
     // تخفیفی که قبلاً روی فاکتور ثبت شده (sale.discount) با ویرایش از بین نمی‌رود.
     let paidInput=parseFloat(document.getElementById('edit-sale-paid').value);
     if(isNaN(paidInput)||paidInput<0) paidInput=0;
-    const calc = calcInvoice({ items:newItems, discount:sale.discount, paid:paidInput, settled:sale.settled||0 });
+    const calc = calcInvoice({ items:finalItems, discount:sale.discount, paid:paidInput, settled:sale.settled||0 });
     const newTotal=calc.total, paid=calc.paid, newRemaining=calc.remaining, overpaid=calc.overpaid;
     // اضافه‌پرداخت (مشتری بیشتر از مجموع جدید داده) گم نمی‌شود: به‌عنوان اعتبار در حساب مشتری ثبت می‌شود
     if(overpaid>0.001 && !custName){ this.toast('مبلغ دریافتی از مجموع فاکتور بیشتر است ('+fmt(overpaid)+'). برای ثبت اعتبار، نام مشتری را بنویسید یا مبلغ را کم کنید.'); return; }
@@ -1820,10 +1947,12 @@ const App = {
 
     // موجودی انبار: فقط تفاوت تعداد نسبت به مقدار قبلیِ همان قلم اعمال می‌شود
     const stockDeltas={};
-    newItems.forEach((it,idx)=>{
-      const deltaQty = it.qty - sale.items[idx].qty;
-      if(deltaQty!==0) stockDeltas[it.productId]=(stockDeltas[it.productId]||0)-deltaQty;
-    });
+    const oldByPid={}; const newByPid={};
+    sale.items.forEach(it=>{ oldByPid[it.productId]=(oldByPid[it.productId]||0)+Number(it.qty||0); });
+    correctedItems.forEach(it=>{ newByPid[it.productId]=(newByPid[it.productId]||0)+Number(it.qty||0); });
+    const pids=new Set([...Object.keys(oldByPid),...Object.keys(newByPid)]);
+    pids.forEach(pid=>{ const deltaQty=(newByPid[pid]||0)-(oldByPid[pid]||0); if(Math.abs(deltaQty)>1e-9) stockDeltas[pid]=(stockDeltas[pid]||0)-deltaQty; });
+
     let willGoNegative=false;
     Object.keys(stockDeltas).forEach(pid=>{
       const p=this.state.products.find(x=>x.id===pid);
@@ -1849,6 +1978,10 @@ const App = {
       const existing=this.state.customers.find(c=>c.name===custName);
       if(existing){ newCustomerId=existing.id; newCustomerNameFinal=existing.name; }
       else { newCustomerId=uid(); newCustomerNameFinal=custName; }
+    }
+    if((Number(sale.settled)||0)>0.001 && newCustomerId!==oldCustomerId){
+      this.toast('این فاکتور پرداختِ بعدیِ تخصیص‌یافته دارد؛ برای تغییر مشتری، اول پرداخت‌های تخصیص‌یافته را با «ابطال/برگشت» اصلاح کنید.');
+      return;
     }
 
     // اصلاح بدهی مشتری قدیم/جدید (delta-based، تا با ویرایش هم‌زمان تداخل نکند)
@@ -1881,19 +2014,20 @@ const App = {
     });
 
     batch.update(doc(cols.sales, sale.id), {
-      items:newItems, customerId:newCustomerId, customerName:newCustomerNameFinal,
+      items:finalItems, customerId:newCustomerId, customerName:newCustomerNameFinal,
       customerPhone:custPhone, customerAddress:custAddress, date, note,
       total:newTotal, discount:calc.discount, totalCost:newTotalCost, profit:round2(newTotal-newTotalCost),
-      paid, settled:calc.settled, remaining:newRemaining, ...this.editMeta()
+      paid, settled:calc.settled, remaining:newRemaining, lastEditReason:correctionReason, ...this.editMeta()
     });
 
     { const rel=round2((Number(sale.settled)||0)-calc.settled); if(rel>0.001) this._releaseAllocations(batch, sale.id, rel); }
-    this.audit(batch, { action:'edit', entityType:'sale', entityId:sale.id, before:sale, after:{ ...sale, total:newTotal, discount:calc.discount, paid, remaining:newRemaining, items:newItems } });
+    this.audit(batch, { action:'edit', entityType:'sale', entityId:sale.id, before:sale, after:{ ...sale, total:newTotal, discount:calc.discount, paid, remaining:newRemaining, items:finalItems } });
     batch.commit().then(()=>{
+      this._markWriteResult(true);
       this.editingInvoiceId=null; this._editBaseTs=undefined;
       if(overpaid>0.001) this.toast('اضافه‌پرداخت '+fmt(overpaid)+' به‌عنوان اعتبار در حساب مشتری ثبت شد');
       this.render();
-    }).catch(e=>{ console.error('saveEditInvoice error',e); this.toast('خطا در ذخیرهٔ ویرایش؛ اتصال اینترنت را بررسی کنید و دوباره تلاش کنید.'); });
+    }).catch(e=>{ console.error('saveEditInvoice error',e); this._markWriteResult(false,e); this.toast('خطا در ذخیرهٔ اصلاح؛ فاکتور تغییری نکرد.'); });
   },
 
   renderSale(){
@@ -2044,42 +2178,7 @@ const App = {
     const note = (document.getElementById('purchase-note').value||'').trim();
     const supplierInvoiceNo = (document.getElementById('purchase-supplier-invoice-no').value||'').trim();
     const remaining = total-paid;
-
-    App._mv('PURCHASE','خرید'); const batch = writeBatch(db);
-    let supplierId=null, supplierNameFinal=supName||'—';
-    if(supName){
-      let supplier=this.state.suppliers.find(c=>c.name===supName);
-      if(!supplier){
-        supplierId=uid(); supplierNameFinal=supName;
-        batch.set(doc(cols.suppliers,supplierId), {id:supplierId,name:supName,phone:'',address:'',balance:currency==='AFN'?remaining:0,balanceUSD:currency==='USD'?remaining:0, ...this.recordMeta()});
-      } else {
-        supplierId=supplier.id; supplierNameFinal=supplier.name;
-        batch.update(doc(cols.suppliers,supplier.id), { [balField]: increment(remaining) });
-      }
-    } else if(remaining>0.001){
-      this.toast('برای خرید نسیه باید نام عمده‌فروش/شرکت را بنویسید'); return;
-    }
-
     const draftProducts = this.purchaseDraft._draftProducts || [];
-    this.purchaseDraft.items.forEach(it=>{
-      const unitCostAFN = currency==='USD' ? it.unitCost*rateAtPurchase : it.unitCost;
-      const draftP = draftProducts.find(dp=>dp.id===it.productId);
-      if(draftP){
-        batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, unitQty:draftP.unitQty||1, stock:it.qty, avgCost:unitCostAFN, sellPrice:round2(unitCostAFN*1.15),
-          midUnit:draftP.midUnit||'', midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', packPer:draftP.packPer||0,
-          defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||draftP.unit,
-          saleUnits:draftP.saleUnits||[draftP.packUnit||draftP.midUnit||draftP.unit].filter(Boolean), allowFractionalSale:!!draftP.allowFractionalSale,
-          sellPriceMid:0, sellPricePack:0, ...this.recordMeta()});
-      } else {
-        const p = this.state.products.find(pp=>pp.id===it.productId);
-        if(p){
-          const newAvgCost = nextAvgCost({ stockQty:p.stock, avgCost:p.avgCost, purchaseQty:it.qty, unitCost:unitCostAFN }).avgCost;
-          const fields = { stock: increment(it.qty), avgCost: newAvgCost };
-          if(!p.sellPrice) fields.sellPrice = round2(unitCostAFN*1.15);
-          batch.update(doc(cols.products, it.productId), fields);
-        }
-      }
-    });
 
     const photoInput = document.getElementById('purchase-bill-photo');
     const photoFile = photoInput && photoInput.files[0];
@@ -2089,21 +2188,122 @@ const App = {
       catch(err){ App.toastError(err.message||'خطا در پردازش عکس بل'); return; }
     }
 
+    let supplierId=null, supplierNameFinal=supName||'—';
+    if(supName){
+      const supplier=this.state.suppliers.find(c=>c.name===supName);
+      if(supplier){ supplierId=supplier.id; supplierNameFinal=supplier.name; }
+      else supplierId=uid();
+    } else if(remaining>0.001){
+      this.toast('برای خرید نسیه باید نام عمده‌فروش/شرکت را بنویسید'); return;
+    }
+
     const purchaseId = txPurchaseId;
     const newPurchase = {
-      id:purchaseId, ts:Date.now(), date, supplierId, supplierName:supplierNameFinal, currency, rateAtPurchase,
+      id:purchaseId, invoiceNo:this.invoiceNoForNew(purchaseId,'B'), ts:Date.now(), date, supplierId, supplierName:supplierNameFinal, currency, rateAtPurchase,
       items:this.purchaseDraft.items.map(it=>({...it,returnedQty:0})), total, paid, remaining, note, supplierInvoiceNo,
       status:'active', returns:[], originalTotal: total,
       ...this.recordMeta()
     };
     if(billImage) newPurchase.billImage = billImage;
-    batch.set(doc(cols.purchases, purchaseId), newPurchase);
-    this.audit(batch, { action:'create', entityType:'purchase', entityId:purchaseId, before:null, after:newPurchase });
 
-    batch.commit().catch(e=>{ console.error('submitPurchase error',e); this.toast('خطا در ذخیرهٔ بل خرید؛ اتصال اینترنت را بررسی کنید.'); });
+    /* خرید و میانگین قیمت: وقتی آنلاین هستیم، تغییر موجودی و avgCost داخل
+       یک transaction انجام می‌شود. بنابراین دو دستگاه نمی‌توانند avgCost را
+       بر اساس موجودی قدیمی محاسبه و روی هم overwrite کنند. در حالت آفلاین،
+       Firestore تغییرات را محلی صف می‌کند و بعد از اتصال reconcile باید اجرا شود. */
+    const commitOfflineBatch = async()=>{
+      App._mv('PURCHASE','خرید'); const batch = writeBatch(db);
+      if(supName){
+        const supplier=this.state.suppliers.find(c=>c.id===supplierId);
+        if(supplier) batch.update(doc(cols.suppliers,supplierId), { [balField]: increment(remaining) });
+        else batch.set(doc(cols.suppliers,supplierId), {id:supplierId,name:supName,phone:'',address:'',balance:currency==='AFN'?remaining:0,balanceUSD:currency==='USD'?remaining:0, ...this.recordMeta()});
+      }
+      this.purchaseDraft.items.forEach(it=>{
+        const unitCostAFN = currency==='USD' ? it.unitCost*rateAtPurchase : it.unitCost;
+        const draftP = draftProducts.find(dp=>dp.id===it.productId);
+        if(draftP){
+          batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, unitQty:draftP.unitQty||1, stock:it.qty, avgCost:unitCostAFN, sellPrice:round2(unitCostAFN*1.15),
+            midUnit:draftP.midUnit||'', midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', packPer:draftP.packPer||0,
+            defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||draftP.unit,
+            saleUnits:draftP.saleUnits||[draftP.packUnit||draftP.midUnit||draftP.unit].filter(Boolean), allowFractionalSale:!!draftP.allowFractionalSale,
+            sellPriceMid:0, sellPricePack:0, ...this.recordMeta()});
+        } else {
+          const p=this.state.products.find(pp=>pp.id===it.productId);
+          if(p){
+            const unitCost=unitCostAFN;
+            const newAvgCost=nextAvgCost({stockQty:p.stock,avgCost:p.avgCost,purchaseQty:it.qty,unitCost}).avgCost;
+            const fields={stock:increment(it.qty),avgCost:newAvgCost};
+            if(!p.sellPrice) fields.sellPrice=round2(unitCost*1.15);
+            batch.update(doc(cols.products,it.productId),fields);
+          }
+        }
+      });
+      batch.set(doc(cols.purchases,purchaseId),newPurchase);
+      this.audit(batch,{action:'create',entityType:'purchase',entityId:purchaseId,before:null,after:newPurchase});
+      await batch.commit();
+    };
+
+    const commitOnlineTransaction = async()=>{
+      const productRefs=this.purchaseDraft.items.filter(it=>!draftProducts.some(dp=>dp.id===it.productId)).map(it=>doc(cols.products,it.productId));
+      const uniqueRefs=[...new Map(productRefs.map(r=>[r.path,r])).values()];
+      const supplierRef=supplierId ? doc(cols.suppliers,supplierId) : null;
+      await runTransaction(db, async(tx)=>{
+        const reads=[];
+        if(supplierRef) reads.push(tx.get(supplierRef));
+        uniqueRefs.forEach(r=>reads.push(tx.get(r)));
+        const snaps=await Promise.all(reads);
+        let k=0;
+        const supplierSnap=supplierRef ? snaps[k++] : null;
+        const productSnaps=new Map(uniqueRefs.map(r=>[r.path,snaps[k++]]));
+
+        if(supplierRef){
+          if(supplierSnap && supplierSnap.exists()) tx.update(supplierRef,{[balField]:increment(remaining)});
+          else tx.set(supplierRef,{id:supplierId,name:supName,phone:'',address:'',balance:currency==='AFN'?remaining:0,balanceUSD:currency==='USD'?remaining:0,...this.recordMeta()});
+        }
+
+        const runningProductState=new Map();
+        this.purchaseDraft.items.forEach(it=>{
+          const unitCostAFN=currency==='USD' ? it.unitCost*rateAtPurchase : it.unitCost;
+          const draftP=draftProducts.find(dp=>dp.id===it.productId);
+          const pref=doc(cols.products,it.productId);
+          if(draftP){
+            tx.set(pref,{id:draftP.id,name:draftP.name,unit:draftP.unit,unitQty:draftP.unitQty||1,stock:it.qty,avgCost:unitCostAFN,sellPrice:round2(unitCostAFN*1.15),
+              midUnit:draftP.midUnit||'',midPer:draftP.midPer||0,packUnit:draftP.packUnit||'',packPer:draftP.packPer||0,
+              defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||draftP.unit,
+              saleUnits:draftP.saleUnits||[draftP.packUnit||draftP.midUnit||draftP.unit].filter(Boolean),allowFractionalSale:!!draftP.allowFractionalSale,
+              sellPriceMid:0,sellPricePack:0,...this.recordMeta()});
+            return;
+          }
+          const snap=productSnaps.get(pref.path);
+          if(!snap || !snap.exists()) throw new Error('محصول «'+it.name+'» در سرور پیدا نشد.');
+          const p=snap.data();
+          const prior=runningProductState.get(it.productId) || { stock:Number(p.stock)||0, avgCost:Number(p.avgCost)||0 };
+          const oldStock=prior.stock, oldAvg=prior.avgCost;
+          const calc=nextAvgCost({stockQty:oldStock,avgCost:oldAvg,purchaseQty:it.qty,unitCost:unitCostAFN});
+          runningProductState.set(it.productId,{stock:calc.newStock,avgCost:calc.avgCost});
+          const fields={stock:increment(it.qty),avgCost:calc.avgCost};
+          if(!p.sellPrice) fields.sellPrice=round2(unitCostAFN*1.15);
+          tx.update(pref,fields);
+          const lmId=uid();
+          tx.set(doc(cols.stockLedger,lmId),buildMovement({id:lmId,ts:Date.now(),date:todayISO(),productId:it.productId,warehouseId:DEFAULT_WAREHOUSE,type:'PURCHASE',quantityBase:it.qty,unit:'عدد',unitCost:unitCostAFN,userId:(this.user&&this.user.email)||'',referenceType:'purchase',referenceId:purchaseId,reason:'خرید',stockBefore:oldStock}));
+        });
+        tx.set(doc(cols.purchases,purchaseId),newPurchase);
+        this.audit(tx,{action:'create',entityType:'purchase',entityId:purchaseId,before:null,after:newPurchase});
+      });
+    };
+
+    try{
+      if(navigator.onLine) await commitOnlineTransaction();
+      else await commitOfflineBatch();
+      this._markWriteResult(true);
+    }catch(e){
+      console.error('submitPurchase error',e);
+      this._markWriteResult(false,e);
+      this.toastError('ذخیرهٔ بل خرید انجام نشد یا وضعیت اتصال نامعلوم است؛ دوباره ثبت نکنید تا وضعیت همگام‌سازی مشخص شود. '+(e.message||''));
+      return;
+    }
 
     this.resetPurchaseDraft();
-    this.viewPurchaseId = purchaseId;
+    this.viewPurchaseId=purchaseId;
     this.navigate('purchase-view');
   },
 
@@ -2303,12 +2503,11 @@ const App = {
         const u=ladder.find(x=>x.name===v.unit)||ladder[ladder.length-1];
         const baseQty=round2((Number(v.qty)||0)*u.factor);
         if(!baseQty || baseQty<=0 || baseQty>sellable+1e-9) throw new Error('تعداد نامعتبر است — حداکثر '+this.itemQtyLabel(it,sellable)+'.');
-        this._applySaleReturn(sale, idx, baseQty, fmtQty(v.qty)+' '+u.name, (v.reason||'').trim());
-        this.toast('مرجوعی ثبت شد');
+        return this._applySaleReturn(sale, idx, baseQty, fmtQty(v.qty)+' '+u.name, (v.reason||'').trim()).then(()=>this.toast('مرجوعی ثبت شد'));
       }
     });
   },
-  _applySaleReturn(sale, idx, qty, qtyLabel, reason){
+  async _applySaleReturn(sale, idx, qty, qtyLabel, reason){
     const it=sale.items[idx];
     const refund = round2(qty*it.unitPrice);
     const refundCost = round2(qty*(it.cost||0));
@@ -2338,7 +2537,8 @@ const App = {
     if(rb.releasedSettled>0.001) this._releaseAllocations(batch, sale.id, rb.releasedSettled);
     batch.update(doc(cols.products, it.productId), { stock: increment(qty) });
     this.audit(batch, { action:'return', entityType:'sale', entityId:sale.id, before:sale, after:{ ...sale, total:newTotal, paid:newPaid, settled:rb.settled, remaining:rb.remaining } });
-    batch.commit().catch(e=>{ console.error(e); App.toastError('خطا در ثبت مرجوعی؛ دوباره تلاش کنید.'); });
+    try{ await batch.commit(); this._markWriteResult(true); }
+    catch(e){ console.error(e); this._markWriteResult(false,e); throw new Error('خطا در ثبت مرجوعی؛ فاکتور تغییری نکرد. '+(e.message||'')); }
   },
   cancelSale(saleId){
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
@@ -2390,7 +2590,7 @@ const App = {
       batch.update(doc(cols.products, pid), { stock: increment(stockDeltas[pid]) });
     });
     this.audit(batch, { action:'cancel', entityType:'sale', entityId:sale.id, before:sale, after:{ ...sale, status:'cancelled', total:runningTotal, settled:rb.settled, remaining:rb.remaining } });
-    batch.commit().then(()=>this.toast('فاکتور باطل شد')).catch(e=>{ console.error(e); App.toastError('خطا در باطل کردن فاکتور؛ دوباره تلاش کنید.'); });
+    batch.commit().then(()=>{ this._markWriteResult(true); this.toast('فاکتور باطل شد'); }).catch(e=>{ console.error(e); this._markWriteResult(false,e); App.toastError('خطا در باطل کردن فاکتور؛ فاکتور تغییری نکرد.'); });
   },
   saleIncreaseItemQty(saleId, idx){
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
@@ -2692,12 +2892,11 @@ const App = {
         const u=ladder.find(x=>x.name===v.unit)||ladder[ladder.length-1];
         const baseQty=round2((Number(v.qty)||0)*u.factor);
         if(!baseQty||baseQty<=0||baseQty>returnable+1e-9) throw new Error('تعداد نامعتبر است — حداکثر '+this.itemQtyLabel(it,returnable)+'.');
-        this._applyPurchaseReturn(pur, idx, baseQty, fmtQty(v.qty)+' '+u.name);
-        this.toast('ثبت شد');
+        return this._applyPurchaseReturn(pur, idx, baseQty, fmtQty(v.qty)+' '+u.name).then(()=>this.toast('ثبت شد'));
       }
     });
   },
-  _applyPurchaseReturn(pur, idx, qty, qtyLabel){
+  async _applyPurchaseReturn(pur, idx, qty, qtyLabel){
     const it=pur.items[idx];
     const refund=round2(qty*it.unitCost);
     const oldRemaining=pur.total-pur.paid;
@@ -2714,7 +2913,7 @@ const App = {
       batch.update(doc(cols.suppliers, pur.supplierId), { [balField]: increment(-debtReduction) });
     }
     batch.update(doc(cols.products, it.productId), { stock: increment(-qty) });
-    batch.commit().catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
+    try{ await batch.commit(); this._markWriteResult(true); }catch(e){ console.error(e); this._markWriteResult(false,e); throw new Error('خطا؛ واپسی ثبت نشد. '+(e.message||'')); }
   },
   /* «حالت استثنایی» روی بل خرید — دو معنیِ کاملاً جدا:
        short : جنس کم آمده و پولش را هم نمی‌پردازم → مبلغ بل، بدهی به شرکت و انبار هر سه کم می‌شود
@@ -2878,7 +3077,7 @@ const App = {
     Object.keys(stockDeltas).forEach(pid=>{
       batch.update(doc(cols.products, pid), { stock: increment(stockDeltas[pid]) });
     });
-    batch.commit().then(()=>this.toast('بل خرید باطل شد')).catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
+    batch.commit().then(()=>{ this._markWriteResult(true); this.toast('بل خرید باطل شد'); }).catch(e=>{ console.error(e); this._markWriteResult(false,e); App.toastError('خطا؛ بل خرید تغییری نکرد.'); });
   },
   purchaseIncreaseItemQty(purchaseId, idx){
     const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
@@ -4175,6 +4374,7 @@ const App = {
           }
           for(const rec of (parsed[name]||[])){
             if(!rec.id) rec.id=uid();
+            if((name==='sales'||name==='purchases') && !rec.invoiceNo) rec.invoiceNo=this.invoiceNoForNew(rec.id,name==='sales'?'S':'B');
             batch.set(doc(cols[name], rec.id), rec); opCount++; if(opCount>=opsBatchLimit) await flush();
           }
           await flush();
