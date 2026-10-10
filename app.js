@@ -14,7 +14,7 @@ import {
   round2, round4, fmtQty, todayISO, addDaysISO, daysBetweenISO, startOfWeekISO, startOfMonthISO, dateLabelFa,
   setBusinessTimezone, calcInvoice, rebalanceAfterTotalChange, nextAvgCost, describeAuthError,
   makePinRecord, verifyPin, pinStateAfterFailure, pinStateAfterSuccess, pinLockRemainingMs,
-  buildBackup, validateBackup
+  buildBackup, validateBackup, normalizeName
 } from "./core.js";
 import {
   normalizeProductUnitsRecord, productUnits as _productUnits, saleUnits as _saleUnits,
@@ -1510,7 +1510,7 @@ const App = {
         App._mv('SALE','فروش'); const batch = writeBatch(db);
         let customerId=null, customerNameFinal='مشتری نقدی';
         if(custName){
-          const customer=this.state.customers.find(c=>c.name===custName);
+          const customer=this.state.customers.find(c=>normalizeName(c.name)===normalizeName(custName));
           if(!customer){
             customerId=uid(); customerNameFinal=custName;
             batch.set(doc(cols.customers,customerId), {id:customerId,name:custName,phone:custPhone,address:custAddress,balance:remaining, ...this.recordMeta()});
@@ -1554,7 +1554,7 @@ const App = {
       const commitOnlineTransaction=async()=>{
         const productRefs=this.saleDraft.items.filter(it=>!draftProducts.some(dp=>dp.id===it.productId)).map(it=>doc(cols.products,it.productId));
         const uniqueRefs=[...new Map(productRefs.map(r=>[r.path,r])).values()];
-        const customerMatch=custName ? this.state.customers.find(c=>c.name===custName) : null;
+        const customerMatch=custName ? this.state.customers.find(c=>normalizeName(c.name)===normalizeName(custName)) : null;
         const customerId=customerMatch ? customerMatch.id : (custName ? uid() : null);
         const customerRef=customerId ? doc(cols.customers,customerId) : null;
         await runTransaction(db, async(tx)=>{
@@ -1975,7 +1975,7 @@ const App = {
     let newCustomerId=null, newCustomerNameFinal='مشتری نقدی';
 
     if(custName){
-      const existing=this.state.customers.find(c=>c.name===custName);
+      const existing=this.state.customers.find(c=>normalizeName(c.name)===normalizeName(custName));
       if(existing){ newCustomerId=existing.id; newCustomerNameFinal=existing.name; }
       else { newCustomerId=uid(); newCustomerNameFinal=custName; }
     }
@@ -3363,6 +3363,7 @@ const App = {
       this.toast('پرداخت باطل شد');
     }catch(e){
       console.error('void payment', e);
+      if(e && (e.code==='permission-denied' || e.code==='firestore/permission-denied')) throw new Error('اجازهٔ ابطال پرداخت داده نشد؛ قوانین Firestore را بررسی کنید (فقط مالک می‌تواند باطل کند).');
       throw new Error((e&&e.message&&e.message.indexOf('باطل')>=0)?e.message:'ابطال پرداخت انجام نشد؛ اتصال اینترنت را بررسی کنید و دوباره تلاش کنید.');
     }
   },
@@ -4369,9 +4370,13 @@ const App = {
           const opsBatchLimit=400;
           let batch=writeBatch(db,{noLedger:true}); let opCount=0;
           const flush=async()=>{ if(opCount>0){ await batch.commit(); batch=writeBatch(db,{noLedger:true}); opCount=0; } };
+          /* «returns» در firestore.rules فقط‌افزودنی است (update ممنوع). پس هنگام بازیابی، همهٔ سندهای
+             موجودش اول پاک می‌شود (و commit می‌شود) و بعد از نو «ساخته» می‌شود، نه «بازنویسی». */
+          const replaceAll = (name==='returns');
           for(const d of existing.docs){
-            if(!importedIds.has(d.id)){ batch.delete(d.ref); opCount++; if(opCount>=opsBatchLimit) await flush(); }
+            if(replaceAll || !importedIds.has(d.id)){ batch.delete(d.ref); opCount++; if(opCount>=opsBatchLimit) await flush(); }
           }
+          if(replaceAll) await flush();
           for(const rec of (parsed[name]||[])){
             if(!rec.id) rec.id=uid();
             if((name==='sales'||name==='purchases') && !rec.invoiceNo) rec.invoiceNo=this.invoiceNoForNew(rec.id,name==='sales'?'S':'B');

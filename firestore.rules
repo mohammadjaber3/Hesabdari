@@ -198,8 +198,17 @@ service cloud.firestore {
       // ---------- دریافت/پرداخت ----------
       match /payments/{id} {
         allow read: if canReadSalesSide(biz);
-        allow create: if (isOwner(biz) || isManager(biz) || isAccountant(biz) || isStaff(biz) || isSalesman(biz))
-                      && idMatches(id) && num(request.resource.data.amount) && request.resource.data.amount > 0;
+        allow create: if (
+                        // پرداخت/دریافت عادی: مبلغ مثبت
+                        (isOwner(biz) || isManager(biz) || isAccountant(biz) || isStaff(biz) || isSalesman(biz))
+                        && idMatches(id) && num(request.resource.data.amount) && request.resource.data.amount > 0
+                      ) || (
+                        // رویداد معکوسِ ابطال پرداخت: مبلغ منفی، فقط مالک، و شناسهٔ پرداخت اصلی الزامی است
+                        isOwner(biz) && idMatches(id)
+                        && num(request.resource.data.amount) && request.resource.data.amount < 0
+                        && request.resource.data.reversalOf is string
+                        && request.resource.data.status == 'reversal'
+                      );
         // ابطال پرداخت با رویداد معکوس انجام می‌شود (مالک): فقط علامت‌گذاری voided روی اصلی مجاز است
         allow update: if isOwner(biz) || ((isManager(biz) || isAccountant(biz)) && onlyChanges(['receiptImage', 'lastEditedByEmail', 'lastEditedByDevice', 'lastEditedTs']));
         // حذف واقعی فقط مالک و فقط برای «بازیابی/پاک‌کردن همه». اپ هرگز برای اصلاح اشتباه حذف نمی‌کند (Void).
