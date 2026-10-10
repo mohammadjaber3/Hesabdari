@@ -76,6 +76,9 @@ export function qtyBreakdown(p, baseQty){
     const n=Math.floor(q/u.factor+1e-9);
     if(n>0){ parts.push(fmtQty(n)+' '+u.name); q-=n*u.factor; }
   }
+  // باقی‌ماندهٔ کمتر از کوچک‌ترین واحد بسته‌بندی (مثلاً ۳ عدد) قبلاً نمایش داده نمی‌شد و موجودی کمتر از واقعیت دیده می‌شد
+  const baseName=productUnits(p).find(u=>u.key==='base').name;
+  if(q>0.0005) parts.push(fmtQty(q)+' '+baseName);
   if(!parts.length) parts.push('0 '+ladder[ladder.length-1].name);
   return (neg?'-':'')+parts.join(' و ');
 }

@@ -471,6 +471,7 @@ const App = {
     try{
       const teamSnap = await getDoc(teamDocRef(u.uid));
       this.role = teamSnap.exists() ? (teamSnap.data().role||'staff') : 'staff';
+      if(this.role==='salesman') this.role='seller'; // firestore.rules از «salesman» استفاده می‌کند، برنامه از «seller»
       try{ localStorage.setItem(cacheKey, this.role); }catch(e){}
     }catch(e){
       let cached=null;
@@ -727,7 +728,7 @@ const App = {
 
   renderLogin(){
     document.getElementById('bottomnav').innerHTML='';
-    document.getElementById('biz-name').textContent='پخش موتر';
+    document.getElementById('biz-name').textContent='فروشگاه صانع';
     {const _bd=document.getElementById('biz-date'); if(_bd) _bd.textContent='';}
     document.getElementById('screen').innerHTML = `
     <div class="login-mark">
@@ -2516,12 +2517,14 @@ const App = {
     const newItems = sale.items.map((x,i)=> i===idx ? {...x, returnedQty:(x.returnedQty||0)+qty} : x);
     const newReturns = [...sale.returns, {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, qtyLabel: qtyLabel||this.itemQtyLabel(it,qty), unitPrice:it.unitPrice, amount:refund}];
 
-    const newTotal = round2(sale.total-refund), newPaid = rb.paid;
+    // با تخفیف روی فاکتور، مرجوعیِ کامل نباید مجموع را منفی کند (مثل لغو کامل)
+    const newTotal = Math.max(0, round2(sale.total-refund)), newPaid = rb.paid;
+    const dropped = round2(sale.total-newTotal); // مقداری که واقعاً از مجموع فاکتور کم شد
     // رویدادِ جدا برای این مرجوعی (فاکتور اصلی تاریخ خودش را حفظ می‌کند)
     const evId=uid();
     const ev=buildReturnEvent({ id:evId, ts:Date.now(), date:todayISO(), sale, kind:'return',
       items:[{ productId:it.productId, name:it.name, qty, unit:it.unit||'عدد', qtyLabel:qtyLabel||this.itemQtyLabel(it,qty), unitPrice:it.unitPrice, cost:it.cost||0, amount:refund }],
-      amount:refund, cost:refundCost, reason:reason||'', userId:(this.user&&this.user.email)||'',
+      amount:dropped, cost:refundCost, reason:reason||'', userId:(this.user&&this.user.email)||'',
       cashRefund:rb.cashRefund, debtReduction:Math.max(0, round2((Number(sale.remaining)||0)-rb.remaining)), releasedSettled:rb.releasedSettled });
     App._mv('RETURN','مرجوعی فروش'+(reason?(' — '+reason):''), { refType:'return', refId:evId }); const batch = writeBatch(db);
     batch.set(doc(cols.returns, evId), ev);
@@ -2529,7 +2532,7 @@ const App = {
       items: newItems, returns: newReturns,
       total: newTotal, totalCost: sale.totalCost-refundCost, profit: newTotal-(sale.totalCost-refundCost),
       paid: newPaid, settled: rb.settled, remaining: rb.remaining,
-      returnedAmount: increment(refund), returnedCost: increment(refundCost), ...this.editMeta()
+      returnedAmount: increment(dropped), returnedCost: increment(refundCost), ...this.editMeta()
     });
     if(sale.customerId && Math.abs(rb.customerDelta)>0.0001){
       batch.update(doc(cols.customers, sale.customerId), { balance: increment(rb.customerDelta) });
@@ -2684,7 +2687,8 @@ const App = {
     const newItems = sale.items.map((x,i)=> i===idx
       ? {...x, qty: round2((Number(x.qty)||0)-qty), adjBase: round2((Number(x.adjBase)||0)+qty), adjNote: note||x.adjNote||''}
       : x);
-    const newTotal = round2((Number(sale.total)||0)-amount);
+    const newTotal = Math.max(0, round2((Number(sale.total)||0)-amount));
+    const dropped  = round2((Number(sale.total)||0)-newTotal); // مقدار واقعیِ کم‌شده از مجموع
     const newCost  = round2((Number(sale.totalCost)||0)-costBack);
     const newPaid  = rb.paid;
     const log = [...(sale.adjustments||[]), {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx,
@@ -2693,7 +2697,7 @@ const App = {
     const evId=uid();
     const ev=buildReturnEvent({ id:evId, ts:Date.now(), date:todayISO(), sale, kind:'shortage',
       items:[{ productId:it.productId, name:it.name, qty, unit:(it.unit||'عدد'), qtyLabel:this.itemQtyLabel(it,qty), unitPrice:it.unitPrice, cost:(mode==='back'?(it.cost||0):0), amount }],
-      amount, cost:costBack, reason:(note||'')+(mode==='back'?' (کالا به انبار برگشت)':' (کالا برنگشت)'), userId:(this.user&&this.user.email)||'',
+      amount:dropped, cost:costBack, reason:(note||'')+(mode==='back'?' (کالا به انبار برگشت)':' (کالا برنگشت)'), userId:(this.user&&this.user.email)||'',
       cashRefund:rb.cashRefund, debtReduction:Math.max(0, round2((Number(sale.remaining)||0)-rb.remaining)), releasedSettled:rb.releasedSettled });
     ev.mode=mode;
     App._mv('RETURN','کاستی/کم‌شدن قلم فاکتور فروش', { refType:'return', refId:evId }); const batch=writeBatch(db);
@@ -2702,7 +2706,7 @@ const App = {
       items:newItems, adjustments:log,
       total:newTotal, totalCost:newCost, profit:round2(newTotal-newCost),
       paid:newPaid, settled:rb.settled, remaining:rb.remaining,
-      returnedAmount: increment(amount), returnedCost: increment(costBack), ...this.editMeta()
+      returnedAmount: increment(dropped), returnedCost: increment(costBack), ...this.editMeta()
     });
     if(sale.customerId && Math.abs(rb.customerDelta)>0.0001){
       batch.update(doc(cols.customers, sale.customerId), { balance: increment(rb.customerDelta) });
@@ -4278,7 +4282,7 @@ const App = {
   },
   saveSettings(){
     const fields = {
-      businessName:(document.getElementById('set-name').value||'').trim()||'پخش موتر من',
+      businessName:(document.getElementById('set-name').value||'').trim()||'فروشگاه صانع',
       currency:(document.getElementById('set-currency').value||'').trim()||'افغانی',
       openingCash:parseFloat(document.getElementById('set-cash').value)||0,
       usdRate:parseFloat(document.getElementById('set-usdrate').value)||0,
