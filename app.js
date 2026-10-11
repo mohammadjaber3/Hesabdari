@@ -687,7 +687,10 @@ const App = {
   // با همین ایمیل وارد شده باشد — یعنی حتی اگر یک نقش owner به‌اشتباه به کاربر دیگری
   // داده شود، تا وقتی ایمیلش manager@motar.com نباشد، دسترسی مدیریتی نمی‌گیرد.
   OWNER_EMAIL: 'manager@motar.com',
-  isOwner(){ return this.role==='owner' && !!this.user && this.user.email===this.OWNER_EMAIL; },
+  // مالک عملیاتی: هر کس در Firebase نقش owner داشته باشد (محصول، موجودی، فروش، خرید، پرداخت، گزارش)
+  isOwner(){ return this.role==='owner'; },
+  // مدیر فنی: فقط manager@motar.com — تنظیمات، پشتیبان‌گیری/بازیابی، ابزار تطبیق، پاک‌کردن همه
+  isAdmin(){ return this.role==='owner' && !!this.user && String(this.user.email||'').toLowerCase()===this.OWNER_EMAIL; },
   /* --- نقش‌ها ---
      owner   : مالک — همه‌کار
      partner : شریک — همه‌چیز را می‌بیند، هیچ چیز را تغییر نمی‌دهد و پاک نمی‌کند
@@ -837,6 +840,13 @@ const App = {
     this.renderModalRoot();
   },
   closeModal(){ this.modal=null; this.renderModalRoot(); },
+  /* خطای انگلیسیِ Firestore را به پیام فارسیِ قابل‌فهم تبدیل می‌کند */
+  friendlyError(err){
+    const code=(err&&err.code)||'', msg=(err&&err.message)||'';
+    if(code==='permission-denied' || code==='firestore/permission-denied' || /missing or insufficient permissions/i.test(msg))
+      return 'سرور اجازهٔ ثبت نداد (Firestore Rules). نقش این حساب یا قوانین منتشرشده در Firebase را بررسی کنید.';
+    return msg || 'خطا؛ دوباره تلاش کنید.';
+  },
   async submitFormModal(){
     if(!this.modal || this.modal.kind!=='form') return;
     const vals={};
@@ -851,7 +861,7 @@ const App = {
       if(res===false) return;
       this.closeModal();
     }catch(err){
-      if(errEl) errEl.textContent = err && err.message ? err.message : 'خطا؛ دوباره تلاش کنید.';
+      if(errEl) errEl.textContent = App.friendlyError(err);
     }
   },
   async submitCustomModal(){
@@ -862,7 +872,7 @@ const App = {
       if(res===false) return;
       this.closeModal();
     }catch(err){
-      if(errEl) errEl.textContent = err && err.message ? err.message : 'خطا؛ دوباره تلاش کنید.';
+      if(errEl) errEl.textContent = App.friendlyError(err);
     }
   },
   confirmModalYes(){
@@ -3554,7 +3564,7 @@ const App = {
     return [...this.state.products].filter(p=>this.isLowStock(p)).sort((a,b)=>(a.stock||0)-(b.stock||0));
   },
   renderMore(){
-    if(this.sub==='settings' && !this.isOwner()){
+    if(this.sub==='settings' && !this.isAdmin()){
       return this.renderNoAccess('تنظیمات');
     }
     if(this.sub==='reports' && !this.canSeeReports()){
@@ -3578,7 +3588,7 @@ const App = {
       ${this.canSeeBooks()?`<button onclick="App.navigate('more','expenses')"><span class="ic">${ic('banknote',17)}</span><span class="lbl">مصارف روزانه و برداشت شخصی</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
       ${this.canSeeReports()?`<button onclick="App.navigate('more','reports')"><span class="ic">${ic('bar-chart',17)}</span><span class="lbl">گزارش سود روزانه / هفته‌وار / ماهوار</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
       <button onclick="App.navigate('more','products')"><span class="ic">${ic('archive',17)}</span><span class="lbl">${this.isOwner()?'مدیریت محصولات و موجودی':'مشاهدهٔ محصولات و موجودی (فقط خواندنی)'}</span><span class="chev">${ic('chevron-left',17)}</span></button>
-      ${this.isOwner()?`<button onclick="App.navigate('more','settings')"><span class="ic">${ic('settings',17)}</span><span class="lbl">تنظیمات و پشتیبان‌گیری</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
+      ${this.isAdmin()?`<button onclick="App.navigate('more','settings')"><span class="ic">${ic('settings',17)}</span><span class="lbl">تنظیمات و پشتیبان‌گیری</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
       ${this.user?`<button onclick="App.lockNow()"><span class="ic">${ic('lock',17)}</span><span class="lbl">قفل صفحه</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
       <button class="danger" onclick="App.logout()"><span class="ic">${ic('log-out',17)}</span><span class="lbl">خروج از حساب <span class="sub" style="font-size:var(--fs-xs);color:var(--ink-500);">${escapeHtml(this.user?this.user.email:'')}</span></span></button>
     </div>
@@ -3908,24 +3918,45 @@ const App = {
     const unitOpts=ladder.map(u=>({value:u.name, label:u.name+(u.factor>1?(' (= '+fmtQty(u.factor)+' '+(p.unit||'عدد')+')'):'')}));
     const body=mode==='delta'
       ? `<label>واحد</label><select id="adj-unit">${unitOpts.map(o=>'<option value="'+escapeHtml(String(o.value))+'">'+escapeHtml(o.label)+'</option>').join('')}</select>
-        <label style="margin-top:10px;">تعداد (مثبت یا منفی)</label><input id="adj-delta" type="text" inputmode="decimal" placeholder="مثال: +5 یا -3.2">
+        <label style="margin-top:10px;">افزایش یا کاهش؟</label>
+        <div style="display:flex;gap:8px;margin-bottom:8px;">
+          <button type="button" class="btn btn-outline" style="flex:1;" id="adj-sign-plus" onclick="App.setAdjustSign(1)">＋ اضافه شود</button>
+          <button type="button" class="btn btn-outline" style="flex:1;" id="adj-sign-minus" onclick="App.setAdjustSign(-1)">－ کم شود</button>
+        </div>
+        <label>تعداد</label><input id="adj-delta" type="text" inputmode="decimal" placeholder="فقط عدد، مثال: 5 یا 3.5">
         <label style="margin-top:10px;">دلیل</label>
         <select id="adj-reason"><option value="count">اصلاح بعد از شمارش فیزیکی</option><option value="damaged">خراب/ضایع شده (زیان، بدون کم شدن پول نقد)</option><option value="personal">مصرف شخصی</option><option value="other">سایر</option></select>
         <input id="adj-note" type="text" placeholder="توضیح (اختیاری)" style="margin-top:6px;">
-        <div class="field-note">برای کاستی/مصرف شخصی، واحد فروش را انتخاب کنید و مقدار منفی بنویسید؛ مثلاً <b>-2 بسته</b>. عدد داخلی در اینجا انتخاب نمی‌شود.</div>`
+        <div class="field-note">برای کاستی/مصرف شخصی، واحد فروش را انتخاب کنید، دکمهٔ <b>«کم شود»</b> را بزنید و مقدار را بنویسید؛ مثلاً <b>2 بسته</b>. عدد داخلی در اینجا انتخاب نمی‌شود.</div>`
       : `<label>تغییر واحد پیش‌فرض نمایش موجودی به</label><select id="adj-newunit">${unitOpts.map(o=>'<option value="'+o.value+'">'+o.label+'</option>').join('')}</select><div class="field-note" style="margin-top:8px;">فقط واحد نمایش تغییر می‌کند، موجودی ثابت می‌ماند.</div>`;
     document.getElementById('adj-mode-content').innerHTML = body;
+    if(mode==='delta') this.setAdjustSign(this._adjustSign||1);
     ['adj-mode-delta','adj-mode-unit'].forEach(id=>{
       const btn=document.getElementById(id);
       if(btn) btn.style.opacity = (id==='adj-mode-'+(mode))?'1':'0.5';
     });
   },
+  /* کیبورد موبایل برای عدد اعشاری علامت منفی ندارد؛ پس علامت با دو دکمهٔ جدا انتخاب می‌شود */
+  setAdjustSign(sign){
+    this._adjustSign = sign<0 ? -1 : 1;
+    const plus=document.getElementById('adj-sign-plus'), minus=document.getElementById('adj-sign-minus');
+    if(plus){ plus.style.opacity = this._adjustSign>0 ? '1' : '0.45'; plus.style.fontWeight = this._adjustSign>0 ? '700' : '400'; }
+    if(minus){ minus.style.opacity = this._adjustSign<0 ? '1' : '0.45'; minus.style.fontWeight = this._adjustSign<0 ? '700' : '400'; }
+  },
   submitAdjustStock(id){
     const mode=this._adjustMode;
     const p=this._adjustProduct, ladder=this._adjustLadder;
     if(mode==='delta'){
-      const deltaStr=document.getElementById('adj-delta').value.trim();
-      if(!deltaStr||isNaN(deltaStr)) throw new Error('عدد نامعتبر است.');
+      // ارقام فارسی/عربی و ممیز فارسی را به لاتین برمی‌گردانیم؛ علامت از دکمهٔ «اضافه/کم» می‌آید (تایپ + یا - هم هنوز کار می‌کند)
+      const rawStr=document.getElementById('adj-delta').value.trim()
+        .replace(/[۰-۹]/g,d=>String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)))
+        .replace(/[٠-٩]/g,d=>String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+        .replace(/[٫،,]/g,'.').replace(/[−–—]/g,'-');
+      if(!rawStr||isNaN(rawStr)) throw new Error('عدد نامعتبر است.');
+      const typedNeg = rawStr.startsWith('-');
+      const absVal = Math.abs(parseFloat(rawStr));
+      const sign = typedNeg ? -1 : (this._adjustSign||1);
+      const deltaStr = String(sign*absVal);
       const unitName=document.getElementById('adj-unit').value;
       const u=this.unitByName(p,unitName);
       const delta=round2(parseFloat(deltaStr)*u.factor);
@@ -3973,7 +4004,7 @@ const App = {
     return `
     <button class="back-btn" onclick="App.navigate('more')">${ic('chevron-right',16)}بازگشت</button>
     <h2 class="section-title" style="margin-top:0;">${ic('alert-triangle',17)}کالاهای کم‌موجود/تمام‌شده</h2>
-    <div class="field-note" style="margin-bottom:10px;">حد هشدار فعلی: ${threshold} واحد یا کمتر ${this.isOwner()?'— از تنظیمات قابل تغییر است.':''}</div>
+    <div class="field-note" style="margin-bottom:10px;">حد هشدار فعلی: ${threshold} واحد یا کمتر ${this.isAdmin()?'— از تنظیمات قابل تغییر است.':''}</div>
     <div class="card">${rows}</div>
     ${list.length?`<button class="btn btn-primary" onclick="App.navigate('purchase')">${ic('shopping-cart',17)}برو به ثبت خرید و همه را یک‌جا بخر</button>`:''}
     `;
@@ -4333,7 +4364,7 @@ const App = {
     XLSX.writeFile(wb, 'پشتیبان-اکسل-'+todayISO()+'.xlsx');
   },
   async importBackup(input){
-    if(!this.isOwner()){ this.toast('این کار فقط برای مالک/مدیر مجاز است.'); input.value=''; return; }
+    if(!this.isAdmin()){ this.toast('این کار فقط برای مالک/مدیر مجاز است.'); input.value=''; return; }
     const file=input.files[0];
     if(!file) return;
     const reader=new FileReader();
@@ -4399,7 +4430,7 @@ const App = {
   },
   /* دو تأیید متوالی (مثل قبل) ولی با مودال داخلی، نه confirm() مرورگر */
   wipeAll(){
-    if(!this.isOwner()){ this.toast('این کار فقط برای مالک/مدیر مجاز است.'); return; }
+    if(!this.isAdmin()){ this.toast('این کار فقط برای مالک/مدیر مجاز است.'); return; }
     this.openConfirmModal({
       title:'پاک کردن همهٔ اطلاعات',
       msg:'تمام اطلاعات (فروش، خرید، مصارف، محصولات) برای همهٔ کاربران و برای همیشه پاک می‌شود. مطمئن هستید؟',
@@ -4413,7 +4444,7 @@ const App = {
     });
   },
   async runReconcile(kind){
-    if(!this.isOwner()){ this.toast('این ابزار فقط برای مالک است.'); return; }
+    if(!this.isAdmin()){ this.toast('این ابزار فقط برای مالک است.'); return; }
     const s=this.state; let rows=[], title='', extra='';
     try{
       if(kind==='customers'){ title='تطبیق مانده مشتریان'; rows=reconcileCustomers({ customers:s.customers, sales:s.sales, payments:s.payments, openingEntries:s.openingEntries }); }
@@ -4505,7 +4536,7 @@ const App = {
       <div class="field-note">این نام فقط روی همین گوشی ذخیره می‌شود و کنار هر فروش/خرید/مصرفی که از این گوشی ثبت کنید نشان داده می‌شود. حساب ورودی فعلی: <b>${escapeHtml(this.user?this.user.email:'')}</b></div>
       <button class="btn btn-outline" onclick="App.saveDeviceLabelFromInput()">${ic('save',16)}ذخیرهٔ نام دستگاه</button>
     </div>
-    ${this.isOwner()?`<div class="card">
+    ${this.isAdmin()?`<div class="card">
       <b>ابزار تطبیق حساب‌ها (فقط مالک)</b>
       <div class="field-note">مانده‌ها و موجودی را دوباره از تاریخچهٔ معاملات حساب می‌کند و اختلاف را گزارش می‌دهد. هیچ‌چیز بدون تأیید شما اصلاح نمی‌شود.</div>
       <button class="btn btn-outline" onclick="App.runReconcile('customers')">${ic('clipboard',16)}تطبیق مانده مشتریان</button>
@@ -4552,13 +4583,13 @@ const App = {
       <div class="field-note">این برنامه آفلاین هم کار می‌کند: هر تغییری روی گوشی شما فوراً ذخیره می‌شود و به‌محض وصل شدن اینترنت، خودکار با بقیهٔ اعضای تیم در فضای ابری سینک می‌شود (یک دیتابیس مشترک برای همه). دانلود/بازیابی فایل پشتیبان فقط برای نسخهٔ اضافی یا انتقال کامل داده به یک نصب جدید است.</div>
       <button class="btn btn-outline" onclick="App.exportBackup()">${ic('download',16)}دانلود فایل پشتیبان (JSON — برای بازیابی کامل)</button>
       <button class="btn btn-outline" onclick="App.exportBackupExcel()">${ic('sheet',16)}دانلود پشتیبان اکسل (برای مطالعه/حسابدار)</button>
-      ${this.isOwner()?`
+      ${this.isAdmin()?`
       <label style="margin-top:14px;">بازیابی از فایل پشتیبان</label>
       <div class="hint" style="color:var(--red-700);background:var(--red-050);border-color:oklch(89% .04 27);">${ic('alert-triangle',13)}این کار دیتابیس مشترک همهٔ کاربران را جایگزین می‌کند، نه فقط اطلاعات همین گوشی را.</div>
       <input type="file" accept="application/json" onchange="App.importBackup(this)">
       `:`<div class="field-note">بازیابی از فایل پشتیبان فقط برای مالک/مدیر در دسترس است.</div>`}
     </div>
-    ${this.isOwner()?`
+    ${this.isAdmin()?`
     <h2 class="section-title">${ic('alert-triangle',17)}منطقهٔ خطر</h2>
     <div class="card">
       <div class="hint" style="color:var(--red-700);background:var(--red-050);border-color:oklch(89% .04 27);">${ic('alert-triangle',13)}این کار همهٔ اطلاعات را برای همهٔ کاربران پاک می‌کند. قبل از پاک کردن، یک نسخهٔ پشتیبان خودکار دانلود می‌شود.</div>
