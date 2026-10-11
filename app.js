@@ -48,6 +48,15 @@ const setDocRaw = _setDoc;
 function setDoc(...a){ _assertCanWrite(); return _setDoc(...a); }
 function updateDoc(...a){ _assertCanWrite(); return _updateDoc(...a); }
 function deleteDoc(...a){ _assertCanWrite(); return _deleteDoc(...a); }
+
+// navigator.onLine فقط اتصال Wi-Fi/LAN را می‌سنجد، نه دسترسی واقعی به اینترنت.
+// در خطاهای شبکه، اجازه می‌دهیم Firestore یک batch را در IndexedDB صف کند.
+function isConnectivityError(err){
+  const code=String((err&&err.code)||'').toLowerCase();
+  const msg=String((err&&err.message)||'').toLowerCase();
+  return ['unavailable','deadline-exceeded','network-request-failed','webchannel-errored','cancelled'].some(x=>code.includes(x)||msg.includes(x))
+    || /offline|network|internet|timed out|timeout|fetch failed|webchannel/.test(msg);
+}
 /* هر batch که موجودی کالا را عوض کند، در همان batch (اتمی) یک رویداد Stock Ledger هم می‌نویسد.
    نوع حرکت (SALE/PURCHASE/...) را کد عملیات قبل از ساخت batch با App._mv(...) مشخص می‌کند. */
 function writeBatch(d, opts){
@@ -1649,11 +1658,21 @@ const App = {
       if(navigator.onLine){
         try{ await commitOnlineTransaction(); }
         catch(e){
-          // نتیجهٔ تراکنش ممکن است در خطای شبکه نامعلوم باشد؛ هرگز Batch جایگزین اجرا نمی‌کنیم
-          // چون می‌تواند موجودی را دوباره کم کند. فقط اگر مطمئن هستیم دستگاه آفلاین شده، پیام خطا می‌دهیم.
-          this._markWriteResult(false,e);
-          App.toastError('ذخیرهٔ فاکتور فروش انجام نشد یا وضعیت اتصال نامعلوم است؛ دوباره ثبت نکنید تا وضعیت همگام‌سازی مشخص شود. '+(e.message||''));
-          return;
+          // وضعیت آنلاین مرورگر به معنی دسترسی واقعی به Firebase نیست. اگر تراکنش به‌علت شبکه شکست خورد،
+          // batch آفلاین Firestore را به کار می‌بریم تا ثبت محلی صف شود و بعداً همگام گردد.
+          // خطاهای مجوز/اعتبارسنجی هرگز به مسیر آفلاین تبدیل نمی‌شوند.
+          if(isConnectivityError(e)){
+            try{ await commitOfflineBatch(); }
+            catch(queueErr){
+              this._markWriteResult(false,queueErr);
+              App.toastError('ثبت آفلاین فاکتور فروش هم ناکام شد. برنامه را نبندید و اتصال را بررسی کنید. '+(queueErr.message||''));
+              return;
+            }
+          }else{
+            this._markWriteResult(false,e);
+            App.toastError('ذخیرهٔ فاکتور فروش انجام نشد. '+(e.message||''));
+            return;
+          }
         }
       }else{
         await commitOfflineBatch();
@@ -2318,8 +2337,13 @@ const App = {
     };
 
     try{
-      if(navigator.onLine) await commitOnlineTransaction();
-      else await commitOfflineBatch();
+      if(navigator.onLine){
+        try{ await commitOnlineTransaction(); }
+        catch(e){
+          if(!isConnectivityError(e)) throw e;
+          await commitOfflineBatch();
+        }
+      }else await commitOfflineBatch();
       this._markWriteResult(true);
     }catch(e){
       console.error('submitPurchase error',e);
