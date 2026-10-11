@@ -19,7 +19,8 @@ import {
 import {
   normalizeProductUnitsRecord, productUnits as _productUnits, saleUnits as _saleUnits,
   transactionUnits as _transactionUnits, unitByName as _unitByName, unitSellPrice as _unitSellPrice,
-  qtyBreakdown as _qtyBreakdown
+  qtyBreakdown as _qtyBreakdown, isBaseTradable as _isBaseTradable, baseLabel as _baseLabel,
+  buildPackaging as _buildPackaging
 } from "./units.js";
 import {
   buildMovement, isNonCashExpense, cashExpensesTotal, buildPaymentReversal, allocatePayment,
@@ -179,7 +180,9 @@ function fmt2(n){
 }
 /* ---------- واحدهای تو در تو (کارتن ← قوطی/بسته ← عدد داخلی) ----------
    مدل داده (سازگار با نسخهٔ قبلی، هیچ مهاجرتی لازم نیست):
-     unit        = واحد پایهٔ داخلی (همیشه «عدد»؛ فقط برای محاسبات)
+     unit        = واحد پایه. معمولاً «عدد» (داخلی، فقط برای محاسبات)؛ ولی اگر baseTradable=true باشد
+                   خودِ آن (مثلاً «کارتن» یا «قوطی») واحد خرید/فروش است و عدد داخلی وجود ندارد
+     baseTradable= true یعنی محصول عدد داخلی ندارد (تک‌واحدی، یا کارتن←قوطی بدون عدد)
      stock       = موجودی، همیشه به واحد پایه
      avgCost     = قیمت تمام‌شدهٔ یک واحد پایه
      sellPrice   = قیمت فروش یک واحد پایه
@@ -1284,6 +1287,9 @@ const App = {
   saleUnits(p){ return _saleUnits(p); },
   // خرید/فروش معمولی فقط در واحدهای بسته‌بندی‌شده؛ «عدد» واحد داخلی است.
   transactionUnits(p){ return _transactionUnits(p); },
+  // محصولی که «عدد داخلی» ندارد (مثلاً فقط کارتن، یا کارتن+قوطی): خودِ واحد پایه قابل معامله است
+  isBaseTradable(p){ return _isBaseTradable(p); },
+  baseLabel(p){ return _baseLabel(p); },
   canSellFractional(p){ return !!(p && p.allowFractionalSale); },
   unitByName(p, name){ return _unitByName(p, name); },
   unitSellPrice(p, u){ return _unitSellPrice(p, u); },
@@ -1365,17 +1371,24 @@ const App = {
   draftNewProduct(prefix){
     const gs=id=>{ const el=document.getElementById(id); return el?String(el.value||'').trim():''; };
     const gn=id=>{ const el=document.getElementById(id); return el?(parseFloat(el.value)||0):0; };
-    const base='عدد';
-    const midUnit=gs(prefix+'-newmidunit'), midPer=gn(prefix+'-newmidper');
-    const packUnit=gs(prefix+'-newpackunit'), packPer=gn(prefix+'-newpackper');
-    const hasMid=!!(midUnit && midPer>1);
-    const packSize=(packUnit && packPer>0) ? (hasMid ? round2(packPer*midPer) : packPer) : 0;
+    const pk=_buildPackaging({
+      packName:gs(prefix+'-newpackunit'), packPer:gn(prefix+'-newpackper'),
+      midName:gs(prefix+'-newmidunit'),   midPer:gn(prefix+'-newmidper')
+    });
+    const name=gs(prefix+'-newname');
+    if(!pk.ok){
+      // هنوز واحدی کامل تعریف نشده؛ همان رفتار قبلی (بدون واحد معامله)
+      return { name, unit:'عدد', unitQty:1, baseTradable:false, stock:0, avgCost:0, sellPrice:0,
+        midUnit:'', midPer:0, packUnit:'', packPer:0, defaultSaleUnit:'', saleUnits:[], allowFractionalSale:false, _packagingError: pk.error };
+    }
+    const tradeNames=[pk.packUnit, pk.midUnit, pk.baseTradable?pk.unit:''].filter(Boolean);
+    const uniq=[...new Set(tradeNames)];
     return {
-      name: gs(prefix+'-newname'), unit: base, unitQty:1, stock:0, avgCost:0, sellPrice:0,
-      midUnit: hasMid ? midUnit : '', midPer: hasMid ? round4(midPer) : 0,
-      packUnit: packSize>1 ? packUnit : '', packPer: packSize>1 ? round4(packSize) : 0,
-      defaultSaleUnit: packSize>0 ? packUnit : (hasMid ? midUnit : ''),
-      saleUnits: [packSize>0 ? packUnit : '', hasMid ? midUnit : ''].filter(Boolean),
+      name, unit: pk.unit, unitQty:1, baseTradable: pk.baseTradable, stock:0, avgCost:0, sellPrice:0,
+      midUnit: pk.midUnit, midPer: pk.midPer,
+      packUnit: pk.packUnit, packPer: pk.packPer,
+      defaultSaleUnit: uniq[0]||'',
+      saleUnits: uniq,
       allowFractionalSale: false
     };
   },
@@ -1415,7 +1428,7 @@ const App = {
   // راهنمای زیر فیلدها: معادل واحد پایه، موجودی به تفکیک واحدها، و قیمت خردشدهٔ واحدهای کوچک‌تر
   updateUnitHint(prefix){
     const p=this.formProduct(prefix), u=this.formUnit(prefix);
-    const base = 'عدد';
+    const base = p ? (p.unit||'عدد') : 'عدد';
     const noteEl=document.getElementById(prefix+'-unit-note');
     const qtyHint=document.getElementById(prefix+'-qty-hint');
     const priceHint=document.getElementById(prefix+'-price-hint');
@@ -1427,7 +1440,7 @@ const App = {
     if(noteEl) noteEl.textContent = (u&&u.factor>1) ? ('۱ '+u.name+' = '+fmtQty(u.factor)+' '+base) : '';
     if(qtyHint){
       const bits=[];
-      if(u&&u.factor>1&&qty>0) bits.push('= '+fmtQty(round2(qty*u.factor))+' عدد داخلی');
+      if(u&&u.factor>1&&qty>0) bits.push('= '+fmtQty(round2(qty*u.factor))+' '+(p?this.baseLabel(p):'عدد داخلی'));
       if(prefix==='sp'&&p&&p.id) bits.push('موجودی: '+this.qtyBreakdown(p,p.stock||0));
       qtyHint.textContent=bits.join(' · ');
     }
@@ -1459,6 +1472,7 @@ const App = {
       // نکته: این محصول هنوز در دیتابیس ذخیره نمی‌شود؛ فقط وقتی فاکتور نهایی ثبت شود ذخیره خواهد شد
       // (تا اگر فاکتور رها شود، محصول یتیم با موجودی صفر در فهرست باقی نماند)
       product = Object.assign({}, d, { id: uid(), _draftOnly:true });
+      if(d._packagingError){ this.toast(d._packagingError); return; }
     } else {
       product = this.state.products.find(p=>p.id===pid);
     }
@@ -1468,7 +1482,7 @@ const App = {
     const qtyIn = parseFloat(document.getElementById('sp-qty').value);
     const priceIn = parseFloat(document.getElementById('sp-price').value);
     if(!qtyIn||qtyIn<=0){ this.toast('تعداد را درست بنویسید'); return; }
-    if(!u || u.key==='base'){ this.toast('واحد پایه فقط برای محاسبه است و در فروش عادی قابل انتخاب نیست.'); return; }
+    if(!u || (u.key==='base' && !this.isBaseTradable(product))){ this.toast('واحد پایه فقط برای محاسبه است و در فروش عادی قابل انتخاب نیست.'); return; }
     if(!this.canSellFractional(product) && Math.abs(qtyIn-Math.round(qtyIn))>1e-9){ this.toast('برای این محصول فروش کسری فعال نیست؛ تعداد را به واحد کامل بنویسید.'); return; }
     if(isNaN(priceIn)||priceIn<0){ this.toast('قیمت فروش را بنویسید'); return; }
     // همه‌چیز به واحد پایه تبدیل و ذخیره می‌شود؛ واحد انتخابی فقط برای نمایش نگه داشته می‌شود
@@ -1541,7 +1555,7 @@ const App = {
           if(draftP){
             totalCost += it.qty*0;
             batch.set(doc(cols.products,draftP.id), {id:draftP.id,name:draftP.name,unit:draftP.unit,stock:-it.qty,avgCost:0,sellPrice:it.unitPrice,
-              midUnit:draftP.midUnit||'',midPer:draftP.midPer||0,packUnit:draftP.packUnit||'',packPer:draftP.packPer||0,
+              baseTradable:!!draftP.baseTradable,midUnit:draftP.midUnit||'',midPer:draftP.midPer||0,packUnit:draftP.packUnit||'',packPer:draftP.packPer||0,
               defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||'',
               saleUnits:draftP.saleUnits||[draftP.packUnit||draftP.midUnit||''].filter(Boolean),allowFractionalSale:!!draftP.allowFractionalSale,
               sellPriceMid:0,sellPricePack:0});
@@ -1609,7 +1623,7 @@ const App = {
             const pref=doc(cols.products,it.productId);
             if(draftP){
               tx.set(pref,{id:draftP.id,name:draftP.name,unit:draftP.unit,stock:-it.qty,avgCost:0,sellPrice:it.unitPrice,
-                midUnit:draftP.midUnit||'',midPer:draftP.midPer||0,packUnit:draftP.packUnit||'',packPer:draftP.packPer||0,
+                baseTradable:!!draftP.baseTradable,midUnit:draftP.midUnit||'',midPer:draftP.midPer||0,packUnit:draftP.packUnit||'',packPer:draftP.packPer||0,
                 defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||'',
                 saleUnits:draftP.saleUnits||[draftP.packUnit||draftP.midUnit||''].filter(Boolean),allowFractionalSale:!!draftP.allowFractionalSale,
                 sellPriceMid:0,sellPricePack:0,...this.recordMeta()});
@@ -2064,8 +2078,9 @@ const App = {
         </div>
         <div class="grid2">
           <div><label>واحد میانی (اختیاری)</label><input id="sp-newmidunit" placeholder="قوطی / بسته" oninput="App.fillUnitSelect('sp',true)"></div>
-          <div><label>هر قوطی/بسته حاوی چند عدد؟</label><input id="sp-newmidper" type="number" inputmode="decimal" placeholder="24" oninput="App.fillUnitSelect('sp',true)"></div>
+          <div><label>هر قوطی/بسته حاوی چند عدد؟ (اختیاری)</label><input id="sp-newmidper" type="number" inputmode="decimal" placeholder="24 — یا خالی" oninput="App.fillUnitSelect('sp',true)"></div>
         </div>
+        <div class="field-note">اگر محصول عدد داخلی ندارد «چند عدد» را خالی بگذارید. فقط یک واحد (مثلاً کارتن)؟ فقط «واحد بزرگ» را بنویسید.</div>
       </div>
       <div class="grid2">
         <div>
@@ -2233,7 +2248,7 @@ const App = {
         const draftP = draftProducts.find(dp=>dp.id===it.productId);
         if(draftP){
           batch.set(doc(cols.products, draftP.id), {id:draftP.id, name:draftP.name, unit:draftP.unit, unitQty:draftP.unitQty||1, stock:it.qty, avgCost:unitCostAFN, sellPrice:round2(unitCostAFN*1.15),
-            midUnit:draftP.midUnit||'', midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', packPer:draftP.packPer||0,
+            baseTradable:!!draftP.baseTradable, midUnit:draftP.midUnit||'', midPer:draftP.midPer||0, packUnit:draftP.packUnit||'', packPer:draftP.packPer||0,
             defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||draftP.unit,
             saleUnits:draftP.saleUnits||[draftP.packUnit||draftP.midUnit||draftP.unit].filter(Boolean), allowFractionalSale:!!draftP.allowFractionalSale,
             sellPriceMid:0, sellPricePack:0, ...this.recordMeta()});
@@ -2278,7 +2293,7 @@ const App = {
           const pref=doc(cols.products,it.productId);
           if(draftP){
             tx.set(pref,{id:draftP.id,name:draftP.name,unit:draftP.unit,unitQty:draftP.unitQty||1,stock:it.qty,avgCost:unitCostAFN,sellPrice:round2(unitCostAFN*1.15),
-              midUnit:draftP.midUnit||'',midPer:draftP.midPer||0,packUnit:draftP.packUnit||'',packPer:draftP.packPer||0,
+              baseTradable:!!draftP.baseTradable,midUnit:draftP.midUnit||'',midPer:draftP.midPer||0,packUnit:draftP.packUnit||'',packPer:draftP.packPer||0,
               defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||draftP.unit,
               saleUnits:draftP.saleUnits||[draftP.packUnit||draftP.midUnit||draftP.unit].filter(Boolean),allowFractionalSale:!!draftP.allowFractionalSale,
               sellPriceMid:0,sellPricePack:0,...this.recordMeta()});
@@ -2357,8 +2372,9 @@ const App = {
         </div>
         <div class="grid2">
           <div><label>نام واحد میانی (اختیاری)</label><input id="pp-newmidunit" placeholder="قوطی / بسته" oninput="App.fillUnitSelect('pp',true)"></div>
-          <div><label>هر قوطی/بسته حاوی چند عدد؟</label><input id="pp-newmidper" type="number" inputmode="decimal" placeholder="8" oninput="App.fillUnitSelect('pp',true)"></div>
+          <div><label>هر قوطی/بسته حاوی چند عدد؟ (اختیاری)</label><input id="pp-newmidper" type="number" inputmode="decimal" placeholder="8 — یا خالی" oninput="App.fillUnitSelect('pp',true)"></div>
         </div>
+        <div class="field-note">اگر محصول عدد داخلی ندارد «چند عدد» را خالی بگذارید. فقط یک واحد (مثلاً کارتن)؟ فقط «واحد بزرگ» را بنویسید.</div>
         <div class="field-note">نمونه: ۱ کارتن = ۶ قوطی و ۱ قوطی = ۲۴ عدد داخلی. عدد فقط برای محاسبه است و در فروش عادی انتخاب نمی‌شود.</div>
       </div>
       <div class="grid2">
@@ -2800,7 +2816,7 @@ const App = {
     if(!p){ sel.innerHTML=''; const pe=document.getElementById('ai-price'); if(pe) pe.value=''; this.onAddItemUnitChange(true); return; }
     const ladder=this.transactionUnits(p);
     const base='عدد';
-    sel.innerHTML=ladder.map(u=>`<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}${u.factor>1?' — '+fmtQty(u.factor)+' عدد داخلی':''}</option>`).join('');
+    sel.innerHTML=ladder.map(u=>`<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}${u.factor>1?' — '+fmtQty(u.factor)+' '+escapeHtml(this.baseLabel(p)):''}</option>`).join('');
     sel.value = this._aiMode==='purchase'
       ? ladder[0].name
       : ((p.defaultSaleUnit && ladder.some(u=>u.name===p.defaultSaleUnit)) ? p.defaultSaleUnit : ladder[0].name);
@@ -2816,11 +2832,11 @@ const App = {
     const lbl=document.getElementById('ai-price-label');
     if(lbl && u) lbl.textContent=(this._aiMode==='purchase'?'قیمت خرید هر ':'قیمت فروش هر ')+u.name+(this._aiCur?(' ('+this._aiCur+')'):'');
     const noteEl=document.getElementById('ai-unit-note');
-    if(noteEl) noteEl.textContent = (p && u && u.factor>1) ? ('۱ '+u.name+' = '+fmtQty(u.factor)+' عدد داخلی') : '';
+    if(noteEl) noteEl.textContent = (p && u && u.factor>1) ? ('۱ '+u.name+' = '+fmtQty(u.factor)+' '+this.baseLabel(p)) : '';
     const qtyEl=document.getElementById('ai-qty');
     const qty=qtyEl?(parseFloat(qtyEl.value)||0):0;
     const qh=document.getElementById('ai-qty-hint');
-    if(qh) qh.textContent = (p && u && u.factor>1 && qty>0) ? ('= '+fmtQty(round2(qty*u.factor))+' عدد داخلی') : (p?('موجودی: '+this.qtyBreakdown(p,p.stock||0)):'');
+    if(qh) qh.textContent = (p && u && u.factor>1 && qty>0) ? ('= '+fmtQty(round2(qty*u.factor))+' '+this.baseLabel(p)) : (p?('موجودی: '+this.qtyBreakdown(p,p.stock||0)):'');
     const price=priceEl?parseFloat(priceEl.value):NaN;
     const ph=document.getElementById('ai-price-hint');
     if(ph){
@@ -2839,7 +2855,7 @@ const App = {
     const qtyIn=parseFloat(document.getElementById('ai-qty').value);
     const priceIn=parseFloat(document.getElementById('ai-price').value);
     if(!qtyIn||qtyIn<=0) throw new Error('تعداد نامعتبر است.');
-    if(!u || u.key==='base') throw new Error('واحد داخلی «عدد» فقط برای محاسبه است و در خرید/فروش عادی قابل انتخاب نیست.');
+    if(!u || (u.key==='base' && !this.isBaseTradable(product))) throw new Error('واحد داخلی «عدد» فقط برای محاسبه است و در خرید/فروش عادی قابل انتخاب نیست.');
     if(this._aiMode==='sale' && !this.canSellFractional(product) && Math.abs(qtyIn-Math.round(qtyIn))>1e-9) throw new Error('برای این محصول فروش کسری فعال نیست.');
     if(isNaN(priceIn)||priceIn<0) throw new Error('قیمت نامعتبر است.');
     const qty=round2(qtyIn*u.factor);
@@ -3674,25 +3690,53 @@ const App = {
     const gs=id=>{ const el=document.getElementById(id); return el?String(el.value||'').trim():''; };
     const gn=id=>{ const el=document.getElementById(id); const v=el?parseFloat(el.value):NaN; return isNaN(v)?0:v; };
     const name=gs('np-name');
-    const unit='عدد';
     const stock=gn('np-stock');
     const cost=gn('np-cost');
-    const midUnit=gs('np-midunit'), midPer=gn('np-midper');
-    const packUnit=gs('np-packunit'), packPer=gn('np-packper');
-    const hasMid=!!(midUnit && midPer>1);
-    const packSize=(packUnit && packPer>0) ? (hasMid?round2(packPer*midPer):packPer) : 0;
     if(!name){ this.toast('نام محصول را بنویسید'); return; }
-    if(!hasMid && !(packUnit && packPer>1)){ this.toast('حداقل یک واحد میانی یا بزرگ با ظرفیت بیشتر از ۱ تعریف کنید.'); return; }
+    const pk=_buildPackaging({
+      packName:gs('np-packunit'), packPer:gn('np-packper'),
+      midName:gs('np-midunit'),   midPer:gn('np-midper')
+    });
+    if(!pk.ok){ this.toast(pk.error); return; }
+    if(pk.packUnit && pk.packUnit===pk.midUnit){ this.toast('نام واحدها باید با هم متفاوت باشد.'); return; }
+    const tradeNames=[...new Set([pk.packUnit, pk.midUnit, pk.baseTradable?pk.unit:''].filter(Boolean))];
     const pid=uid();
-    const defaultSaleUnit=packSize>0 ? packUnit : midUnit;
     App._mv('OPENING','موجودی اول دوره / ثبت محصول جدید');
     const _pb=writeBatch(db);
-    _pb.set(doc(cols.products, pid), {id:pid, name, unit, unitQty:1, stock, avgCost:cost, sellPrice:0,
-      midUnit:hasMid ? midUnit : '', midPer:hasMid ? round4(midPer) : 0,
-      packUnit:packSize>1 ? packUnit : '', packPer:packSize>1 ? round4(packSize) : 0,
-      sellPriceMid:0, sellPricePack:0, defaultSaleUnit, saleUnits:[packSize>0?packUnit:'',hasMid?midUnit:''].filter(Boolean), allowFractionalSale:false,
+    _pb.set(doc(cols.products, pid), {id:pid, name, unit:pk.unit, unitQty:1, baseTradable:pk.baseTradable, stock, avgCost:cost, sellPrice:0,
+      midUnit:pk.midUnit, midPer:pk.midPer,
+      packUnit:pk.packUnit, packPer:pk.packPer,
+      sellPriceMid:0, sellPricePack:0, defaultSaleUnit:tradeNames[0]||'', saleUnits:tradeNames, allowFractionalSale:false,
       ...this.recordMeta()});
     _pb.commit().then(()=>this.toast('محصول اضافه شد')).catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
+  },
+  /* پیش‌نمایش زندهٔ فرم «افزودن محصول جدید»: نشان می‌دهد برنامه چه ساختاری می‌سازد
+     و موجودی/قیمت را به کدام واحد باید نوشت */
+  previewNewProduct(){
+    const gs=id=>{ const el=document.getElementById(id); return el?String(el.value||'').trim():''; };
+    const gn=id=>{ const el=document.getElementById(id); const v=el?parseFloat(el.value):NaN; return isNaN(v)?0:v; };
+    const pk=_buildPackaging({ packName:gs('np-packunit'), packPer:gn('np-packper'), midName:gs('np-midunit'), midPer:gn('np-midper') });
+    const setTxt=(id,t)=>{ const el=document.getElementById(id); if(el) el.textContent=t; };
+    let unitName='عدد داخلی', summary='';
+    if(pk.ok){
+      if(pk.kind==='single'){
+        unitName=pk.unit;
+        summary='✔ محصول تک‌واحدی: فقط با «'+pk.unit+'» خرید و فروش می‌شود (عدد داخلی ندارد).';
+      } else if(pk.kind==='base'){
+        unitName=pk.unit;
+        summary='✔ بدون عدد داخلی: خرید و فروش با «'+pk.unit+'»'+(pk.packUnit?(' و «'+pk.packUnit+'» (۱ '+pk.packUnit+' = '+fmtQty(pk.packSize)+' '+pk.unit+')'):'')+'.';
+      } else {
+        const bits=[];
+        if(pk.packUnit) bits.push('۱ '+pk.packUnit+' = '+fmtQty(pk.packSize)+' عدد داخلی');
+        if(pk.midUnit) bits.push('۱ '+pk.midUnit+' = '+fmtQty(pk.midPer)+' عدد داخلی');
+        summary='✔ '+bits.join(' · ');
+      }
+    } else {
+      summary = gs('np-packunit')||gs('np-midunit') ? ('⚠ '+pk.error) : '';
+    }
+    setTxt('np-summary', summary);
+    setTxt('np-stock-label','موجودی آغازین (به '+unitName+')');
+    setTxt('np-cost-label','قیمت تمام‌شده هر '+unitName+' (اختیاری)');
   },
   editProduct(id){
     if(!this.isOwner()){ this.toast('فقط مدیر می‌تواند اطلاعات محصول را ویرایش کند.'); return; }
@@ -3708,7 +3752,7 @@ const App = {
       submitLabel:'ذخیره',
       onSubmit:(v)=>{
         const name=(v.name||'').trim()||p.name;
-        return updateDoc(doc(cols.products, id), { name, unit:'عدد', unitQty:1, ...this.editMeta() }).then(()=>this.toast('ذخیره شد'));
+        return updateDoc(doc(cols.products, id), { name, ...this.editMeta() }).then(()=>this.toast('ذخیره شد'));
       }
     });
   },
@@ -3723,19 +3767,31 @@ const App = {
     const ladder=this.productUnits(p);
     const packU=ladder.find(u=>u.key==='pack');
     const midU=ladder.find(u=>u.key==='mid');
-    const packPer = packU ? round2(packU.factor/(midU?midU.factor:1)) : '';
+    const baseTr=this.isBaseTradable(p);
+    const baseU=ladder.find(u=>u.key==='base');
+    let packNameV='', packPer='', midNameV='', midPerV='';
+    if(baseTr){
+      // بدون عدد داخلی: خودِ واحد پایه قابل معامله است
+      if(packU){ packNameV=packU.name; packPer=packU.factor; midNameV=baseU.name; }
+      else { packNameV=baseU.name; }
+    } else {
+      packNameV=packU?packU.name:''; packPer=packU?round2(packU.factor/(midU?midU.factor:1)):'';
+      midNameV=midU?midU.name:''; midPerV=midU?midU.factor:'';
+    }
     const body = `
-    <div class="field-note">واحد داخلی <b>عدد</b> است و فقط برای محاسبهٔ موجودی استفاده می‌شود؛ در خرید و فروش عادی قابل انتخاب نیست.</div>
+    <div class="field-note">${baseTr
+      ? 'این محصول <b>عدد داخلی ندارد</b>؛ موجودی و قیمت‌ها به همان واحد پایهٔ «'+escapeHtml(baseU.name)+'» نگه‌داری می‌شود. (نوع بسته‌بندی بعد از ثبت محصول قابل تغییر نیست.)'
+      : 'واحد داخلی <b>عدد</b> است و فقط برای محاسبهٔ موجودی استفاده می‌شود؛ در خرید و فروش عادی قابل انتخاب نیست.'}</div>
     <b style="font-size:13.5px;">بسته‌بندی و واحدهای معامله</b>
     <div class="grid2">
-      <div><label>نام واحد بزرگ (اختیاری)</label><input id="pu-pack" value="${escapeHtml(packU?packU.name:'')}" placeholder="کارتن" oninput="App.previewProductUnits()"></div>
-      <div><label id="pu-packper-label">هر واحد بزرگ حاوی چند ${midU?escapeHtml(midU.name):'عدد'}؟</label><input id="pu-packper" type="number" inputmode="decimal" step="1" value="${packPer}" placeholder="6" oninput="App.previewProductUnits()"></div>
+      <div><label>نام واحد بزرگ (اختیاری)</label><input id="pu-pack" value="${escapeHtml(packNameV)}" placeholder="کارتن" oninput="App.previewProductUnits()"></div>
+      <div><label id="pu-packper-label">هر واحد بزرگ حاوی چند ${midNameV?escapeHtml(midNameV):(baseTr?escapeHtml(baseU.name):'عدد')}؟</label><input id="pu-packper" type="number" inputmode="decimal" step="1" value="${packPer}" placeholder="6" oninput="App.previewProductUnits()"></div>
     </div>
     <div class="grid2">
-      <div><label>نام واحد میانی (اختیاری)</label><input id="pu-mid" value="${escapeHtml(midU?midU.name:'')}" placeholder="قوطی / بسته" oninput="App.previewProductUnits()"></div>
-      <div><label id="pu-midper-label">هر واحد میانی حاوی چند عدد؟</label><input id="pu-midper" type="number" inputmode="decimal" step="1" value="${midU?midU.factor:''}" placeholder="24" oninput="App.previewProductUnits()"></div>
+      <div><label>نام واحد میانی (اختیاری)</label><input id="pu-mid" value="${escapeHtml(midNameV)}" placeholder="قوطی / بسته" oninput="App.previewProductUnits()"></div>
+      <div><label id="pu-midper-label">هر واحد میانی حاوی چند عدد؟</label><input id="pu-midper" type="number" inputmode="decimal" step="1" value="${midPerV}" placeholder="24 — یا خالی" oninput="App.previewProductUnits()"></div>
     </div>
-    <div class="field-note">مثال: ۱ کارتن = ۶ قوطی و ۱ قوطی = ۲۴ عدد. عدد در اینجا فقط واحد داخلی است.</div>
+    <div class="field-note">مثال: ۱ کارتن = ۶ قوطی و ۱ قوطی = ۲۴ عدد. اگر عدد داخلی ندارد، «حاوی چند عدد» خالی بماند.</div>
     <div style="margin-top:12px;"><label>واحدهای مجاز خرید و فروش</label><div id="pu-sale-units" class="grid2"></div></div>
     <label style="display:flex;align-items:center;gap:8px;margin-top:10px;"><input id="pu-fractional" type="checkbox" ${p.allowFractionalSale?'checked':''}> فروش کسری این محصول مجاز باشد (مثلاً ۰٫۵ بسته)</label>
     <hr class="divider">
@@ -3756,6 +3812,10 @@ const App = {
       <label id="pu-lbl-sell-mid">قیمت فروش هر قوطی</label>
       <input id="pu-sell-mid" type="number" inputmode="decimal" step="0.01" value="${Number(p.sellPriceMid)>0?round2(p.sellPriceMid):''}" oninput="App.previewProductUnits()">
       <div class="field-note" id="pu-auto-mid"></div>
+    </div>
+    <div id="pu-row-base" style="display:none;">
+      <label id="pu-lbl-sell-base">قیمت فروش هر واحد</label>
+      <input id="pu-sell-base" type="number" inputmode="decimal" step="0.01" value="${baseTr && Number(p.sellPrice)>0?round2(p.sellPrice):''}" oninput="App.previewProductUnits()">
     </div>
     <label>واحد پیش‌فرض در فرم فروش</label>
     <select id="pu-default"></select>
@@ -3783,20 +3843,23 @@ const App = {
   _puRead(){
     const gs=id=>{ const el=document.getElementById(id); return el?String(el.value||'').trim():''; };
     const gn=id=>{ const el=document.getElementById(id); const v=el?parseFloat(el.value):NaN; return isNaN(v)?0:v; };
-    const base='عدد';
     const packName=gs('pu-pack'), packPer=gn('pu-packper');
     const midName=gs('pu-mid'), midPer=gn('pu-midper');
-    const hasMid=!!(midName && midPer>1);
-    const packSize=(packName && packPer>0) ? (hasMid?round2(packPer*midPer):packPer) : 0;
-    const hasPack=!!(packName && packSize>1);
+    const pk=_buildPackaging({packName, packPer, midName, midPer});
+    const base = pk.ok ? pk.unit : 'عدد';
+    const baseTradable = !!(pk.ok && pk.baseTradable);
+    const hasMid = !!(pk.ok && pk.midUnit);
+    const hasPack = !!(pk.ok && pk.packUnit);
+    const packSize = pk.ok ? (pk.packSize||0) : 0;
     const ladder=[];
-    if(hasPack) ladder.push({key:'pack', name:packName, factor:packSize});
-    if(hasMid)  ladder.push({key:'mid',  name:midName,  factor:midPer});
-    ladder.push({key:'base', name:base, factor:1});
-    const txUnits=ladder.filter(u=>u.key!=='base');
-    return {base, packName, packPer, midName, midPer, hasMid, hasPack, packSize, ladder, txUnits,
+    if(hasPack) ladder.push({key:'pack', name:pk.packUnit, factor:packSize});
+    if(hasMid)  ladder.push({key:'mid',  name:pk.midUnit,  factor:pk.midPer});
+    if(pk.ok)   ladder.push({key:'base', name:base, factor:1});
+    const txUnits=ladder.filter(u=>u.key!=='base' || baseTradable);
+    return {pk, base, baseTradable, packName:hasPack?pk.packUnit:packName, packPer, midName:hasMid?pk.midUnit:midName, midPer:hasMid?pk.midPer:0,
+      hasMid, hasPack, packSize, ladder, txUnits,
       cost:gn('pu-cost'), costUnit:gs('pu-costunit'),
-      sellPack:gn('pu-sell-pack'), sellMid:gn('pu-sell-mid'), sellBase:0,
+      sellPack:gn('pu-sell-pack'), sellMid:gn('pu-sell-mid'), sellBase:gn('pu-sell-base'),
       defaultUnit:gs('pu-default'),
       saleUnits:Array.from(document.querySelectorAll('#pu-sale-units input[data-unit]')).filter(el=>el.checked).map(el=>el.dataset.unit),
       allowFractionalSale:!!document.getElementById('pu-fractional')?.checked};
@@ -3805,19 +3868,21 @@ const App = {
     const r=this._puRead();
     const setTxt=(id,t)=>{ const el=document.getElementById(id); if(el) el.textContent=t; };
     const show=(id,on)=>{ const el=document.getElementById(id); if(el) el.style.display = on?'block':'none'; };
+    const bl = r.baseTradable ? r.base : 'عدد داخلی';
     setTxt('pu-packper-label','هر '+(r.packName||'کارتن')+' حاوی چند '+(r.hasMid?r.midName:r.base)+'؟');
-    setTxt('pu-midper-label','هر '+(r.midName||'قوطی/بسته')+' حاوی چند عدد؟');
+    setTxt('pu-midper-label','هر '+(r.midName||'قوطی/بسته')+' حاوی چند عدد؟ (خالی = بدون عدد داخلی)');
     setTxt('pu-lbl-sell-pack','قیمت فروش هر '+(r.packName||'کارتن'));
     setTxt('pu-lbl-sell-mid','قیمت فروش هر '+(r.midName||'قوطی'));
     setTxt('pu-lbl-sell-base','قیمت فروش هر '+r.base);
     show('pu-row-pack', r.hasPack);
     show('pu-row-mid', r.hasMid);
+    show('pu-row-base', r.baseTradable);
     // پر کردن سلکت‌ها با حفظ انتخاب قبلی
     ['pu-costunit','pu-default'].forEach(selId=>{
       const sel=document.getElementById(selId); if(!sel) return;
       const want = sel.dataset.want || sel.value;
       const options=selId==='pu-costunit'?r.txUnits:r.txUnits;
-      sel.innerHTML = options.map(u=>`<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}${u.factor>1?' (= '+fmtQty(u.factor)+' عدد داخلی)':''}</option>`).join('');
+      sel.innerHTML = options.map(u=>`<option value="${escapeHtml(u.name)}">${escapeHtml(u.name)}${u.factor>1?' (= '+fmtQty(u.factor)+' '+escapeHtml(bl)+')':''}</option>`).join('');
       sel.value = options.some(u=>u.name===want) ? want : (options[0]?options[0].name:'');
       delete sel.dataset.want;
     });
@@ -3825,7 +3890,7 @@ const App = {
     if(su){
       const current=this.state.products.find(x=>x.id===this._puId);
       const selected=new Set(Array.isArray(current&&current.saleUnits)?current.saleUnits:r.txUnits.map(u=>u.name));
-      su.innerHTML=r.txUnits.map(u=>`<label style="display:flex;align-items:center;gap:7px;"><input type="checkbox" data-unit="${escapeHtml(u.name)}" ${selected.has(u.name)?'checked':''}> ${escapeHtml(u.name)} <span class="sub">(${fmtQty(u.factor)} عدد داخلی)</span></label>`).join('') || '<span class="sub">ابتدا حداقل یک واحد میانی یا بزرگ تعریف کنید.</span>';
+      su.innerHTML=r.txUnits.map(u=>`<label style="display:flex;align-items:center;gap:7px;"><input type="checkbox" data-unit="${escapeHtml(u.name)}" ${selected.has(u.name)?'checked':''}> ${escapeHtml(u.name)} <span class="sub">(${fmtQty(u.factor)} ${escapeHtml(bl)})</span></label>`).join('') || '<span class="sub">ابتدا حداقل یک واحد تعریف کنید.</span>';
     }
     const r2=this._puRead();
     const costUnit = r2.txUnits.find(u=>u.name===r2.costUnit) || r2.txUnits[0];
@@ -3833,7 +3898,9 @@ const App = {
     const currentProduct=this.state.products.find(x=>x.id===this._puId);
     if(costEl && currentProduct && costUnit && costEl.dataset.touched!=='1') costEl.value=this.unitCost(currentProduct,costUnit)>0?this.unitCost(currentProduct,costUnit):'';
     const costPerBase = costUnit && r2.cost>0 ? r2.cost/costUnit.factor : 0;
-    const inferredBasePrice = r2.sellMid>0 ? r2.sellMid/r2.midPer : (r2.sellPack>0 ? r2.sellPack/r2.packSize : Number(currentProduct?.sellPrice)||0);
+    const inferredBasePrice = r2.baseTradable
+      ? (r2.sellBase>0 ? r2.sellBase : (r2.sellPack>0 && r2.packSize>0 ? r2.sellPack/r2.packSize : Number(currentProduct?.sellPrice)||0))
+      : (r2.hasMid && r2.sellMid>0 ? r2.sellMid/r2.midPer : (r2.hasPack && r2.sellPack>0 ? r2.sellPack/r2.packSize : Number(currentProduct?.sellPrice)||0));
     const priceOf=u=>{
       if(u.key==='pack' && r2.sellPack>0) return r2.sellPack;
       if(u.key==='mid'  && r2.sellMid>0)  return r2.sellMid;
@@ -3849,26 +3916,37 @@ const App = {
         return `<tr><td>${escapeHtml(u.name)}</td><td class="num">${fmtQty(u.factor)} ${escapeHtml(r2.base)}</td><td class="num">${fmt2(c)}</td><td class="num">${fmt2(s)}</td><td class="num" style="color:${profit>=0?'var(--green)':'var(--red)'}">${fmt2(profit)}</td></tr>`;
       }).join('');
       pv.innerHTML = `<b style="font-size:13.5px;">پیش‌نمایش</b>
-      <table class="inv-table"><thead><tr><th>واحد</th><th>ظرفیت</th><th>تمام‌شده</th><th>فروش</th><th>سود</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="field-note">حداقل یک واحد میانی یا بزرگ تعریف کنید.</td></tr>'}</tbody></table>
-      <div class="field-note">${escapeHtml(this.unitLadderLabel({unit:r2.base, unitQty:1, packUnit:r2.hasPack?r2.packName:'', packPer:r2.hasPack?r2.packSize:0})||'این محصول فقط یک واحد دارد.')}</div>`;
+      <table class="inv-table"><thead><tr><th>واحد</th><th>ظرفیت</th><th>تمام‌شده</th><th>فروش</th><th>سود</th></tr></thead><tbody>${rows || `<tr><td colspan="5" class="field-note">${escapeHtml(r2.pk.ok?'حداقل یک واحد تعریف کنید.':r2.pk.error)}</td></tr>`}</tbody></table>
+      <div class="field-note">${escapeHtml(this.unitLadderLabel({unit:r2.base, unitQty:1, midUnit:r2.hasMid?r2.midName:'', midPer:r2.hasMid?r2.midPer:0, packUnit:r2.hasPack?r2.packName:'', packPer:r2.hasPack?r2.packSize:0})||'این محصول فقط یک واحد دارد.')}</div>`;
     }
   },
   saveProductUnits(id){
     const p=this.state.products.find(x=>x.id===id); if(!p) throw new Error('محصول یافت نشد.');
     const r=this._puRead();
-    if(!r.txUnits.length) throw new Error('حداقل یک واحد بسته‌بندی‌شده (کارتن، قوطی یا بسته) تعریف کنید.');
-    if(r.packName && !(r.packPer>0)) throw new Error('برای «'+r.packName+'» بنویسید هر کدام چند '+(r.hasMid?r.midName:r.base)+' دارد.');
-    if(r.midName && !(r.midPer>1)) throw new Error('برای «'+r.midName+'» بنویسید هر کدام چند '+r.base+' دارد (بیشتر از ۱).');
+    if(!r.pk.ok) throw new Error(r.pk.error);
+    if(!r.txUnits.length) throw new Error('حداقل یک واحد (کارتن، قوطی یا بسته) تعریف کنید.');
     if(r.hasPack && r.hasMid && r.packSize<=r.midPer) throw new Error('کارتن باید از قوطی/بسته بزرگ‌تر باشد.');
+    // موجودی همیشه به واحد پایه نگه‌داری می‌شود؛ پس معنی «واحد پایه» (داشتن یا نداشتن عدد داخلی) بعد از ثبت عوض نمی‌شود
+    const wasTradable=this.isBaseTradable(p);
+    if(r.baseTradable!==wasTradable) throw new Error(wasTradable
+      ? 'این محصول عدد داخلی ندارد و نوع بسته‌بندی‌اش قابل تغییر نیست. «چند عدد» را خالی بگذارید.'
+      : 'این محصول با «عدد داخلی» ثبت شده و نوع بسته‌بندی‌اش قابل تغییر نیست. برای محصول بدون عدد داخلی، محصول جدید بسازید.');
+    if(wasTradable){
+      const curKind = (p.packUnit && Number(p.packPer)>1) ? 'base' : 'single';
+      if(r.pk.kind!==curKind && r.pk.unit!==p.unit) throw new Error('واحد پایهٔ این محصول «'+p.unit+'» است؛ نام آن را عوض نکنید وقتی واحد بزرگ اضافه/حذف می‌کنید.');
+    }
     const names=r.ladder.map(u=>u.name);
     if(new Set(names).size!==names.length) throw new Error('نام واحدها باید با هم متفاوت باشد.');
     if(!r.saleUnits.length) throw new Error('حداقل یک واحد فروش را انتخاب کنید.');
     const costUnit=r.txUnits.find(u=>u.name===r.costUnit)||r.txUnits[0];
     const avgCost = r.cost>0 ? round4(r.cost/costUnit.factor) : 0;
-    const basePrice = r.sellMid>0 ? round2(r.sellMid/r.midPer) : (r.sellPack>0 ? round2(r.sellPack/r.packSize) : round2(p.sellPrice||0));
+    const basePrice = r.baseTradable
+      ? (r.sellBase>0 ? round2(r.sellBase) : (r.sellPack>0 && r.packSize>0 ? round2(r.sellPack/r.packSize) : round2(p.sellPrice||0)))
+      : (r.hasMid && r.sellMid>0 ? round2(r.sellMid/r.midPer) : (r.hasPack && r.sellPack>0 ? round2(r.sellPack/r.packSize) : round2(p.sellPrice||0)));
     const fields={
-      unit:'عدد',
+      unit:r.base,
       unitQty:1,
+      baseTradable:r.baseTradable,
       midUnit:r.hasMid ? r.midName : '',
       midPer:r.hasMid ? round4(r.midPer) : 0,
       packUnit:r.hasPack ? r.packName : '',
@@ -3892,7 +3970,7 @@ const App = {
     if(!this.isOwner()){ this.toast('فقط مدیر می‌تواند موجودی را دستی اصلاح کند.'); return; }
     const p=this.state.products.find(x=>x.id===id); if(!p) return;
     const ladder=this.transactionUnits(p);
-    const unitOptions=ladder.map(u=>({value:u.name, label:u.name+(u.factor>1?(' (= '+fmtQty(u.factor)+' عدد داخلی'):'')}));
+    const unitOptions=ladder.map(u=>({value:u.name, label:u.name+(u.factor>1?(' (= '+fmtQty(u.factor)+' '+this.baseLabel(p)+')'):'')}));
     this._adjustId=id; this._adjustProduct=p; this._adjustLadder=ladder;
     const body = `
     <label>انتخاب کار</label>
@@ -3927,7 +4005,7 @@ const App = {
         <label style="margin-top:10px;">دلیل</label>
         <select id="adj-reason"><option value="count">اصلاح بعد از شمارش فیزیکی</option><option value="damaged">خراب/ضایع شده (زیان، بدون کم شدن پول نقد)</option><option value="personal">مصرف شخصی</option><option value="other">سایر</option></select>
         <input id="adj-note" type="text" placeholder="توضیح (اختیاری)" style="margin-top:6px;">
-        <div class="field-note">برای کاستی/مصرف شخصی، واحد فروش را انتخاب کنید، دکمهٔ <b>«کم شود»</b> را بزنید و مقدار را بنویسید؛ مثلاً <b>2 بسته</b>. عدد داخلی در اینجا انتخاب نمی‌شود.</div>`
+        <div class="field-note">برای کاستی/مصرف شخصی، واحد فروش را انتخاب کنید، دکمهٔ <b>«کم شود»</b> را بزنید و مقدار را بنویسید؛ مثلاً <b>2 بسته</b>. ${this.isBaseTradable(p)?'':'عدد داخلی در اینجا انتخاب نمی‌شود.'}</div>`
       : `<label>تغییر واحد پیش‌فرض نمایش موجودی به</label><select id="adj-newunit">${unitOpts.map(o=>'<option value="'+o.value+'">'+o.label+'</option>').join('')}</select><div class="field-note" style="margin-top:8px;">فقط واحد نمایش تغییر می‌کند، موجودی ثابت می‌ماند.</div>`;
     document.getElementById('adj-mode-content').innerHTML = body;
     if(mode==='delta') this.setAdjustSign(this._adjustSign||1);
@@ -4041,18 +4119,22 @@ const App = {
     <div class="card">
       <label>افزودن محصول جدید</label>
       <input id="np-name" placeholder="نام محصول">
-      <div class="field-note">واحد داخلی «عدد» است و برای محاسبه نگه‌داری می‌شود؛ شما فقط واحدهای بسته‌بندی‌شده‌ای را تعریف می‌کنید که واقعاً خرید/فروش می‌کنید.</div>
+      <div class="field-note">واحدهایی را بنویسید که واقعاً خرید/فروش می‌کنید. اگر محصول «عدد داخلی» ندارد، خانهٔ «هر قوطی/بسته چند عدد» را <b>خالی</b> بگذارید.<br>
+      ۱) فقط یک واحد (مثلاً ۱ کارتن ککو یا کارتن گلوکوز ۲۵ کیلویی): فقط «واحد بزرگ» را بنویسید و باقی را خالی بگذارید.<br>
+      ۲) کارتن و قوطی هر دو معامله می‌شود ولی عدد داخلی ندارد: واحد بزرگ = کارتن، «هر واحد بزرگ چند واحد میانی» = تعداد قوطی، نام واحد میانی = قوطی، و «چند عدد» را خالی بگذارید.<br>
+      ۳) کارتن ← قوطی ← عدد داخلی: همهٔ خانه‌ها را پر کنید.</div>
       <div class="grid2">
-        <div><label>واحد بزرگ (اختیاری)</label><input id="np-packunit" placeholder="کارتن"></div>
-        <div><label>هر واحد بزرگ چند واحد میانی/عدد داخلی دارد؟</label><input id="np-packper" type="number" inputmode="decimal" placeholder="6"></div>
+        <div><label>واحد بزرگ (اختیاری)</label><input id="np-packunit" placeholder="کارتن" oninput="App.previewNewProduct()"></div>
+        <div><label>هر واحد بزرگ چند واحد میانی/عدد داخلی دارد؟</label><input id="np-packper" type="number" inputmode="decimal" placeholder="6" oninput="App.previewNewProduct()"></div>
       </div>
       <div class="grid2">
-        <div><label>نام واحد میانی (اختیاری)</label><input id="np-midunit" placeholder="قوطی / بسته"></div>
-        <div><label>هر قوطی/بسته حاوی چند عدد؟</label><input id="np-midper" type="number" inputmode="decimal" placeholder="24"></div>
+        <div><label>نام واحد میانی (اختیاری)</label><input id="np-midunit" placeholder="قوطی / بسته" oninput="App.previewNewProduct()"></div>
+        <div><label>هر قوطی/بسته حاوی چند عدد؟ (اختیاری)</label><input id="np-midper" type="number" inputmode="decimal" placeholder="24 — یا خالی" oninput="App.previewNewProduct()"></div>
       </div>
+      <div class="field-note" id="np-summary" style="font-weight:600;"></div>
       <div class="grid2">
-        <div><label>موجودی آغازین (به عدد داخلی)</label><input id="np-stock" type="number" inputmode="decimal" placeholder="0"></div>
-        <div><label>قیمت تمام‌شده واحد داخلی (اختیاری)</label><input id="np-cost" type="number" inputmode="decimal" placeholder="0"></div>
+        <div><label id="np-stock-label">موجودی آغازین (به عدد داخلی)</label><input id="np-stock" type="number" inputmode="decimal" placeholder="0"></div>
+        <div><label id="np-cost-label">قیمت تمام‌شده واحد داخلی (اختیاری)</label><input id="np-cost" type="number" inputmode="decimal" placeholder="0"></div>
       </div>
       <div class="field-note">قیمت فروش را بعداً از «ویرایش واحدها و قیمت‌ها» برای کارتن، قوطی یا بسته تنظیم کنید.</div>
       <button class="btn btn-primary" onclick="App.submitNewProductForm()">${ic('plus',17)}افزودن محصول</button>

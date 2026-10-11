@@ -4,7 +4,7 @@
   "type": "module",
   "description": "حساب‌داری فروشگاه صانع — PWA (بدون build). این فایل فقط برای اجرای تست‌هاست.",
   "scripts": {
-    "test": "node --test tests/logic.test.mjs",
+    "test": "node --test tests/units.test.mjs",
     "test:rules": "firebase emulators:exec --only firestore \"node --test tests/rules.test.mjs\""
   },
   "devDependencies": {

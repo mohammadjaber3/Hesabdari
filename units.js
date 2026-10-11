@@ -32,6 +32,54 @@ export function normalizeProductUnitsRecord(raw){
   return p;
 }
 
+/* محصولی که «عدد داخلی» ندارد: خودِ واحد پایه (مثلاً «کارتن» یا «قوطی») واحد خرید/فروش است.
+   مثال ۱: ککو — فقط ۱ کارتن (unit='کارتن')
+   مثال ۲: کارتن ← قوطی بدون عدد داخلی (unit='قوطی'، packUnit='کارتن'، packPer=تعداد قوطی در کارتن) */
+export function isBaseTradable(p){ return !!(p && p.baseTradable); }
+
+/* نام واحد پایه برای نمایش: «عدد داخلی» یا (اگر واحد پایه قابل معامله است) نام خودش */
+export function baseLabel(p){
+  if(isBaseTradable(p)) return String((p&&p.unit)||'').trim() || 'عدد';
+  return 'عدد داخلی';
+}
+
+/* از چهار فیلد فرم (نام/مقدار واحد بزرگ و میانی) ساختار بسته‌بندی را می‌سازد.
+   سه حالت:
+   ۱) واحد میانی با «چند عدد» بیشتر از ۱  → کارتن ← قوطی ← عدد داخلی (حالت قبلی، «عدد» پنهان)
+   ۲) واحد میانی بدون «چند عدد»           → خودِ قوطی واحد پایه است (کارتن ← قوطی، بدون عدد داخلی)
+   ۳) فقط یک نام و بدون ظرفیت              → تک‌واحدی (مثلاً فقط «کارتن»)
+   (واحد بزرگ + ظرفیت بدون واحد میانی هم مثل قبل: کارتن ← عدد داخلی) */
+export function buildPackaging({packName='', packPer=0, midName='', midPer=0}={}){
+  packName=String(packName||'').trim(); midName=String(midName||'').trim();
+  packPer=Number(packPer)||0; midPer=Number(midPer)||0;
+  const hasMidInner = !!(midName && midPer>1);
+  if(hasMidInner){
+    const packSize=(packName && packPer>0) ? round2(packPer*midPer) : 0;
+    return {ok:true, kind:'inner', unit:'عدد', baseTradable:false,
+      midUnit:midName, midPer:round4(midPer),
+      packUnit:packSize>1?packName:'', packPer:packSize>1?round4(packSize):0,
+      packSize: packSize>1?packSize:0};
+  }
+  if(midName){
+    // قوطی/بسته = واحد پایه
+    if(packName && !(packPer>1)) return {ok:false, error:'برای «'+packName+'» بنویسید هر کدام چند '+midName+' دارد (بیشتر از ۱).'};
+    if(packName && packName===midName) return {ok:false, error:'نام واحد بزرگ و واحد میانی نباید یکی باشد.'};
+    return {ok:true, kind:'base', unit:midName, baseTradable:true, midUnit:'', midPer:0,
+      packUnit:packName?packName:'', packPer:packName?round4(packPer):0, packSize:packName?packPer:0};
+  }
+  if(packName){
+    if(packPer>1){
+      // کارتن ← عدد داخلی (بدون واحد میانی)
+      return {ok:true, kind:'inner', unit:'عدد', baseTradable:false, midUnit:'', midPer:0,
+        packUnit:packName, packPer:round4(packPer), packSize:packPer};
+    }
+    // تک‌واحدی: فقط «کارتن»
+    return {ok:true, kind:'single', unit:packName, baseTradable:true, midUnit:'', midPer:0,
+      packUnit:'', packPer:0, packSize:0};
+  }
+  return {ok:false, error:'حداقل یک واحد (مثلاً کارتن یا قوطی) بنویسید.'};
+}
+
 export function productUnits(p){
   const rawUnit = (p && p.unit) ? String(p.unit).trim() : 'عدد';
   const legacyMid = !p?.midUnit && Number(p?.unitQty)>1 && rawUnit!=='عدد';
@@ -48,13 +96,13 @@ export function productUnits(p){
 }
 export function saleUnits(p){
   const all=productUnits(p);
-  const packaged=all.filter(u=>u.key!=='base');
+  const packaged=all.filter(u=>u.key!=='base' || isBaseTradable(p));
   const configured=Array.isArray(p&&p.saleUnits) ? p.saleUnits.map(String) : null;
   return packaged.filter(u=>!configured || configured.includes(u.name));
 }
 /* خرید/فروش معمولی فقط در واحدهای بسته‌بندی‌شده؛ «عدد» واحد داخلی است */
 export function transactionUnits(p){
-  return productUnits(p).filter(u=>u.key!=='base');
+  return productUnits(p).filter(u=>u.key!=='base' || isBaseTradable(p));
 }
 export function unitByName(p, name){
   const ladder=productUnits(p);
@@ -73,6 +121,10 @@ export function qtyBreakdown(p, baseQty){
   if(!ladder.length) return (neg?'-':'')+fmtQty(q);
   const parts=[];
   for(const u of ladder){
+    if(u.factor===1){ // واحد پایهٔ قابل معامله (بدون عدد داخلی): باقی‌مانده همان است
+      if(q>0.0005) parts.push(fmtQty(round2(q))+' '+u.name);
+      q=0; continue;
+    }
     const n=Math.floor(q/u.factor+1e-9);
     if(n>0){ parts.push(fmtQty(n)+' '+u.name); q-=n*u.factor; }
   }
