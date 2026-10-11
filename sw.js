@@ -43,7 +43,7 @@ const EXTERNAL_URL_RE = /https:\/\/(?:www\.gstatic\.com|cdnjs\.cloudflare\.com|c
 const CACHEABLE_HOSTS = ['www.gstatic.com', 'cdnjs.cloudflare.com', 'cdn.jsdelivr.net'];
 
 // اگر شبکه بیشتر از این طول بکشد، برای فایل‌های خود برنامه از کش استفاده می‌کنیم (اینترنت ضعیف)
-const NETWORK_TIMEOUT_MS = 4000;
+const NETWORK_TIMEOUT_MS = 1500;
 
 async function discoverExternalUrls() {
   const found = new Set();

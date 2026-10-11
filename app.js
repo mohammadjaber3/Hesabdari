@@ -105,7 +105,22 @@ function writeBatch(d, opts){
         _set(doc(cols.stockLedger, id), m);
       });
     }catch(e){ console.warn('stock ledger build failed', e); }
-    return commit();
+    /* Firestore: promiseِ commit() فقط بعد از تأیید «سرور» تمام می‌شود؛ آفلاین هرگز تمام نمی‌شود.
+       تغییر همان لحظه روی گوشی (IndexedDB) اعمال می‌شود و در صف ارسال می‌ماند. پس برای کاربر
+       منتظر تأیید سرور نمی‌مانیم؛ اگر بعداً سرور آن را رد کرد، خطا نشان داده می‌شود. */
+    if(noLedger) return commit(); // عملیات سنگین مدیریتی (بازیابی/پاک‌سازی) همان رفتار قبلی
+    let real;
+    try{ real = commit(); }catch(e){ return Promise.reject(e); }
+    Promise.resolve(real).then(()=>{
+      try{ App._recomputeSyncState(); }catch(e){}
+    }, (err)=>{
+      console.error('batch rejected by server', err);
+      try{
+        App._markWriteResult(false, err);
+        App.toastError('سرور این تغییر را قبول نکرد و برگشت داده شد: '+((err&&err.message)||''));
+      }catch(e){}
+    });
+    return Promise.resolve();
   };
   return b;
 }
@@ -481,7 +496,7 @@ const App = {
 
     const cacheKey = this._roleCacheKey(u.uid);
     try{
-      const teamSnap = await getDoc(teamDocRef(u.uid));
+      const teamSnap = await Promise.race([getDoc(teamDocRef(u.uid)), new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),2500))]);
       this.role = teamSnap.exists() ? (teamSnap.data().role||'staff') : 'staff';
       if(this.role==='salesman') this.role='seller'; // firestore.rules از «salesman» استفاده می‌کند، برنامه از «seller»
       try{ localStorage.setItem(cacheKey, this.role); }catch(e){}
@@ -1585,97 +1600,15 @@ const App = {
         await batch.commit();
       };
 
-      const commitOnlineTransaction=async()=>{
-        const productRefs=this.saleDraft.items.filter(it=>!draftProducts.some(dp=>dp.id===it.productId)).map(it=>doc(cols.products,it.productId));
-        const uniqueRefs=[...new Map(productRefs.map(r=>[r.path,r])).values()];
-        const customerMatch=custName ? this.state.customers.find(c=>normalizeName(c.name)===normalizeName(custName)) : null;
-        const customerId=customerMatch ? customerMatch.id : (custName ? uid() : null);
-        const customerRef=customerId ? doc(cols.customers,customerId) : null;
-        await runTransaction(db, async(tx)=>{
-          const reads=[];
-          if(customerRef && customerMatch) reads.push(tx.get(customerRef));
-          uniqueRefs.forEach(r=>reads.push(tx.get(r)));
-          const snaps=await Promise.all(reads);
-          let k=0;
-          const customerSnap=(customerRef&&customerMatch)?snaps[k++]:null;
-          const productSnaps=new Map(uniqueRefs.map(r=>[r.path,snaps[k++]]));
-          if(remaining>0.001 && !custName) throw new Error('برای فروش قرضی (نسیه) باید نام مشتری را بنویسید');
-          let customerNameFinal='مشتری نقدی';
-          if(custName){
-            customerNameFinal=customerMatch ? customerMatch.name : custName;
-            if(customerMatch){
-              if(!customerSnap || !customerSnap.exists()) throw new Error('مشتری انتخاب‌شده در سرور پیدا نشد.');
-              const fields={balance:increment(remaining)};
-              const current=customerSnap.data();
-              if(custPhone && !current.phone) fields.phone=custPhone;
-              if(custAddress && !current.address) fields.address=custAddress;
-              tx.update(customerRef,fields);
-            }else{
-              tx.set(customerRef,{id:customerId,name:custName,phone:custPhone,address:custAddress,balance:remaining,...this.recordMeta()});
-            }
-          }
-          let totalCost=0;
-          const finalItems=this.saleDraft.items.map(it=>{
-            const draftP=draftProducts.find(dp=>dp.id===it.productId);
-            let cost=0;
-            if(!draftP){
-              const snap=productSnaps.get(doc(cols.products,it.productId).path);
-              if(!snap || !snap.exists()) throw new Error('محصول «'+it.name+'» در سرور پیدا نشد.');
-              cost=Number(snap.data().avgCost)||0;
-            }
-            totalCost += it.qty*cost;
-            return {...it,cost,returnedQty:0};
-          });
-          const ledgerRunning=new Map();
-          for(const it of this.saleDraft.items){
-            const draftP=draftProducts.find(dp=>dp.id===it.productId);
-            const pref=doc(cols.products,it.productId);
-            if(draftP){
-              tx.set(pref,{id:draftP.id,name:draftP.name,unit:draftP.unit,stock:-it.qty,avgCost:0,sellPrice:it.unitPrice,
-                baseTradable:!!draftP.baseTradable,midUnit:draftP.midUnit||'',midPer:draftP.midPer||0,packUnit:draftP.packUnit||'',packPer:draftP.packPer||0,
-                defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||'',
-                saleUnits:draftP.saleUnits||[draftP.packUnit||draftP.midUnit||''].filter(Boolean),allowFractionalSale:!!draftP.allowFractionalSale,
-                sellPriceMid:0,sellPricePack:0,...this.recordMeta()});
-            }else{
-              tx.update(pref,{stock:increment(-it.qty)});
-            }
-            const pSnap=draftP ? null : productSnaps.get(pref.path);
-            const initialStock=draftP ? 0 : Number(pSnap.data().stock)||0;
-            const stockBefore=ledgerRunning.has(it.productId) ? ledgerRunning.get(it.productId) : initialStock;
-            ledgerRunning.set(it.productId,stockBefore-it.qty);
-            const cost=finalItems.find(x=>x.productId===it.productId)?.cost||0;
-            const lmId=uid();
-            tx.set(doc(cols.stockLedger,lmId),buildMovement({id:lmId,ts:Date.now(),date:todayISO(),productId:it.productId,warehouseId:DEFAULT_WAREHOUSE,type:'SALE',quantityBase:-it.qty,unit:'عدد',unitCost:cost,userId:(this.user&&this.user.email)||'',referenceType:'sale',referenceId:saleId,reason:'فروش',stockBefore}));
-          }
-          totalCost=round2(totalCost);
-          const newSale={id:saleId,invoiceNo:this.invoiceNoForNew(saleId,'S'),ts:Date.now(),date,customerId,customerName:customerNameFinal,customerPhone:custPhone,customerAddress:custAddress,
-            items:finalItems,total,totalCost,profit:round2(total-totalCost),paid,remaining,note,status:'active',returns:[],originalTotal:total,discount:0,returnedAmount:0,returnedCost:0,...this.recordMeta()};
-          tx.set(doc(cols.sales,saleId),newSale);
-          this.audit(tx,{action:'create',entityType:'sale',entityId:saleId,before:null,after:newSale});
-        });
-      };
 
-      if(navigator.onLine){
-        try{ await commitOnlineTransaction(); }
-        catch(e){
-          // وضعیت آنلاین مرورگر به معنی دسترسی واقعی به Firebase نیست. اگر تراکنش به‌علت شبکه شکست خورد،
-          // batch آفلاین Firestore را به کار می‌بریم تا ثبت محلی صف شود و بعداً همگام گردد.
-          // خطاهای مجوز/اعتبارسنجی هرگز به مسیر آفلاین تبدیل نمی‌شوند.
-          if(isConnectivityError(e)){
-            try{ await commitOfflineBatch(); }
-            catch(queueErr){
-              this._markWriteResult(false,queueErr);
-              App.toastError('ثبت آفلاین فاکتور فروش هم ناکام شد. برنامه را نبندید و اتصال را بررسی کنید. '+(queueErr.message||''));
-              return;
-            }
-          }else{
-            this._markWriteResult(false,e);
-            App.toastError('ذخیرهٔ فاکتور فروش انجام نشد. '+(e.message||''));
-            return;
-          }
-        }
-      }else{
-        await commitOfflineBatch();
+
+      // همیشه «اول محلی»: بدون هیچ انتظاری برای اینترنت ثبت می‌شود و خودکار همگام می‌شود.
+      // (transaction نیاز به سرور دارد و با اینترنت ضعیف/قطع گیر می‌کرد.)
+      try{ await commitOfflineBatch(); }
+      catch(e){
+        this._markWriteResult(false,e);
+        App.toastError('ذخیرهٔ فاکتور فروش انجام نشد. '+(e.message||''));
+        return;
       }
       this._markWriteResult(true);
       this.resetSaleDraft();
@@ -2262,6 +2195,7 @@ const App = {
         if(supplier) batch.update(doc(cols.suppliers,supplierId), { [balField]: increment(remaining) });
         else batch.set(doc(cols.suppliers,supplierId), {id:supplierId,name:supName,phone:'',address:'',balance:currency==='AFN'?remaining:0,balanceUSD:currency==='USD'?remaining:0, ...this.recordMeta()});
       }
+      const _run = {};
       this.purchaseDraft.items.forEach(it=>{
         const unitCostAFN = currency==='USD' ? it.unitCost*rateAtPurchase : it.unitCost;
         const draftP = draftProducts.find(dp=>dp.id===it.productId);
@@ -2275,7 +2209,10 @@ const App = {
           const p=this.state.products.find(pp=>pp.id===it.productId);
           if(p){
             const unitCost=unitCostAFN;
-            const newAvgCost=nextAvgCost({stockQty:p.stock,avgCost:p.avgCost,purchaseQty:it.qty,unitCost}).avgCost;
+            const prior=_run[it.productId]||{stock:p.stock,avgCost:p.avgCost};
+            const calc=nextAvgCost({stockQty:prior.stock,avgCost:prior.avgCost,purchaseQty:it.qty,unitCost});
+            _run[it.productId]={stock:calc.newStock,avgCost:calc.avgCost};
+            const newAvgCost=calc.avgCost;
             const fields={stock:increment(it.qty),avgCost:newAvgCost};
             if(!p.sellPrice) fields.sellPrice=round2(unitCost*1.15);
             batch.update(doc(cols.products,it.productId),fields);
@@ -2287,63 +2224,8 @@ const App = {
       await batch.commit();
     };
 
-    const commitOnlineTransaction = async()=>{
-      const productRefs=this.purchaseDraft.items.filter(it=>!draftProducts.some(dp=>dp.id===it.productId)).map(it=>doc(cols.products,it.productId));
-      const uniqueRefs=[...new Map(productRefs.map(r=>[r.path,r])).values()];
-      const supplierRef=supplierId ? doc(cols.suppliers,supplierId) : null;
-      await runTransaction(db, async(tx)=>{
-        const reads=[];
-        if(supplierRef) reads.push(tx.get(supplierRef));
-        uniqueRefs.forEach(r=>reads.push(tx.get(r)));
-        const snaps=await Promise.all(reads);
-        let k=0;
-        const supplierSnap=supplierRef ? snaps[k++] : null;
-        const productSnaps=new Map(uniqueRefs.map(r=>[r.path,snaps[k++]]));
-
-        if(supplierRef){
-          if(supplierSnap && supplierSnap.exists()) tx.update(supplierRef,{[balField]:increment(remaining)});
-          else tx.set(supplierRef,{id:supplierId,name:supName,phone:'',address:'',balance:currency==='AFN'?remaining:0,balanceUSD:currency==='USD'?remaining:0,...this.recordMeta()});
-        }
-
-        const runningProductState=new Map();
-        this.purchaseDraft.items.forEach(it=>{
-          const unitCostAFN=currency==='USD' ? it.unitCost*rateAtPurchase : it.unitCost;
-          const draftP=draftProducts.find(dp=>dp.id===it.productId);
-          const pref=doc(cols.products,it.productId);
-          if(draftP){
-            tx.set(pref,{id:draftP.id,name:draftP.name,unit:draftP.unit,unitQty:draftP.unitQty||1,stock:it.qty,avgCost:unitCostAFN,sellPrice:round2(unitCostAFN*1.15),
-              baseTradable:!!draftP.baseTradable,midUnit:draftP.midUnit||'',midPer:draftP.midPer||0,packUnit:draftP.packUnit||'',packPer:draftP.packPer||0,
-              defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||draftP.unit,
-              saleUnits:draftP.saleUnits||[draftP.packUnit||draftP.midUnit||draftP.unit].filter(Boolean),allowFractionalSale:!!draftP.allowFractionalSale,
-              sellPriceMid:0,sellPricePack:0,...this.recordMeta()});
-            return;
-          }
-          const snap=productSnaps.get(pref.path);
-          if(!snap || !snap.exists()) throw new Error('محصول «'+it.name+'» در سرور پیدا نشد.');
-          const p=snap.data();
-          const prior=runningProductState.get(it.productId) || { stock:Number(p.stock)||0, avgCost:Number(p.avgCost)||0 };
-          const oldStock=prior.stock, oldAvg=prior.avgCost;
-          const calc=nextAvgCost({stockQty:oldStock,avgCost:oldAvg,purchaseQty:it.qty,unitCost:unitCostAFN});
-          runningProductState.set(it.productId,{stock:calc.newStock,avgCost:calc.avgCost});
-          const fields={stock:increment(it.qty),avgCost:calc.avgCost};
-          if(!p.sellPrice) fields.sellPrice=round2(unitCostAFN*1.15);
-          tx.update(pref,fields);
-          const lmId=uid();
-          tx.set(doc(cols.stockLedger,lmId),buildMovement({id:lmId,ts:Date.now(),date:todayISO(),productId:it.productId,warehouseId:DEFAULT_WAREHOUSE,type:'PURCHASE',quantityBase:it.qty,unit:'عدد',unitCost:unitCostAFN,userId:(this.user&&this.user.email)||'',referenceType:'purchase',referenceId:purchaseId,reason:'خرید',stockBefore:oldStock}));
-        });
-        tx.set(doc(cols.purchases,purchaseId),newPurchase);
-        this.audit(tx,{action:'create',entityType:'purchase',entityId:purchaseId,before:null,after:newPurchase});
-      });
-    };
-
     try{
-      if(navigator.onLine){
-        try{ await commitOnlineTransaction(); }
-        catch(e){
-          if(!isConnectivityError(e)) throw e;
-          await commitOfflineBatch();
-        }
-      }else await commitOfflineBatch();
+      await commitOfflineBatch();
       this._markWriteResult(true);
     }catch(e){
       console.error('submitPurchase error',e);
