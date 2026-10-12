@@ -1631,7 +1631,7 @@ const App = {
       const custAddress = (document.getElementById('sale-customer-address').value||'').trim();
       const date = document.getElementById('sale-date').value || todayISO();
       const note = (document.getElementById('sale-note').value||'').trim();
-      const remaining = total-paid;
+      const remaining = round2(total-paid);
       const draftProducts = this.saleDraft._draftProducts || [];
       const saleId = txSaleId;
 
@@ -2235,7 +2235,7 @@ const App = {
     const date = document.getElementById('purchase-date').value || todayISO();
     const note = (document.getElementById('purchase-note').value||'').trim();
     const supplierInvoiceNo = (document.getElementById('purchase-supplier-invoice-no').value||'').trim();
-    const remaining = total-paid;
+    const remaining = round2(total-paid);
     const draftProducts = this.purchaseDraft._draftProducts || [];
 
     const photoInput = document.getElementById('purchase-bill-photo');
@@ -3001,7 +3001,7 @@ const App = {
       batch.update(doc(cols.purchases, pur.id), { adjustments:log, ...this.editMeta() });
       if(it.productId) batch.update(doc(cols.products, it.productId), { stock: increment(-qty) });
       const expId=uid();
-      batch.set(doc(cols.expenses, expId), {id:expId, ts:Date.now(), date:todayISO(),
+      if(amountAFN>0) batch.set(doc(cols.expenses, expId), {id:expId, ts:Date.now(), date:todayISO(),
         category:WASTE_CATEGORY, amount:amountAFN, nonCash:true, kind:'waste',
         wasteId:expId, productId:it.productId||'', quantity:qty, unit:(it.unit||'عدد'), cost:amountAFN,
         warehouseId:DEFAULT_WAREHOUSE, reason:note||'مصرف/ضایعات', userId:(this.user&&this.user.email)||'', reference:pur.id,
@@ -4033,7 +4033,7 @@ const App = {
       if(isWaste){
         // ضایعات: موجودی ↓ و زیان ↑ ، ولی پول نقد بدون تغییر (nonCash)
         const expId=uid(); const cost=round2(Math.abs(delta)*(Number(p.avgCost)||0));
-        batch.set(doc(cols.expenses, expId), {id:expId, ts:Date.now(), date:todayISO(), category:WASTE_CATEGORY, amount:cost, nonCash:true, kind:'waste',
+        if(cost>0) batch.set(doc(cols.expenses, expId), {id:expId, ts:Date.now(), date:todayISO(), category:WASTE_CATEGORY, amount:cost, nonCash:true, kind:'waste',
           wasteId:expId, productId:id, quantity:Math.abs(delta), unit:'عدد', cost, warehouseId:DEFAULT_WAREHOUSE, reason:reasonLbl+(noteTxt?(' — '+noteTxt):''),
           userId:(this.user&&this.user.email)||'', reference:'stock-adjustment', note:p.name+' · '+fmtQty(Math.abs(parseFloat(deltaStr)))+' '+u.name+(noteTxt?(' — '+noteTxt):''), ...this.recordMeta()});
       }

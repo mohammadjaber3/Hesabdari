@@ -82,6 +82,7 @@ const isJs = (u) => /\.m?js$/.test(u.split('?')[0]);
 // ماژول‌های Firebase خودشان ماژول‌های دیگری import می‌کنند؛ همه را (تا عمق ۳) دنبال و کش می‌کنیم،
 // وگرنه اگر فقط آدرس‌های firebase-sdk.js کش شود، آفلاین بالا آمدنِ برنامه ممکن است شکست بخورد.
 async function precacheExternal(cache) {
+  const missing = [];   // ماژول‌های Firebase که کش نشدند (بدون آن‌ها برنامه آفلاین بالا نمی‌آید)
   const seeds = await discoverExternalUrls();
   const seen = new Set(seeds);
   let frontier = seeds.slice();
@@ -89,6 +90,7 @@ async function precacheExternal(cache) {
     const next = [];
     await Promise.all(frontier.map(async (url) => {
       const res = await ensureCached(cache, url);
+      if (!res && url.indexOf('www.gstatic.com') >= 0) { missing.push(url); return; }
       if (!res || !isJs(url) || url.indexOf('www.gstatic.com') < 0) return;
       let text = '';
       try { text = await res.clone().text(); } catch (e) { return; }
@@ -103,6 +105,7 @@ async function precacheExternal(cache) {
     }));
     frontier = next;
   }
+  return missing;
 }
 
 let _precaching = null;
@@ -117,7 +120,10 @@ self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE_VERSION);
     await cacheShell(cache);          // اگر حتی یک فایل برنامه نیاید، نصب رد می‌شود و نسخهٔ قبلی سالم می‌ماند
-    await precacheExternal(cache).catch(() => {});
+    // Firebase اجباری است: اگر کامل کش نشود، نصب رد می‌شود (نسخهٔ قبلی سالم می‌ماند و دفعهٔ بعد که اینترنت بود دوباره تلاش می‌شود)
+    // وگرنه سرویس‌ورکر «نصب‌شده» ولی برنامه آفلاین بالا نمی‌آمد. Chart.js / xlsx / فونت همچنان «بهترین‌ممکن»اند.
+    const missing = await precacheExternal(cache).catch(() => ['precache-error']);
+    if (missing && missing.length) throw new Error('firebase modules not cached: ' + missing.join(', '));
     await self.skipWaiting();
   })());
 });
