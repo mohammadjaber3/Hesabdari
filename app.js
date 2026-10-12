@@ -745,7 +745,7 @@ const App = {
     if(this._syncRenderTimer) return;
     this._syncRenderTimer = setTimeout(()=>{
       this._syncRenderTimer = null;
-      if(this.dataReady && this._formIsDirty()){ this._renderDeferred = true; return; }
+      if(this.dataReady && this._formIsDirty()){ this._renderDeferred = true; setTimeout(()=>{ if(this._renderDeferred) this._syncRender(); }, 2000); return; } // تا فرم تمام نشده عقب می‌افتد و بعد خودش تازه می‌شود
       this.render();
     }, 60);
   },
