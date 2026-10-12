@@ -1,14 +1,17 @@
-// حساب‌داری فروشگاه صانع — Service Worker
+// حساب‌داری فروشگاه صانع — Service Worker (نسخهٔ آفلاین‌-اول)
 //
-// نسخه‌بندی (یک جای واحد):
-//   BUILD_ID هنگام deploy توسط GitHub Actions به‌صورت خودکار با شناسهٔ commit
-//   جایگزین می‌شود (فایل .github/workflows/deploy.yml). یعنی هر deploy جدید =
-//   کش جدید، و کش قدیمی خودکار پاک می‌شود. دیگر لازم نیست عدد v10 یا CACHE_VERSION
-//   را دستی عوض کنید. روی کامپیوتر خودتان (بدون deploy) نام کش «dev» می‌ماند.
+// اصل کار:
+//  • فایل‌های خود برنامه (index/app/core/...) هنگام نصب «همه‌یا‌هیچ» در یک کشِ نسخه‌دار ذخیره می‌شوند و
+//    از همان کش «فوراً» (بدون هیچ انتظاری برای شبکه) سرو می‌شوند. پس باز شدنِ برنامه نه به اینترنت وابسته است نه کند می‌شود.
+//  • چون کش نسخه‌دار و اتمی است، هرگز ترکیبِ فایلِ قدیم + جدید (که ماژول‌ها را می‌شکند) پیش نمی‌آید.
+//  • نسخهٔ جدید فقط با deploy می‌آید: BUILD_ID را GitHub Actions با شناسهٔ commit پر می‌کند (deploy.yml).
+//    سرویس‌ورکر جدید در پس‌زمینه نصب می‌شود و دفعهٔ بعدی که برنامه باز شود فعال است.
+//  • کتابخانه‌های بیرونی (Firebase SDK و ماژول‌های داخلی‌اش، Chart.js، XLSX، فونت) هم پیش‌کش می‌شوند؛
+//    اگر نصب اول با اینترنت ضعیف ناقص ماند، هر بار که اینترنت وصل شد دوباره کامل می‌شود.
 const BUILD_ID = '__BUILD_ID__';
-const CACHE_VERSION = 'hesabdari-' + (BUILD_ID.indexOf('__') === 0 ? 'dev' : BUILD_ID);
+const IS_DEV = BUILD_ID.indexOf('__') === 0;           // روی کامپیوتر خودتان (بدون deploy)
+const CACHE_VERSION = 'hesabdari-' + (IS_DEV ? 'dev' : BUILD_ID);
 
-// فایل‌های خود سایت (همیشه باید برای بازکردن آفلاین موجود باشند)
 const APP_SHELL = [
   './',
   './index.html',
@@ -32,19 +35,21 @@ const APP_SHELL = [
   './icons/apple-touch-icon.png',
 ];
 
-// آدرس کتابخانه‌های بیرونی (Firebase، Chart.js، XLSX، فونت) دیگر اینجا دوباره نوشته نمی‌شوند؛
-// موقع نصب از داخل همین فایل‌های برنامه خوانده می‌شوند، پس نسخهٔ Firebase فقط یک جا
-// (firebase-sdk.js) نوشته می‌شود و همیشه با پیش‌کش یکی است.
+// آدرس کتابخانه‌های بیرونی از داخل خود فایل‌های برنامه خوانده می‌شود (نسخهٔ Firebase فقط در firebase-sdk.js نوشته می‌شود)
 const URL_SOURCES = ['./firebase-sdk.js', './app.js', './styles.css'];
 const EXTERNAL_URL_RE = /https:\/\/(?:www\.gstatic\.com|cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\/[A-Za-z0-9._\/@~%+-]+/g;
-
-// میزبان‌های بیرونی که اجازه داریم پاسخشان را کش کنیم (فقط کتابخانه‌های ثابت -
-// نه Firestore/Auth که ارتباط زنده دارند و خودشان آفلاین/آنلاین را مدیریت می‌کنند)
 const CACHEABLE_HOSTS = ['www.gstatic.com', 'cdnjs.cloudflare.com', 'cdn.jsdelivr.net'];
 
-// اگر شبکه بیشتر از این طول بکشد، برای فایل‌های خود برنامه از کش استفاده می‌کنیم (اینترنت ضعیف)
-const NETWORK_TIMEOUT_MS = 1500;
+/* ---------- نصب: فایل‌های برنامه همه‌یا‌هیچ ---------- */
+async function cacheShell(cache) {
+  await Promise.all(APP_SHELL.map(async (url) => {
+    const res = await fetch(url, { cache: 'reload' });
+    if (!res || res.status !== 200) throw new Error('shell fetch failed: ' + url);
+    await cache.put(url, res);
+  }));
+}
 
+/* ---------- کتابخانه‌های بیرونی: تلاشِ بهترین‌ممکن (شکستشان نصب را خراب نمی‌کند) ---------- */
 async function discoverExternalUrls() {
   const found = new Set();
   await Promise.all(URL_SOURCES.map(async (src) => {
@@ -53,99 +58,138 @@ async function discoverExternalUrls() {
       if (!res || res.status !== 200) return;
       const text = await res.text();
       (text.match(EXTERNAL_URL_RE) || []).forEach((u) => found.add(u));
-    } catch (e) { /* بعداً دوباره تلاش می‌شود */ }
+    } catch (e) { /* دفعهٔ بعد */ }
   }));
   return Array.from(found);
 }
 
-// هر فایل را جدا کش می‌کنیم (نه با cache.addAll که اگر حتی یک فایل خطا بدهد، کل نصب
-// سرویس‌ورکر شکست می‌خورد و هیچ‌چیز دیگری هم کش نمی‌شود)
-async function cacheEachSafely(cache, urls) {
-  await Promise.all(urls.map(async (url) => {
-    try {
-      const res = await fetch(url, { cache: 'no-cache' });
-      if (res && res.status === 200) await cache.put(url, res);
-    } catch (e) {
-      // دفعهٔ بعد که اینترنت وصل بود دوباره تلاش می‌شود.
-    }
-  }));
+// اگر قبلاً در این کش یا کشِ نسخهٔ قبلی بود دوباره دانلود نمی‌کند (صرفه‌جویی در اینترنت ضعیف)
+async function ensureCached(cache, url) {
+  let res = await cache.match(url, { ignoreVary: true });
+  if (res) return res;
+  res = await caches.match(url, { ignoreVary: true });
+  if (res) { await cache.put(url, res.clone()); return res; }
+  try {
+    const net = await fetch(url);
+    if (!net || net.status !== 200) return null;
+    await cache.put(url, net.clone());
+    return net;
+  } catch (e) { return null; }
 }
 
-async function precacheAll() {
-  const cache = await caches.open(CACHE_VERSION);
-  const external = await discoverExternalUrls();
-  await cacheEachSafely(cache, [...APP_SHELL, ...external]);
+const isJs = (u) => /\.m?js$/.test(u.split('?')[0]);
+
+// ماژول‌های Firebase خودشان ماژول‌های دیگری import می‌کنند؛ همه را (تا عمق ۳) دنبال و کش می‌کنیم،
+// وگرنه اگر فقط آدرس‌های firebase-sdk.js کش شود، آفلاین بالا آمدنِ برنامه ممکن است شکست بخورد.
+async function precacheExternal(cache) {
+  const seeds = await discoverExternalUrls();
+  const seen = new Set(seeds);
+  let frontier = seeds.slice();
+  for (let depth = 0; depth < 4 && frontier.length; depth++) {
+    const next = [];
+    await Promise.all(frontier.map(async (url) => {
+      const res = await ensureCached(cache, url);
+      if (!res || !isJs(url) || url.indexOf('www.gstatic.com') < 0) return;
+      let text = '';
+      try { text = await res.clone().text(); } catch (e) { return; }
+      const re = /(?:\bfrom|\bimport)\s*\(?\s*["']([^"']+)["']/g;
+      let m;
+      while ((m = re.exec(text))) {
+        let abs;
+        try { abs = new URL(m[1], url); } catch (e) { continue; }
+        if (!CACHEABLE_HOSTS.includes(abs.hostname) || !isJs(abs.href) || seen.has(abs.href)) continue;
+        seen.add(abs.href); next.push(abs.href);
+      }
+    }));
+    frontier = next;
+  }
+}
+
+let _precaching = null;
+function precacheExternalOnce() {
+  if (!_precaching) {
+    _precaching = caches.open(CACHE_VERSION).then(precacheExternal).catch(() => {}).finally(() => { _precaching = null; });
+  }
+  return _precaching;
 }
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(precacheAll());
-  self.skipWaiting();
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_VERSION);
+    await cacheShell(cache);          // اگر حتی یک فایل برنامه نیاید، نصب رد می‌شود و نسخهٔ قبلی سالم می‌ماند
+    await precacheExternal(cache).catch(() => {});
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys().then((keys) =>
-      // هر کشی که مال این نسخه نیست پاک می‌شود (invalidate کش قدیمی بعد از deploy)
-      Promise.all(keys.filter((k) => k !== CACHE_VERSION).map((k) => caches.delete(k)))
-    ).then(() => precacheAll())
-  );
-  self.clients.claim();
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((k) => k !== CACHE_VERSION).map((k) => caches.delete(k)));
+    await self.clients.claim();
+  })());
 });
 
-// فایل‌های خود برنامه: اول شبکه (تا بعد از deploy همیشه نسخهٔ تازه بیاید)،
-// اگر اینترنت قطع یا خیلی کند بود، از کش (آفلاین کار می‌کند).
-function networkFirst(req) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const fromCache = () => caches.match(req).then((c) => c || (req.mode === 'navigate' ? caches.match('./index.html') : undefined));
-    const timer = setTimeout(() => {
-      fromCache().then((c) => { if (c && !settled) { settled = true; resolve(c); } });
-    }, NETWORK_TIMEOUT_MS);
-    fetch(req).then((res) => {
-      clearTimeout(timer);
-      if (res && res.status === 200) {
-        const copy = res.clone();
-        caches.open(CACHE_VERSION).then((cache) => cache.put(req, copy));
-      }
-      if (!settled) { settled = true; resolve(res); }
-    }).catch(() => {
-      clearTimeout(timer);
-      fromCache().then((c) => {
-        if (!settled) { settled = true; resolve(c || new Response('آفلاین', { status: 503, statusText: 'Offline' })); }
-      });
-    });
-  });
+// صفحه وقتی اینترنت وصل شد می‌گوید «کتابخانه‌های ناقص را کامل کن»
+self.addEventListener('message', (event) => {
+  if (event.data === 'precache') event.waitUntil(precacheExternalOnce());
+});
+
+/* ---------- سرو کردن ---------- */
+async function cacheFirstShell(req) {
+  const cache = await caches.open(CACHE_VERSION);
+  const hit = await cache.match(req, { ignoreSearch: true });
+  if (hit) return hit;
+  if (req.mode === 'navigate') {
+    const index = await cache.match('./index.html');
+    if (index) return index;
+  }
+  try {
+    const res = await fetch(req);
+    if (res && res.status === 200) cache.put(req, res.clone());
+    return res;
+  } catch (e) {
+    return new Response('آفلاین', { status: 503, statusText: 'Offline' });
+  }
+}
+
+// فقط برای توسعه روی کامپیوتر خودتان: اول شبکه تا تغییرات فوراً دیده شود
+async function networkFirst(req) {
+  try {
+    const res = await fetch(req);
+    if (res && res.status === 200) { const copy = res.clone(); caches.open(CACHE_VERSION).then((c) => c.put(req, copy)); }
+    return res;
+  } catch (e) {
+    const hit = await caches.match(req, { ignoreSearch: true });
+    return hit || (req.mode === 'navigate' ? await caches.match('./index.html') : undefined) ||
+      new Response('آفلاین', { status: 503, statusText: 'Offline' });
+  }
+}
+
+// کتابخانه‌ها و فونت‌ها نسخهٔ ثابت در آدرس دارند، پس هرگز لازم نیست دوباره از شبکه تازه‌سازی شوند
+async function cacheFirstExternal(req) {
+  const cache = await caches.open(CACHE_VERSION);
+  const hit = await cache.match(req.url, { ignoreVary: true });
+  if (hit) return hit;
+  const other = await caches.match(req.url, { ignoreVary: true });
+  if (other) { cache.put(req.url, other.clone()); return other; }
+  const res = await fetch(req);
+  if (res && res.status === 200) cache.put(req.url, res.clone());
+  return res;
 }
 
 self.addEventListener('fetch', (event) => {
   const req = event.request;
+  if (req.method !== 'GET') return;
   const url = new URL(req.url);
 
-  if (req.method !== 'GET') return;
-
   if (url.origin === self.location.origin) {
-    event.respondWith(networkFirst(req));
+    event.respondWith(IS_DEV ? networkFirst(req) : cacheFirstShell(req));
     return;
   }
-
-  // کتابخانه‌های ثابت بیرونی (Firebase SDK، Chart.js، XLSX، فونت):
-  // کش کن تا آفلاین هم لود شوند، در پس‌زمینه هم تازه‌اش کن
   if (CACHEABLE_HOSTS.includes(url.hostname)) {
-    event.respondWith(
-      caches.open(CACHE_VERSION).then((cache) =>
-        cache.match(req).then((cached) => {
-          const networkFetch = fetch(req)
-            .then((res) => {
-              if (res && res.status === 200) cache.put(req, res.clone());
-              return res;
-            })
-            .catch(() => cached);
-          return cached || networkFetch;
-        })
-      )
-    );
+    event.respondWith(cacheFirstExternal(req));
     return;
   }
-
-  // بقیه (ارتباط زنده با Firestore/Auth گوگل): دست نمی‌زنیم
+  // ارتباط زندهٔ Firestore/Auth: دست نمی‌زنیم (خودشان آفلاین/آنلاین را مدیریت می‌کنند)
 });

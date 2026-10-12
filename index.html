@@ -64,7 +64,13 @@
 <script>
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
-      navigator.serviceWorker.register('./sw.js').catch(err => console.warn('SW register failed', err));
+      navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then(reg => {
+        // اگر نصب اول با اینترنت ضعیف ناقص مانده بود، هر وقت اینترنت آمد کتابخانه‌های ناقص کامل شوند
+        const topUp = () => { const w = reg.active || reg.waiting || reg.installing; if (w) w.postMessage('precache'); };
+        topUp();
+        reg.update().catch(() => {});
+        window.addEventListener('online', () => { topUp(); reg.update().catch(() => {}); });
+      }).catch(err => console.warn('SW register failed', err));
     });
   }
 </script>

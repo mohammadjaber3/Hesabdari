@@ -11,6 +11,6 @@ export {
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
 export {
   initializeFirestore, getFirestore, persistentLocalCache, persistentMultipleTabManager,
-  doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, onSnapshot,
+  doc, getDoc, getDocFromCache, getDocs, setDoc, updateDoc, deleteDoc, onSnapshot,
   collection, writeBatch, increment, runTransaction
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";

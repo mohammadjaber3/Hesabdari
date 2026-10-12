@@ -7,7 +7,7 @@ import {
   initializeApp,
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence,
   initializeFirestore, getFirestore, persistentLocalCache, persistentMultipleTabManager,
-  doc, getDoc, getDocs, setDoc as _setDoc, updateDoc as _updateDoc, deleteDoc as _deleteDoc, onSnapshot,
+  doc, getDoc, getDocFromCache, getDocs, setDoc as _setDoc, updateDoc as _updateDoc, deleteDoc as _deleteDoc, onSnapshot,
   collection, writeBatch as _writeBatch, increment as _increment, runTransaction
 } from "./firebase-sdk.js";
 import {
@@ -44,10 +44,30 @@ function _assertCanWrite(){
 /* increment() که مقدارش را هم روی خودش نگه می‌دارد تا لایهٔ Stock Ledger بتواند
    «چقدر کم/زیاد شد» را بخواند (SDK خودش این عدد را نمایش نمی‌دهد). */
 function increment(n){ const v=_increment(n); try{ v.__delta=n; }catch(e){} return v; }
-const setDocRaw = _setDoc;
-function setDoc(...a){ _assertCanWrite(); return _setDoc(...a); }
-function updateDoc(...a){ _assertCanWrite(); return _updateDoc(...a); }
-function deleteDoc(...a){ _assertCanWrite(); return _deleteDoc(...a); }
+/* نوشتنِ «اول محلی»: promiseِ setDoc/updateDoc/deleteDoc در Firestore فقط بعد از تأیید «سرور» تمام می‌شود و
+   آفلاین هرگز تمام نمی‌شود. تغییر همان لحظه در حافظهٔ گوشی (IndexedDB) اعمال و در صف ارسال می‌ماند، پس برای
+   کاربر منتظر سرور نمی‌مانیم (وگرنه فرم باز می‌ماند، پیام «ذخیره شد» نمی‌آید و کاربر دوباره می‌زند و رکورد تکراری می‌شود).
+   اگر سرور بعداً رد کرد، همان‌جا خطا نشان داده می‌شود. */
+function _localFirst(p){
+  Promise.resolve(p).then(()=>{ try{ App._recomputeSyncState(); }catch(e){} }, (err)=>{
+    console.error('write rejected by server', err);
+    try{
+      App._markWriteResult(false, err);
+      App.toastError('سرور این تغییر را قبول نکرد و برگشت داده شد: '+((err&&err.message)||''));
+    }catch(e){}
+  });
+  return Promise.resolve();
+}
+const setDocRaw = (...a)=> _localFirst(_setDoc(...a));
+function setDoc(...a){ _assertCanWrite(); return _localFirst(_setDoc(...a)); }
+function updateDoc(...a){ _assertCanWrite(); return _localFirst(_updateDoc(...a)); }
+function deleteDoc(...a){ _assertCanWrite(); return _localFirst(_deleteDoc(...a)); }
+/* خواندنِ سریع: اول از حافظهٔ گوشی (فوری، بدون شبکه)؛ فقط اگر آنجا نبود از سرور.
+   getDoc معمولی در اینترنتِ ضعیف تا ~۱۰ ثانیه منتظر سرور می‌ماند. */
+async function getDocQuick(ref){
+  try{ const c = await getDocFromCache(ref); if(c.exists()) return c; }catch(e){}
+  return getDoc(ref);
+}
 
 // navigator.onLine فقط اتصال Wi-Fi/LAN را می‌سنجد، نه دسترسی واقعی به اینترنت.
 // در خطاهای شبکه، اجازه می‌دهیم Firestore یک batch را در IndexedDB صف کند.
@@ -495,15 +515,30 @@ const App = {
     this._maybeAskDeviceLabel();
 
     const cacheKey = this._roleCacheKey(u.uid);
-    try{
-      const teamSnap = await Promise.race([getDoc(teamDocRef(u.uid)), new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),2500))]);
-      this.role = teamSnap.exists() ? (teamSnap.data().role||'staff') : 'staff';
-      if(this.role==='salesman') this.role='seller'; // firestore.rules از «salesman» استفاده می‌کند، برنامه از «seller»
-      try{ localStorage.setItem(cacheKey, this.role); }catch(e){}
-    }catch(e){
-      let cached=null;
-      try{ cached = localStorage.getItem(cacheKey); }catch(e2){}
-      this.role = cached || 'staff';
+    let cachedRole=null;
+    try{ cachedRole = localStorage.getItem(cacheKey); }catch(e){}
+    const roleFrom = (snap)=>{
+      let r = snap.exists() ? (snap.data().role||'staff') : 'staff';
+      if(r==='salesman') r='seller'; // firestore.rules از «salesman» استفاده می‌کند، برنامه از «seller»
+      return r;
+    };
+    if(cachedRole){
+      // نقش قبلاً روی همین گوشی ذخیره شده: بدون هیچ انتظاری باز شو، نقش واقعی را در پس‌زمینه تازه کن
+      this.role = cachedRole;
+      Promise.race([getDocQuick(teamDocRef(u.uid)), new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),15000))])
+        .then(snap=>{
+          const r = roleFrom(snap);
+          try{ localStorage.setItem(cacheKey, r); }catch(e){}
+          if(r!==this.role){ this.role=r; if(this._subscribedRole!==r) this._subscribeAll(); this.renderNav(); this.render(); }
+        }).catch(()=>{});
+    } else {
+      try{
+        const teamSnap = await Promise.race([getDocQuick(teamDocRef(u.uid)), new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),2500))]);
+        this.role = roleFrom(teamSnap);
+        try{ localStorage.setItem(cacheKey, this.role); }catch(e){}
+      }catch(e){
+        this.role = 'staff';
+      }
     }
     // اگر نقش واقعی با نقشی که با آن اشتراک گرفتیم یکی نبود (اولین ورود روی این گوشی،
     // یا تغییر نقش از کنسول)، اشتراک را با دسترسی درست از نو می‌گیریم.
@@ -620,7 +655,7 @@ const App = {
       document.getElementById('biz-name').textContent = this.state.settings.businessName || 'فروشگاه صانع';
       {const _bd=document.getElementById('biz-date'); if(_bd) _bd.textContent = dateLabel(todayISO());}
       this.renderNav();
-      this.render();
+      this._syncRender();
     };
     // اگر تا این مدت همهٔ ۹ بخش داده هنوز خبری از خودشان نداده باشند (مثلاً چون یکی از
     // کالکشن‌ها -مثل یک نوع سند که کمتر استفاده شده- هنگام آفلاین‌بودن هرگز از کش هم پاسخ
@@ -641,6 +676,9 @@ const App = {
 
     activeCollections.forEach(name=>{
       const unsub = onSnapshot(cols[name], {includeMetadataChanges:true}, (snap)=>{
+        // تغییر فقط در «متادیتا» (مثلاً رسیدن تأیید سرور برای نوشتهٔ محلی): داده عوض نشده، پس نه بازسازی نه رندر.
+        // قبلاً هر تأییدِ سرور کل صفحه را دوباره می‌ساخت و فرم نیمه‌پرشده پاک می‌شد.
+        if(this._loadedParts.has(name) && snap.docChanges().length===0){ markPart(name, snap.metadata.hasPendingWrites); return; }
         const arr = [];
         snap.forEach(d=>arr.push(d.data()));
         if(name==='products'){
@@ -666,6 +704,9 @@ const App = {
     });
 
     const unsubSettings = onSnapshot(settingsDocRef, {includeMetadataChanges:true}, async (snap)=>{
+      { const raw = JSON.stringify(snap.exists() ? snap.data() : null);
+        if(this._loadedParts.has('settings') && raw===this._settingsRaw){ markPart('settings', snap.metadata.hasPendingWrites); return; }
+        this._settingsRaw = raw; }
       if(snap.exists()){
         this.state.settings = migrateSettings(snap.data());
         setBusinessTimezone(this.state.settings.timezone);
@@ -679,9 +720,34 @@ const App = {
     }, (err)=>console.error('sync error (settings)', err));
     this._unsubs.push(unsubSettings);
 
-    window.addEventListener('online', ()=> this._recomputeSyncState());
-    window.addEventListener('offline', ()=> this._recomputeSyncState());
+    if(!this._netListenersAdded){
+      this._netListenersAdded = true;
+      window.addEventListener('online', ()=> this._recomputeSyncState());
+      window.addEventListener('offline', ()=> this._recomputeSyncState());
+    }
     this._recomputeSyncState();
+  },
+  /* رندر ناشی از همگام‌سازی: چند رویداد پشت‌سرهم یک رندر می‌شود، و اگر کاربر وسط پر کردن فرم است
+     (فاکتور فروش/خرید، پرداخت و...) صفحه را بازسازی نمی‌کنیم تا چیزی که نوشته پاک نشود. */
+  _formIsDirty(){
+    const root=document.getElementById('screen'); if(!root) return false;
+    for(const el of root.querySelectorAll('input,textarea,select')){
+      const t=(el.type||'').toLowerCase();
+      if(t==='hidden'||t==='button'||t==='submit') continue;
+      if(t==='file'){ if(el.files && el.files.length) return true; continue; }
+      if(t==='checkbox'||t==='radio'){ if(el.checked!==el.defaultChecked) return true; continue; }
+      if(el.tagName==='SELECT'){ if(el.selectedIndex>0 && el.options[el.selectedIndex] && !el.options[el.selectedIndex].defaultSelected) return true; continue; }
+      if(el.value!==el.defaultValue) return true;
+    }
+    return false;
+  },
+  _syncRender(){
+    if(this._syncRenderTimer) return;
+    this._syncRenderTimer = setTimeout(()=>{
+      this._syncRenderTimer = null;
+      if(this.dataReady && this._formIsDirty()){ this._renderDeferred = true; return; }
+      this.render();
+    }, 60);
   },
   // یک نقطهٔ واحد برای تصمیم‌گیری دربارهٔ وضعیت نمایشی: آفلاین (اصلاً وصل نیست)،
   // در حال همگام‌سازی (وصل است ولی هنوز چیزی در صفِ ارسال به سرور مانده)، یا آنلاین (همه‌چیز رسیده).
@@ -821,6 +887,7 @@ const App = {
   },
 
   render(){
+    this._renderDeferred = false;
     if(!this.dataReady){ this.renderLoading(); return; }
     this.renderNav();
     const s = document.getElementById('screen');
@@ -1137,24 +1204,37 @@ const App = {
   },
   async getMyPinHash(){
     if(!this.user) return null;
-    const snap = await getDoc(pinDocRef(this.user.uid)); // اگر خطا بدهد، عمداً throw می‌کند (fail-safe نه fail-open)
-    if(snap.exists() && snap.data().pinHash) return snap.data();
+    const snap = await getDocQuick(pinDocRef(this.user.uid)); // اگر خطا بدهد، عمداً throw می‌کند (fail-safe نه fail-open)
+    if(snap.exists() && snap.data().pinHash){
+      this._refreshPinInBackground();
+      return snap.data();
+    }
     // سازگاری با نسخهٔ قبلی که (بی‌اثر) در سند team ذخیره می‌کرد
     try{
-      const old = await getDoc(teamDocRef(this.user.uid));
+      const old = await getDocQuick(teamDocRef(this.user.uid));
       return (old.exists() && old.data().pinHash) ? { pinHash: old.data().pinHash } : null;
     }catch(e){ return null; }
+  },
+  /* اگر PIN از دستگاه دیگری عوض شده باشد، نسخهٔ سرور را (وقتی اینترنت بود) بی‌صدا جایگزین می‌کند */
+  _refreshPinInBackground(){
+    if(this._pinRefreshing || !this.user) return;
+    this._pinRefreshing = true;
+    const ref = pinDocRef(this.user.uid);
+    Promise.race([getDoc(ref), new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),15000))])
+      .then(snap=>{ if(snap.exists() && snap.data().pinHash) this.myPinHash = snap.data(); })
+      .catch(()=>{})
+      .finally(()=>{ this._pinRefreshing=false; });
   },
   async setMyPinHash(pin){
     if(!this.user) return null;
     const rec = await makePinRecord(pin);
     try{ await setDocRaw(pinDocRef(this.user.uid), {...rec, uid:this.user.uid, ts:Date.now()}, {merge:true}); return rec; }
-    catch(e){ this.toastError('PIN ذخیره نشد؛ اتصال اینترنت را بررسی کنید.'); return null; }
+    catch(e){ this.toastError('PIN ذخیره نشد؛ دوباره تلاش کنید.'); return null; }
   },
   async resetPin(){
     if(!this.user) return;
     try{ await setDocRaw(pinDocRef(this.user.uid), {pinHash:null,pinSalt:null,pinAlgo:null,pinIter:null}, {merge:true}); this.myPinHash=null; this._writePinFail(pinStateAfterSuccess()); this.toast('قفل PIN حذف شد — دفعهٔ بعد یک PIN جدید تعیین کنید'); }
-    catch(e){ this.toast('خطا در حذف PIN؛ اتصال اینترنت را بررسی کنید'); }
+    catch(e){ this.toast('خطا در حذف PIN؛ دوباره تلاش کنید'); }
   },
   lockNow(){ if(!this.user) return; this.pinLocked=true; this.pinEntry=''; this.renderPinRoot(); },
   renderPinRoot(){
@@ -3268,39 +3348,37 @@ const App = {
     });
   },
   async _runVoidPayment(paymentId, reason){
-    const payRef=doc(cols.payments, paymentId);
+    /* قبلاً runTransaction بود که فقط با سرور کار می‌کند (آفلاین: «اتصال اینترنت را بررسی کنید»).
+       حالا مثل بقیهٔ عملیات «اول محلی» است: مانده‌ها با increment (قابل جمع شدن) و شناسهٔ ثابتِ برگشت. */
     const revId='rev_'+paymentId; // شناسهٔ ثابت: هرگز دو برگشت برای یک پرداخت ساخته نمی‌شود
     try{
-      await runTransaction(db, async (tx)=>{
-        const snap=await tx.get(payRef);
-        if(!snap.exists()) throw new Error('پرداخت پیدا نشد.');
-        const original=snap.data();
-        const built = buildPaymentReversal({ original, id:revId, ts:Date.now(), date:todayISO(), userId:(this.user&&this.user.email)||'', reason });
-        const reversal=built.reversal, originalPatch=built.originalPatch;
-        const amt=Number(original.amount)||0;
-        const isCust=original.partyType==='customer';
-        const partyRef=doc(cols[isCust?'customers':'suppliers'], original.partyId);
-        const balField=(!isCust && original.currency==='USD') ? 'balanceUSD' : 'balance';
-        const alloc=Number(original.allocatedAmount)||0;
-        let saleSnap=null;
-        if(original.saleId && alloc>0) saleSnap=await tx.get(doc(cols.sales, original.saleId)); // همهٔ خواندن‌ها قبل از نوشتن
-        const clean={}; Object.keys(reversal).forEach(k=>{ if(reversal[k]!==undefined) clean[k]=reversal[k]; });
-        clean.allocatedAmount = -alloc;
-        tx.set(doc(cols.payments, revId), clean);
-        tx.update(payRef, originalPatch);
-        tx.update(partyRef, { [balField]: increment(amt) });
-        if(saleSnap && saleSnap.exists()){
-          const s=saleSnap.data();
-          tx.update(doc(cols.sales, original.saleId), { settled: increment(-alloc), remaining: increment(alloc), ...this.editMeta() });
-          this.audit(tx, { action:'reverse', entityType:'sale', entityId:original.saleId, before:s, after:{ ...s, remaining: round2((Number(s.remaining)||0)+alloc) } });
-        }
-        this.audit(tx, { action:'void', entityType:'payment', entityId:paymentId, before:original, after:{ ...original, ...originalPatch } });
-      });
+      const original=this.state.payments.find(x=>x.id===paymentId);
+      if(!original) throw new Error('پرداخت پیدا نشد.');
+      const built = buildPaymentReversal({ original, id:revId, ts:Date.now(), date:todayISO(), userId:(this.user&&this.user.email)||'', reason });
+      const reversal=built.reversal, originalPatch=built.originalPatch;
+      const amt=Number(original.amount)||0;
+      const isCust=original.partyType==='customer';
+      const partyRef=doc(cols[isCust?'customers':'suppliers'], original.partyId);
+      const balField=(!isCust && original.currency==='USD') ? 'balanceUSD' : 'balance';
+      const alloc=Number(original.allocatedAmount)||0;
+      const s=(original.saleId && alloc>0) ? this.state.sales.find(x=>x.id===original.saleId) : null;
+      const clean={}; Object.keys(reversal).forEach(k=>{ if(reversal[k]!==undefined) clean[k]=reversal[k]; });
+      clean.allocatedAmount = -alloc;
+      const batch=writeBatch(db);
+      batch.set(doc(cols.payments, revId), clean);
+      batch.update(doc(cols.payments, paymentId), originalPatch);
+      batch.update(partyRef, { [balField]: increment(amt) });
+      if(s){
+        batch.update(doc(cols.sales, original.saleId), { settled: increment(-alloc), remaining: increment(alloc), ...this.editMeta() });
+        this.audit(batch, { action:'reverse', entityType:'sale', entityId:original.saleId, before:s, after:{ ...s, remaining: round2((Number(s.remaining)||0)+alloc) } });
+      }
+      this.audit(batch, { action:'void', entityType:'payment', entityId:paymentId, before:original, after:{ ...original, ...originalPatch } });
+      await batch.commit();
       this.toast('پرداخت باطل شد');
     }catch(e){
       console.error('void payment', e);
       if(e && (e.code==='permission-denied' || e.code==='firestore/permission-denied')) throw new Error('اجازهٔ ابطال پرداخت داده نشد؛ قوانین Firestore را بررسی کنید (فقط مالک می‌تواند باطل کند).');
-      throw new Error((e&&e.message&&e.message.indexOf('باطل')>=0)?e.message:'ابطال پرداخت انجام نشد؛ اتصال اینترنت را بررسی کنید و دوباره تلاش کنید.');
+      throw new Error((e&&e.message&&e.message.indexOf('باطل')>=0)?e.message:('ابطال پرداخت انجام نشد. '+((e&&e.message)||'')));
     }
   },
   async submitPartyPayment(type,id){
@@ -4381,6 +4459,7 @@ const App = {
     reader.readAsText(file);
   },
   async _runImportBackup(parsed, input){
+    if(!navigator.onLine){ this.toastError('بازیابی از فایل پشتیبان فقط با اینترنت ممکن است (حجم زیاد و باید سرور تأیید کند).'); return; }
     try{
       this._downloadJSON(buildBackup({ businessId:BIZ_ID, state:this.state, appVersion:'hesabdari-app' }), 'auto-backup-before-import-'+Date.now()+'.json');
 
@@ -4496,6 +4575,7 @@ const App = {
     await flush();
   },
   async _runWipeAll(){
+    if(!navigator.onLine){ this.toastError('پاک‌کردن کامل اطلاعات فقط با اینترنت ممکن است.'); return; }
     this._downloadJSON(buildBackup({ businessId:BIZ_ID, state:this.state, appVersion:'hesabdari-app' }), 'auto-backup-before-wipe-'+Date.now()+'.json');
     try{
       for(const name of COLLECTIONS){
