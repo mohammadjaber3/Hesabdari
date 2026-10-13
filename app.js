@@ -12,7 +12,7 @@ import {
 } from "./firebase-sdk.js";
 import {
   round2, round4, fmtQty, todayISO, addDaysISO, daysBetweenISO, startOfWeekISO, startOfMonthISO, dateLabelFa,
-  setBusinessTimezone, calcInvoice, rebalanceAfterTotalChange, nextAvgCost, describeAuthError,
+  setBusinessTimezone, calcInvoice, rebalanceAfterTotalChange, calculateReturnRefund, nextAvgCost, describeAuthError,
   makePinRecord, verifyPin, pinStateAfterFailure, pinStateAfterSuccess, pinLockRemainingMs,
   buildBackup, validateBackup, normalizeName
 } from "./core.js";
@@ -283,7 +283,7 @@ async function compressImageForStorage(file){
   throw new Error('حجم عکس بعد از فشرده‌سازی هنوز زیاد است؛ لطفاً با نور بهتر یا نزدیک‌تر دوباره عکس بگیرید.');
 }
 function dateLabel(d){ return dateLabelFa(d); }
-function startOfWeek(d){ return startOfWeekISO(d, 0); } // 0=یکشنبه (رفتار قبلی)؛ 6=شنبه
+function startOfWeek(d){ return startOfWeekISO(d, 6); } // هفتهٔ کاری افغانستان از شنبه شروع می‌شود
 function startOfMonth(d){ return startOfMonthISO(d); }
 
 function defaultSettings(){
@@ -1580,7 +1580,7 @@ const App = {
     } else {
       product = this.state.products.find(p=>p.id===pid);
     }
-    if(!product){ this.toast('محصول یافت نشد'); return; }
+    if(!product){ this.toast('محصول پیدا نشد.'); return; }
     if(!this.transactionUnits(product).length){ this.toast('برای این محصول هنوز واحد فروش مثل کارتن، قوطی یا بسته تعریف نشده است.'); return; }
     const u = this.unitByName(product, (document.getElementById('sp-unit')||{}).value);
     const qtyIn = parseFloat(document.getElementById('sp-qty').value);
@@ -2173,9 +2173,9 @@ const App = {
     this.updateUnitHint('pp');
   },
   productOptions(){
-    const sorted=[...this.state.products].sort((a,b)=>String(a.name).localeCompare(String(b.name),'fa'));
+    const sorted=this.state.products.slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'fa'));
     return '<option value="">— انتخاب محصول از فهرست —</option>' +
-      sorted.map(p=>`<option value="${p.id}">${escapeHtml(p.name)} — موجودی: ${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</option>`).join('') +
+      sorted.map(p=>`<option value="${p.id}">${escapeHtml(p.name)}${p.archived?' — بایگانی‌شده':''} — موجودی: ${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</option>`).join('') +
       '<option value="__new__">+ محصول جدید</option>';
   },
 
@@ -2194,7 +2194,7 @@ const App = {
     } else {
       product = this.state.products.find(p=>p.id===pid);
     }
-    if(!product){ this.toast('محصول یافت نشد'); return; }
+    if(!product){ this.toast('محصول پیدا نشد.'); return; }
     if(!this.transactionUnits(product).length){ this.toast('برای این محصول هنوز واحد خرید مثل کارتن، قوطی یا بسته تعریف نشده است.'); return; }
     const u = this.unitByName(product, (document.getElementById('pp-unit')||{}).value);
     const qtyIn = parseFloat(document.getElementById('pp-qty').value);
@@ -2248,7 +2248,7 @@ const App = {
 
     let supplierId=null, supplierNameFinal=supName||'—';
     if(supName){
-      const supplier=this.state.suppliers.find(c=>c.name===supName);
+      const supplier=this.state.suppliers.find(c=>normalizeName(c.name)===normalizeName(supName));
       if(supplier){ supplierId=supplier.id; supplierNameFinal=supplier.name; }
       else supplierId=uid();
     } else if(remaining>0.001){
@@ -2264,10 +2264,11 @@ const App = {
     };
     if(billImage) newPurchase.billImage = billImage;
 
-    /* خرید و میانگین قیمت: وقتی آنلاین هستیم، تغییر موجودی و avgCost داخل
-       یک transaction انجام می‌شود. بنابراین دو دستگاه نمی‌توانند avgCost را
-       بر اساس موجودی قدیمی محاسبه و روی هم overwrite کنند. در حالت آفلاین،
-       Firestore تغییرات را محلی صف می‌کند و بعد از اتصال reconcile باید اجرا شود. */
+    /* خرید و میانگین قیمت در یک batch نوشته می‌شوند تا خود فاکتور، تغییر موجودی
+       و ثبت دفتر انبار با هم پذیرفته یا رد شوند. توجه: این batch برای avgCost
+       قفل هم‌زمانی ایجاد نمی‌کند؛ دو خرید هم‌زمان از دو دستگاه هنوز به راهکار
+       مبتنی بر دفتر حرکات/تطبیق پس از همگام‌سازی نیاز دارند. در حالت آفلاین باید
+       همین مسیر سریع و محلی حفظ شود، بنابراین این قسمت را transaction نکردیم. */
     const commitOfflineBatch = async()=>{
       App._mv('PURCHASE','خرید'); const batch = writeBatch(db);
       if(supName){
@@ -2522,14 +2523,15 @@ const App = {
   },
   async _applySaleReturn(sale, idx, qty, qtyLabel, reason){
     const it=sale.items[idx];
-    const refund = round2(qty*it.unitPrice);
+    // تخفیف کلی فاکتور باید متناسب با ارزش اقلام مرجوع‌شده برگردد.
+    // اختلاف تخصیص تخفیف قبل/بعد از این مرجوعی باعث می‌شود مرجوعی چندمرحله‌ای هم جمعاً درست بماند.
+    const refund = calculateReturnRefund({ items:sale.items, itemIndex:idx, qty, discount:sale.discount||0 });
     const refundCost = round2(qty*(it.cost||0));
-    const rb = rebalanceAfterTotalChange({ total:sale.total, paid:sale.paid, settled:sale.settled||0, newTotal:round2(sale.total-refund) });
+    const rb = rebalanceAfterTotalChange({ total:sale.total, paid:sale.paid, settled:sale.settled||0, newTotal:Math.max(0,round2(sale.total-refund)) });
 
     const newItems = sale.items.map((x,i)=> i===idx ? {...x, returnedQty:(x.returnedQty||0)+qty} : x);
-    const newReturns = [...sale.returns, {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, qtyLabel: qtyLabel||this.itemQtyLabel(it,qty), unitPrice:it.unitPrice, amount:refund}];
+    const newReturns = [...(sale.returns||[]), {id:uid(), ts:Date.now(), date:todayISO(), itemIndex:idx, name:it.name, qty, qtyLabel: qtyLabel||this.itemQtyLabel(it,qty), unitPrice:it.unitPrice, amount:refund}];
 
-    // با تخفیف روی فاکتور، مرجوعیِ کامل نباید مجموع را منفی کند (مثل لغو کامل)
     const newTotal = Math.max(0, round2(sale.total-refund)), newPaid = rb.paid;
     const dropped = round2(sale.total-newTotal); // مقداری که واقعاً از مجموع فاکتور کم شد
     // رویدادِ جدا برای این مرجوعی (فاکتور اصلی تاریخ خودش را حفظ می‌کند)
@@ -2569,7 +2571,8 @@ const App = {
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
     let runningTotal=sale.total, runningPaid=sale.paid, runningCost=sale.totalCost;
     const newItems=[...sale.items];
-    const newReturns=[...sale.returns];
+    const newReturns=[...(sale.returns||[])];
+    const priorReturnsCount=newReturns.length;
     const stockDeltas={}; const evItems=[]; let refundCostSum=0;
     sale.items.forEach((it,idx)=>{
       const sellable=it.qty-(it.returnedQty||0);
@@ -2582,10 +2585,20 @@ const App = {
       stockDeltas[it.productId]=(stockDeltas[it.productId]||0)+sellable;
     });
 
-    // لغو کامل: مجموع جدید صفر است؛ پول نقدِ هنگام فروش مسترد می‌شود و پرداخت‌های تخصیص‌یافته به اعتبار مشتری تبدیل می‌شوند
-    const rb = rebalanceAfterTotalChange({ total:sale.total, paid:sale.paid, settled:sale.settled||0, newTotal:Math.max(0,round2(runningTotal)) });
-    runningTotal = Math.max(0, round2(runningTotal)); runningPaid = rb.paid;
-    const evId=uid(); const dropped=round2((Number(sale.total)||0)-runningTotal);
+    // ابطال کامل باید ماندهٔ خالص فعلی فاکتور را به صفر برساند؛ قیمت خام اقلام شامل تخفیف کلی نیست.
+    // مبلغ رویداد هر قلم به نسبت ارزش ناخالص اقلام باقی‌مانده تقسیم می‌شود تا جمع دقیقاً با ماندهٔ خالص فاکتور برابر باشد.
+    const totalRemainingGross = evItems.reduce((sum,x)=>sum+Math.max(0,Number(x.qty)||0)*Math.max(0,Number(x.unitPrice)||0),0);
+    let amountLeft = Math.max(0,round2(Number(sale.total)||0));
+    evItems.forEach((x,i)=>{
+      const gross = Math.max(0,Number(x.qty)||0)*Math.max(0,Number(x.unitPrice)||0);
+      const amount = i===evItems.length-1 ? amountLeft : (totalRemainingGross>0 ? Math.min(amountLeft,round2((Number(sale.total)||0)*gross/totalRemainingGross)) : 0);
+      x.amount=round2(amount); amountLeft=round2(amountLeft-x.amount);
+      if(newReturns[priorReturnsCount+i]) newReturns[priorReturnsCount+i].amount=x.amount;
+    });
+    runningTotal = 0;
+    const rb = rebalanceAfterTotalChange({ total:sale.total, paid:sale.paid, settled:sale.settled||0, newTotal:0 });
+    runningPaid = rb.paid;
+    const evId=uid(); const dropped=round2(Number(sale.total)||0);
     const ev=buildReturnEvent({ id:evId, ts:Date.now(), date:todayISO(), sale, kind:'cancel', items:evItems,
       amount:dropped, cost:refundCostSum, reason:'ابطال کامل فاکتور', userId:(this.user&&this.user.email)||'',
       cashRefund:rb.cashRefund, debtReduction:Math.max(0, round2((Number(sale.remaining)||0)-rb.remaining)), releasedSettled:rb.releasedSettled });
@@ -2766,9 +2779,9 @@ const App = {
      (نه تایپ دستی نام) و انتخاب واحد و قیمت خودکار همان واحد
      ========================================================= */
   productOptionsNoNew(){
-    const sorted=[...this.state.products].sort((a,b)=>String(a.name).localeCompare(String(b.name),'fa'));
+    const sorted=this.state.products.slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'fa'));
     return '<option value="">— انتخاب از فهرست محصولات —</option>' +
-      sorted.map(p=>`<option value="${p.id}">${escapeHtml(p.name)} — موجودی: ${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</option>`).join('');
+      sorted.map(p=>`<option value="${p.id}">${escapeHtml(p.name)}${p.archived?' — بایگانی‌شده':''} — موجودی: ${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</option>`).join('');
   },
   _aiBody(mode, curLbl){
     return `
@@ -3561,7 +3574,7 @@ const App = {
     return this.stockInUnit(p, u) <= t;
   },
   lowStockList(){
-    return [...this.state.products].filter(p=>this.isLowStock(p)).sort((a,b)=>(a.stock||0)-(b.stock||0));
+    return [...this.state.products].filter(p=>!p.archived && this.isLowStock(p)).sort((a,b)=>(a.stock||0)-(b.stock||0));
   },
   renderMore(){
     if(this.sub==='settings' && !this.isAdmin()){
@@ -4046,13 +4059,13 @@ const App = {
     }
   },
   deleteProduct(id){
-    if(!this.isOwner()){ this.toast('فقط مدیر می‌تواند محصول را حذف کند.'); return; }
-    const p=this.state.products.find(x=>x.id===id); if(!p) return;
+    if(!this.isOwner()){ this.toast('فقط مدیر می‌تواند محصول را بایگانی کند.'); return; }
+    const p=this.state.products.find(x=>x.id===id); if(!p || p.archived) return;
     this.openConfirmModal({
-      title:'حذف محصول',
-      msg:'«'+p.name+'» حذف شود؟ این کار سابقهٔ فروش/خرید را تغییر نمی‌دهد.',
-      danger:true, confirmLabel:'حذف شود',
-      onConfirm: ()=> deleteDoc(doc(cols.products, id)).then(()=>this.toast('حذف شد')).catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); })
+      title:'بایگانی محصول',
+      msg:'«'+p.name+'» بایگانی شود؟ کالا از سابقه حذف نمی‌شود و همچنان در فهرست خرید و فروش قابل انتخاب خواهد بود.',
+      danger:true, confirmLabel:'بایگانی شود',
+      onConfirm: ()=> updateDoc(doc(cols.products, id), { archived:true, archivedAt:Date.now(), archivedBy:(this.user&&this.user.email)||'' }).then(()=>this.toast('محصول بایگانی شد؛ در فهرست خرید و فروش هم باقی می‌ماند.')).catch(e=>{ console.error(e); App.toastError('خطا در بایگانی محصول؛ دوباره تلاش کنید.'); })
     });
   },
   renderLowStock(){
@@ -4082,11 +4095,11 @@ const App = {
       const stockInDef=this.stockInUnit(p,defUnit);
       const priceLine = txUnits.map(u=>u.name+': '+fmt2(this.unitSellPrice(p,u))+(this.isUnitPriceManual(p,u)?'*':'')).join(' · ');
       const costLine  = txUnits.map(u=>u.name+': '+fmt2(this.unitCost(p,u))).join(' · ');
-      return `<div class="row-item"><div class="r-left"><b>${escapeHtml(p.name)}</b>${ladder.length>1?`<span class="sub">${escapeHtml(this.unitLadderLabel(p))}</span>`:''}<span class="sub">فروش — ${escapeHtml(priceLine)}</span><span class="sub">تمام‌شده — ${escapeHtml(costLine)}</span></div>
+      return `<div class="row-item"><div class="r-left"><b>${escapeHtml(p.name)}</b>${p.archived?'<span class="sub">بایگانی‌شده — همچنان قابل انتخاب در خرید و فروش</span>':''}${ladder.length>1?`<span class="sub">${escapeHtml(this.unitLadderLabel(p))}</span>`:''}<span class="sub">فروش — ${escapeHtml(priceLine)}</span><span class="sub">تمام‌شده — ${escapeHtml(costLine)}</span></div>
       <div class="r-right" style="display:flex;align-items:center;gap:10px;">
         <span class="badge ${this.isLowStock(p,threshold)?'red':'gold'} num" title="${escapeHtml(fmtQty(stockInDef)+' '+defUnit.name)}">${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</span>
-        ${owner?`<span class="icon-btn" onclick="App.editProductUnits('${p.id}')" title="ویرایش واحدها و قیمت">${ic('sliders',16)}</span>`:''}
-        ${owner?`<span class="menu-dots" onclick='App.openActionMenu([
+        ${owner&&!p.archived?`<span class="icon-btn" onclick="App.editProductUnits('${p.id}')" title="ویرایش واحدها و قیمت">${ic('sliders',16)}</span>`:''}
+        ${owner&&!p.archived?`<span class="menu-dots" onclick='App.openActionMenu([
           {label:"ویرایش واحدها و قیمت‌ها", icon:"sliders", onClick:()=>App.editProductUnits("${p.id}")},
           {label:"اصلاح موجودی", icon:"package", onClick:()=>App.adjustProductStock("${p.id}")},
           {label:"ویرایش نام و قیمت پایه", icon:"pencil", onClick:()=>App.editProduct("${p.id}")},

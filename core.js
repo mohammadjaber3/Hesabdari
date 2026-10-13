@@ -7,6 +7,25 @@
 /* ---------- گرد کردن ---------- */
 export function round2(n){ return Math.round((Number(n)||0)*100)/100; }
 export function round4(n){ return Math.round((Number(n)||0)*10000)/10000; }
+
+/** مبلغ خالص مرجوعی با تخصیص متناسب تخفیف کلی فاکتور.
+ * items شامل qty، returnedQty و unitPrice است؛ itemIndex قلم مرجوعی را مشخص می‌کند.
+ * تخصیص تخفیف بر مبنای تغییر مبلغ تجمعی اقلام مرجوعی است تا مرجوعی چندمرحله‌ای جمعاً دقیق بماند.
+ */
+export function calculateReturnRefund({ items, itemIndex, qty, discount }){
+  const list = Array.isArray(items) ? items : [];
+  const item = list[itemIndex];
+  if(!item) throw new Error('قلم فاکتور برای مرجوعی پیدا نشد.');
+  const price = Math.max(0, num(item.unitPrice));
+  const quantity = Math.max(0, num(qty));
+  const grossSubtotal = round2(list.reduce((sum,x)=>sum+Math.max(0,num(x.qty))*Math.max(0,num(x.unitPrice)),0));
+  const discountAmount = Math.min(grossSubtotal,Math.max(0,num(discount)));
+  const returnedBefore = round2(list.reduce((sum,x)=>sum+Math.max(0,num(x.returnedQty))*Math.max(0,num(x.unitPrice)),0));
+  const returnedAfter = round2(returnedBefore+quantity*price);
+  const discountBefore = grossSubtotal>0 ? round2(discountAmount*Math.min(grossSubtotal,returnedBefore)/grossSubtotal) : 0;
+  const discountAfter = grossSubtotal>0 ? round2(discountAmount*Math.min(grossSubtotal,returnedAfter)/grossSubtotal) : 0;
+  return Math.max(0,round2(quantity*price-Math.max(0,discountAfter-discountBefore)));
+}
 export function fmtQty(n){
   const r = Math.round((Number(n)||0)*1000)/1000;
   return Number.isInteger(r) ? r.toLocaleString('en-US') : String(r);
@@ -59,7 +78,7 @@ export function daysBetweenISO(a, b){
   if(!pa || !pb) return 0;
   return Math.round((Date.UTC(pb.y,pb.mo-1,pb.d) - Date.UTC(pa.y,pa.mo-1,pa.d))/86400000);
 }
-/* weekStartsOn: 0=یکشنبه (رفتار فعلی برنامه)، 6=شنبه */
+/* weekStartsOn: 0=یکشنبه، 6=شنبه */
 export function startOfWeekISO(iso, weekStartsOn){
   const ws = (weekStartsOn===undefined || weekStartsOn===null) ? 0 : weekStartsOn;
   const diff = (weekdayIndex(iso) - ws + 7) % 7;
