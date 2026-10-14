@@ -1281,7 +1281,7 @@ const App = {
       cash -= paidAFN;
     });
     s.payments.filter(p=>p.type==='pay').forEach(p=>{
-      const raw = (Number(p.amount)||0) - (p.purchaseId ? (Number(p.allocatedAmount)||0) : 0); // بخش تخصیص‌یافته به بل خرید قبلاً در purchase.paid است
+      const raw = (Number(p.amount)||0) - (p.purchaseId ? (Number(p.allocatedAmount)||0) : 0); // بخش تخصیص‌یافته به بل قبلاً در purchase.paid است
       const amtAFN = p.currency==='USD' ? raw*((Number(p.rate)||this.usdRate())||0) : raw;
       cash -= amtAFN;
     });
@@ -3265,7 +3265,7 @@ const App = {
     } else {
       history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید'+(s.currency==='USD'?' (دالر)':''),amount:s.total,paid:s.paid,purchaseId:s.id,status:s.status,currency:s.currency||'AFN'}));
     }
-    const pays = this.state.payments.filter(x=>x.partyId===p.id || (x.type==='offset' && x.counterpartId===p.id)).map(x=>({date:x.date,ts:x.ts,label:(x.reversalOf?'↩ ابطال — ':'')+(x.type==='offset'?'تهاتر با '+(x.partyId===p.id?(x.counterpartName||''):(x.partyName||'')):(x.type==='receive'?'دریافت پول':'پرداخت پول'))+(x.currency==='USD'?' (دالر)':''),amount:x.amount,paid:null,isPayment:true,paymentId:x.id,voided:!!x.voided,reversalOf:x.reversalOf||'',receiptImage:x.receiptImage||null,who:this.whoLabel(x),currency:x.currency||'AFN'}));
+    const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:(x.reversalOf?'↩ ابطال — ':'')+(x.type==='receive'?'دریافت پول':'پرداخت پول')+(x.currency==='USD'?' (دالر)':''),amount:x.amount,paid:null,isPayment:true,paymentId:x.id,voided:!!x.voided,reversalOf:x.reversalOf||'',receiptImage:x.receiptImage||null,who:this.whoLabel(x),currency:x.currency||'AFN'}));
     const openings = (this.state.openingEntries||[]).filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:'بدهی افتتاحیه (قبل از سیستم)'+(x.currency==='USD'?' (دالر)':''),amount:x.amount,isOpening:true,currency:x.currency||'AFN'}));
     history = [...history,...pays,...openings].sort((a,b)=>(b.ts||0)-(a.ts||0));
 
@@ -3304,7 +3304,6 @@ const App = {
       </div>
       <button class="btn btn-green" onclick="App.recordPartyPayment('${type}','${p.id}')">${ic(type==='customers'?'arrow-left':'arrow-right',16)}${actionLabel}</button>
       <button class="btn btn-outline" onclick="App.setOpeningBalance('${type}','${p.id}')">${ic('clipboard',16)}ثبت/اصلاح بدهی افتتاحیه (قبل از سیستم)</button>
-      <button class="btn btn-outline" onclick="App.openOffsetForm('${type}','${p.id}')">${ic('clipboard',16)}تهاتر با طرف مقابل (جبران متقابل)</button>
       ${this.payFormOpen ? `
       <div class="subpanel">
         <div>
@@ -3333,7 +3332,6 @@ const App = {
           </div>
         </div>
       </div>` : ''}
-    ${this.offsetFormOpen && this.offsetFor===p.id ? this.offsetFormHTML(type,p) : ''}
     </div>
     <h2 class="section-title">سابقهٔ معاملات (${history.length})</h2>
     <div class="card">${rows}</div>
@@ -3351,64 +3349,6 @@ const App = {
     return `<label>بابت کدام بل خرید؟</label>
           <select id="pay-purchase"><option value="">بدون تخصیص (حساب عمومی شرکت)</option>${open.map(s=>`<option value="${s.id}">بل ${escapeHtml(this.purchaseNoLabel(s.id))} — باقی ${fmt(s.remaining)}${s.currency==='USD'?' دالر':''}</option>`).join('')}</select>
           <div class="field-note">اگر بل را انتخاب کنید، همان بل تسویه می‌شود و در صفحهٔ بل خرید دیگر بدهکار نشان داده نمی‌شود؛ مبلغ اضافه بدون تخصیص می‌ماند.</div>`;
-  },
-  openOffsetForm(type,id){
-    this.offsetFormOpen=true; this.offsetFor=id; this.payFormOpen=false;
-    this._offsetTxId=uid();
-    this.render();
-  },
-  cancelOffsetForm(){ this.offsetFormOpen=false; this.render(); },
-  offsetFormHTML(type,p){
-    if((p.balance||0)<=0.5) return `<div class="subpanel"><div class="field-note">برای تهاتر، این طرف باید بدهی ریالی (افغانی) داشته باشد.</div><button class="btn btn-outline" onclick="App.cancelOffsetForm()">بستن</button></div>`;
-    const otherType = type==='customers' ? 'suppliers' : 'customers';
-    const others = (this.state[otherType]||[]).filter(c=>(c.balance||0)>0.5);
-    if(!others.length) return `<div class="subpanel"><div class="field-note">طرف مقابلی با بدهی ریالی پیدا نشد.</div><button class="btn btn-outline" onclick="App.cancelOffsetForm()">بستن</button></div>`;
-    const label = type==='customers' ? 'عمده‌فروشی که به او بدهکارید' : 'مشتری که به شما بدهکار است';
-    return `<div class="subpanel">
-        <div>
-          <label>${label}</label>
-          <select id="offset-party">${others.map(c=>`<option value="${c.id}">${escapeHtml(c.name)} — بدهی ${fmt(c.balance)}</option>`).join('')}</select>
-          <label>مبلغ تهاتر</label>
-          <input id="offset-amount" type="number" inputmode="decimal" step="0.01" placeholder="0">
-          <div class="field-note">تهاتر هر دو بدهی را هم‌اندازه کم می‌کند (بدون پول نقد). حداکثر: تا کمترین مانده‌ی دو طرف.</div>
-          <div class="grid2" style="margin-top:10px;">
-            <button class="btn btn-outline" style="margin-top:0;" onclick="App.cancelOffsetForm()">انصراف</button>
-            <button class="btn btn-primary" style="margin-top:0;" onclick="App.submitOffset('${type}','${p.id}')">${ic('check',16)}ثبت تهاتر</button>
-          </div>
-        </div>
-      </div>`;
-  },
-  async submitOffset(type,id){
-    if(this._offsetBusy) return;
-    this._offsetBusy=true;
-    try{
-      const amt=parseFloat(document.getElementById('offset-amount').value);
-      if(!amt || amt<=0){ this.toast('مبلغ تهاتر را درست بنویسید'); return; }
-      const cpId=document.getElementById('offset-party').value;
-      const custId = type==='customers' ? id : cpId;
-      const supId  = type==='customers' ? cpId : id;
-      const cust=this.state.customers.find(x=>x.id===custId);
-      const sup=this.state.suppliers.find(x=>x.id===supId);
-      if(!cust || !sup){ this.toast('طرف مقابل پیدا نشد.'); return; }
-      if((cust.balance||0)<=0.5 || (sup.balance||0)<=0.5){ this.toast('هر دو طرف باید بدهی ریالی (افغانی) داشته باشند.'); return; }
-      const max=Math.min(cust.balance, sup.balance);
-      if(amt>max+0.001){ this.toast('مبلغ از حداکثر قابل تهاتر ('+fmt(max)+') بیشتر است.'); return; }
-      const txId=this._offsetTxId || uid();
-      if(this.state.payments.some(x=>x.id===txId)){ this.toast('این تهاتر قبلاً ثبت شده است.'); return; }
-      const offDoc={id:txId, ts:Date.now(), date:todayISO(), type:'offset', partyType:'customer', partyId:cust.id, partyName:cust.name,
-        counterpartType:'supplier', counterpartId:sup.id, counterpartName:sup.name, amount:amt, currency:'AFN', status:'posted',
-        userId:(this.user&&this.user.email)||'', allocatedAmount:0, ...this.recordMeta()};
-      const batch=writeBatch(db);
-      batch.update(doc(cols.customers, cust.id), { balance: increment(-amt) });
-      batch.update(doc(cols.suppliers, sup.id), { balance: increment(-amt) });
-      this.audit(batch, { action:'create', entityType:'payment', entityId:txId, before:null, after:offDoc });
-      batch.set(doc(cols.payments, txId), offDoc);
-      batch.commit().catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
-      this._offsetTxId=undefined;
-      this.offsetFormOpen=false;
-      this.toast('تهاتر ثبت شد');
-      this.render();
-    } finally { this._offsetBusy=false; }
   },
   /* ابطال پرداخت: پرداخت اصلی حذف نمی‌شود؛ یک رویداد معکوس (مبلغ منفی) ثبت می‌شود،
      مانده طرف حساب و فاکتور برمی‌گردد، و Audit ثبت می‌شود. همه داخل یک transaction. */
@@ -3456,9 +3396,6 @@ const App = {
       }
       if(original.purchaseId && alloc>0){
         batch.update(doc(cols.purchases, original.purchaseId), { paid: increment(-alloc), remaining: increment(alloc), ...this.editMeta() });
-      }
-      if(original.type==='offset' && original.counterpartId){
-        batch.update(doc(cols.suppliers, original.counterpartId), { balance: increment(amt) });
       }
       this.audit(batch, { action:'void', entityType:'payment', entityId:paymentId, before:original, after:{ ...original, ...originalPatch } });
       await batch.commit();
@@ -3634,14 +3571,22 @@ const App = {
     const arr = type==='customers' ? this.state.customers : this.state.suppliers;
     const p=arr.find(x=>x.id===id); if(!p) return;
     const hasDebt = Math.abs(p.balance||0)>0.5 || (type==='suppliers' && Math.abs(p.balanceUSD||0)>0.5);
-    if(hasDebt){ this.toast('این مشتری/فروشنده هنوز بدهی یا طلب دارد؛ ابتدا حساب را تسویه کنید.'); return; }
+    const hasActivity = type==='customers'
+      ? (this.state.sales.some(s=>s.customerId===id) || this.state.payments.some(x=>x.partyId===id))
+      : (this.state.purchases.some(s=>s.supplierId===id) || this.state.payments.some(x=>x.partyId===id));
+    if(hasDebt && hasActivity){ this.toast('این طرف فاکتور یا پرداخت دارد؛ ابتدا حساب را تسویه کنید.'); return; }
+    const openings = (this.state.openingEntries||[]).filter(x=>x.partyId===id);
+    const openMsg = hasDebt ? '\nبدهی افتتاحیهٔ اشتباهی‌اش هم با آن پاک می‌شود.' : '';
     this.openConfirmModal({
       title:'حذف از فهرست',
-      msg:'«'+p.name+'» از فهرست حذف شود؟ سابقهٔ فاکتورهای قبلی آن باقی می‌ماند.',
+      msg:'«'+p.name+'» از فهرست حذف شود؟'+openMsg+(hasActivity?' سابقهٔ فاکتورهای قبلی آن باقی می‌ماند.':''),
       danger:true, confirmLabel:'حذف شود',
       onConfirm: ()=>{
         const colName = type==='customers' ? 'customers' : 'suppliers';
-        deleteDoc(doc(cols[colName], id)).then(()=>this.toast('حذف شد')).catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
+        const batch=writeBatch(db);
+        openings.forEach(o=>batch.delete(doc(cols.openingEntries, o.id)));
+        batch.delete(doc(cols[colName], id));
+        batch.commit().then(()=>this.toast('حذف شد')).catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
         this.detailId=null;
         this.render();
       }
