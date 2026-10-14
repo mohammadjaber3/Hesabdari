@@ -69,7 +69,7 @@ export function reconcileCustomers({ customers, sales, payments, openingEntries 
   return (customers||[]).map(c=>{
     const opening = (openingEntries||[]).filter(o=>o.partyType==='customers' && o.partyId===c.id).reduce((a,o)=>a+(Number(o.amount)||0),0);
     const owed = (sales||[]).filter(s=>s.customerId===c.id).reduce((a,s)=>a+(Number(s.remaining)||0),0);
-    const unalloc = (payments||[]).filter(p=>p.type==='receive' && p.partyId===c.id).reduce((a,p)=>a+(Number(p.amount)||0)-(Number(p.allocatedAmount)||0),0);
+    const unalloc = (payments||[]).filter(p=>(p.type==='receive' || p.type==='offset') && p.partyId===c.id).reduce((a,p)=>a+(Number(p.amount)||0)-(Number(p.allocatedAmount)||0),0);
     return diffRow(c.id, c.name, Number(c.balance)||0, opening + owed - unalloc);
   }).filter(r=>Math.abs(r.diff) > EPS);
 }
@@ -80,7 +80,7 @@ export function reconcileSuppliers({ suppliers, purchases, payments, openingEntr
       const field = cur==='USD' ? 'balanceUSD' : 'balance';
       const opening = (openingEntries||[]).filter(o=>o.partyType==='suppliers' && o.partyId===s.id && (o.currency||'AFN')===cur).reduce((a,o)=>a+(Number(o.amount)||0),0);
       const owed = (purchases||[]).filter(p=>p.supplierId===s.id && (p.currency||'AFN')===cur).reduce((a,p)=>a+(Number(p.remaining)||0),0);
-      const paidLater = (payments||[]).filter(p=>p.type==='pay' && p.partyId===s.id && (p.currency||'AFN')===cur).reduce((a,p)=>a+(Number(p.amount)||0),0);
+      const paidLater = (payments||[]).filter(p=>(p.type==='pay' && p.partyId===s.id && (p.currency||'AFN')===cur) || (p.type==='offset' && p.counterpartId===s.id && cur==='AFN')).reduce((a,p)=>a+(Number(p.amount)||0),0);
       const r = diffRow(s.id, s.name+(cur==='USD'?' ($)':''), Number(s[field])||0, opening + owed - paidLater);
       if(Math.abs(r.diff) > EPS) out.push(r);
     });

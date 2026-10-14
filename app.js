@@ -1281,7 +1281,8 @@ const App = {
       cash -= paidAFN;
     });
     s.payments.filter(p=>p.type==='pay').forEach(p=>{
-      const amtAFN = p.currency==='USD' ? (Number(p.amount)||0)*((Number(p.rate)||this.usdRate())||0) : (Number(p.amount)||0);
+      const raw = (Number(p.amount)||0) - (p.purchaseId ? (Number(p.allocatedAmount)||0) : 0); // بخش تخصیص‌یافته به بل خرید قبلاً در purchase.paid است
+      const amtAFN = p.currency==='USD' ? raw*((Number(p.rate)||this.usdRate())||0) : raw;
       cash -= amtAFN;
     });
     cash -= cashExpensesTotal(s.expenses); // ضایعات پول نقد را کم نمی‌کند
@@ -3264,7 +3265,7 @@ const App = {
     } else {
       history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید'+(s.currency==='USD'?' (دالر)':''),amount:s.total,paid:s.paid,purchaseId:s.id,status:s.status,currency:s.currency||'AFN'}));
     }
-    const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:(x.reversalOf?'↩ ابطال — ':'')+(x.type==='receive'?'دریافت پول':'پرداخت پول')+(x.currency==='USD'?' (دالر)':''),amount:x.amount,paid:null,isPayment:true,paymentId:x.id,voided:!!x.voided,reversalOf:x.reversalOf||'',receiptImage:x.receiptImage||null,who:this.whoLabel(x),currency:x.currency||'AFN'}));
+    const pays = this.state.payments.filter(x=>x.partyId===p.id || (x.type==='offset' && x.counterpartId===p.id)).map(x=>({date:x.date,ts:x.ts,label:(x.reversalOf?'↩ ابطال — ':'')+(x.type==='offset'?'تهاتر با '+(x.partyId===p.id?(x.counterpartName||''):(x.partyName||'')):(x.type==='receive'?'دریافت پول':'پرداخت پول'))+(x.currency==='USD'?' (دالر)':''),amount:x.amount,paid:null,isPayment:true,paymentId:x.id,voided:!!x.voided,reversalOf:x.reversalOf||'',receiptImage:x.receiptImage||null,who:this.whoLabel(x),currency:x.currency||'AFN'}));
     const openings = (this.state.openingEntries||[]).filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:'بدهی افتتاحیه (قبل از سیستم)'+(x.currency==='USD'?' (دالر)':''),amount:x.amount,isOpening:true,currency:x.currency||'AFN'}));
     history = [...history,...pays,...openings].sort((a,b)=>(b.ts||0)-(a.ts||0));
 
@@ -3303,6 +3304,7 @@ const App = {
       </div>
       <button class="btn btn-green" onclick="App.recordPartyPayment('${type}','${p.id}')">${ic(type==='customers'?'arrow-left':'arrow-right',16)}${actionLabel}</button>
       <button class="btn btn-outline" onclick="App.setOpeningBalance('${type}','${p.id}')">${ic('clipboard',16)}ثبت/اصلاح بدهی افتتاحیه (قبل از سیستم)</button>
+      <button class="btn btn-outline" onclick="App.openOffsetForm('${type}','${p.id}')">${ic('clipboard',16)}تهاتر با طرف مقابل (جبران متقابل)</button>
       ${this.payFormOpen ? `
       <div class="subpanel">
         <div>
@@ -3320,6 +3322,7 @@ const App = {
           <select id="pay-sale"><option value="">بدون تخصیص (حساب عمومی مشتری)</option>${open.map(s=>`<option value="${s.id}">فاکتور ${escapeHtml(this.invoiceNoLabel(s.id))} — باقی ${fmt(s.remaining)}</option>`).join('')}</select>
           <div class="field-note">اگر فاکتور را انتخاب کنید، همان فاکتور تسویه می‌شود؛ مبلغ اضافه بدون تخصیص می‌ماند.</div>` : '';
           })() : ''}
+          ${type==='suppliers' ? this.purchasePickHTML(p) : ''}
           <label>تاریخ</label>
           <input id="pay-date" type="date" value="${todayISO()}">
           <label>عکس رسید ${type==='suppliers'?'(پیشنهاد می‌شود ضمیمه کنید)':'(اختیاری)'}</label>
@@ -3330,6 +3333,7 @@ const App = {
           </div>
         </div>
       </div>` : ''}
+    ${this.offsetFormOpen && this.offsetFor===p.id ? this.offsetFormHTML(type,p) : ''}
     </div>
     <h2 class="section-title">سابقهٔ معاملات (${history.length})</h2>
     <div class="card">${rows}</div>
@@ -3341,6 +3345,71 @@ const App = {
     this.render();
   },
   cancelPartyPaymentForm(){ this.payFormOpen=false; this.render(); },
+  purchasePickHTML(p){
+    const open=this.state.purchases.filter(s=>s.supplierId===p.id && s.status!=='cancelled' && (Number(s.remaining)||0)>0.001);
+    if(!open.length) return '';
+    return `<label>بابت کدام بل خرید؟</label>
+          <select id="pay-purchase"><option value="">بدون تخصیص (حساب عمومی شرکت)</option>${open.map(s=>`<option value="${s.id}">بل ${escapeHtml(this.purchaseNoLabel(s.id))} — باقی ${fmt(s.remaining)}${s.currency==='USD'?' دالر':''}</option>`).join('')}</select>
+          <div class="field-note">اگر بل را انتخاب کنید، همان بل تسویه می‌شود و در صفحهٔ بل خرید دیگر بدهکار نشان داده نمی‌شود؛ مبلغ اضافه بدون تخصیص می‌ماند.</div>`;
+  },
+  openOffsetForm(type,id){
+    this.offsetFormOpen=true; this.offsetFor=id; this.payFormOpen=false;
+    this._offsetTxId=uid();
+    this.render();
+  },
+  cancelOffsetForm(){ this.offsetFormOpen=false; this.render(); },
+  offsetFormHTML(type,p){
+    if((p.balance||0)<=0.5) return `<div class="subpanel"><div class="field-note">برای تهاتر، این طرف باید بدهی ریالی (افغانی) داشته باشد.</div><button class="btn btn-outline" onclick="App.cancelOffsetForm()">بستن</button></div>`;
+    const otherType = type==='customers' ? 'suppliers' : 'customers';
+    const others = (this.state[otherType]||[]).filter(c=>(c.balance||0)>0.5);
+    if(!others.length) return `<div class="subpanel"><div class="field-note">طرف مقابلی با بدهی ریالی پیدا نشد.</div><button class="btn btn-outline" onclick="App.cancelOffsetForm()">بستن</button></div>`;
+    const label = type==='customers' ? 'عمده‌فروشی که به او بدهکارید' : 'مشتری که به شما بدهکار است';
+    return `<div class="subpanel">
+        <div>
+          <label>${label}</label>
+          <select id="offset-party">${others.map(c=>`<option value="${c.id}">${escapeHtml(c.name)} — بدهی ${fmt(c.balance)}</option>`).join('')}</select>
+          <label>مبلغ تهاتر</label>
+          <input id="offset-amount" type="number" inputmode="decimal" step="0.01" placeholder="0">
+          <div class="field-note">تهاتر هر دو بدهی را هم‌اندازه کم می‌کند (بدون پول نقد). حداکثر: تا کمترین مانده‌ی دو طرف.</div>
+          <div class="grid2" style="margin-top:10px;">
+            <button class="btn btn-outline" style="margin-top:0;" onclick="App.cancelOffsetForm()">انصراف</button>
+            <button class="btn btn-primary" style="margin-top:0;" onclick="App.submitOffset('${type}','${p.id}')">${ic('check',16)}ثبت تهاتر</button>
+          </div>
+        </div>
+      </div>`;
+  },
+  async submitOffset(type,id){
+    if(this._offsetBusy) return;
+    this._offsetBusy=true;
+    try{
+      const amt=parseFloat(document.getElementById('offset-amount').value);
+      if(!amt || amt<=0){ this.toast('مبلغ تهاتر را درست بنویسید'); return; }
+      const cpId=document.getElementById('offset-party').value;
+      const custId = type==='customers' ? id : cpId;
+      const supId  = type==='customers' ? cpId : id;
+      const cust=this.state.customers.find(x=>x.id===custId);
+      const sup=this.state.suppliers.find(x=>x.id===supId);
+      if(!cust || !sup){ this.toast('طرف مقابل پیدا نشد.'); return; }
+      if((cust.balance||0)<=0.5 || (sup.balance||0)<=0.5){ this.toast('هر دو طرف باید بدهی ریالی (افغانی) داشته باشند.'); return; }
+      const max=Math.min(cust.balance, sup.balance);
+      if(amt>max+0.001){ this.toast('مبلغ از حداکثر قابل تهاتر ('+fmt(max)+') بیشتر است.'); return; }
+      const txId=this._offsetTxId || uid();
+      if(this.state.payments.some(x=>x.id===txId)){ this.toast('این تهاتر قبلاً ثبت شده است.'); return; }
+      const offDoc={id:txId, ts:Date.now(), date:todayISO(), type:'offset', partyType:'customer', partyId:cust.id, partyName:cust.name,
+        counterpartType:'supplier', counterpartId:sup.id, counterpartName:sup.name, amount:amt, currency:'AFN', status:'posted',
+        userId:(this.user&&this.user.email)||'', allocatedAmount:0, ...this.recordMeta()};
+      const batch=writeBatch(db);
+      batch.update(doc(cols.customers, cust.id), { balance: increment(-amt) });
+      batch.update(doc(cols.suppliers, sup.id), { balance: increment(-amt) });
+      this.audit(batch, { action:'create', entityType:'payment', entityId:txId, before:null, after:offDoc });
+      batch.set(doc(cols.payments, txId), offDoc);
+      batch.commit().catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
+      this._offsetTxId=undefined;
+      this.offsetFormOpen=false;
+      this.toast('تهاتر ثبت شد');
+      this.render();
+    } finally { this._offsetBusy=false; }
+  },
   /* ابطال پرداخت: پرداخت اصلی حذف نمی‌شود؛ یک رویداد معکوس (مبلغ منفی) ثبت می‌شود،
      مانده طرف حساب و فاکتور برمی‌گردد، و Audit ثبت می‌شود. همه داخل یک transaction. */
   voidPayment(paymentId){
@@ -3385,6 +3454,12 @@ const App = {
         batch.update(doc(cols.sales, original.saleId), { settled: increment(-alloc), remaining: increment(alloc), ...this.editMeta() });
         this.audit(batch, { action:'reverse', entityType:'sale', entityId:original.saleId, before:s, after:{ ...s, remaining: round2((Number(s.remaining)||0)+alloc) } });
       }
+      if(original.purchaseId && alloc>0){
+        batch.update(doc(cols.purchases, original.purchaseId), { paid: increment(-alloc), remaining: increment(alloc), ...this.editMeta() });
+      }
+      if(original.type==='offset' && original.counterpartId){
+        batch.update(doc(cols.suppliers, original.counterpartId), { balance: increment(amt) });
+      }
       this.audit(batch, { action:'void', entityType:'payment', entityId:paymentId, before:original, after:{ ...original, ...originalPatch } });
       await batch.commit();
       this.toast('پرداخت باطل شد');
@@ -3428,11 +3503,21 @@ const App = {
     const saleSel = (type==='customers' && document.getElementById('pay-sale')) ? document.getElementById('pay-sale').value : '';
     const allocSale = saleSel ? this.state.sales.find(s=>s.id===saleSel && s.customerId===id) : null;
     const alloc = allocatePayment({ sale: allocSale, amount: amt });
+    const purSel = (type==='suppliers' && document.getElementById('pay-purchase')) ? document.getElementById('pay-purchase').value : '';
+    const allocPur = purSel ? this.state.purchases.find(s=>s.id===purSel && s.supplierId===id) : null;
+    if(allocPur && (allocPur.currency||'AFN')!==currency){ this.toast('ارز پرداخت با ارز این بل خرید یکی نیست.'); return; }
+    const purApplied = allocPur ? Math.round(Math.min(Math.max(0,Number(allocPur.remaining)||0), amt)*100)/100 : 0;
     const paymentDoc = {id:paymentId, ts:Date.now(), date, type: type==='customers'?'receive':'pay', partyType:type==='customers'?'customer':'supplier', partyId:id, partyName:p.name, amount:amt, currency, status:'posted', userId:(this.user&&this.user.email)||'', allocatedAmount:0, ...this.recordMeta()};
     if(allocSale && alloc.applied>0){
       paymentDoc.saleId = allocSale.id; paymentDoc.allocatedAmount = alloc.applied;
       batch.update(doc(cols.sales, allocSale.id), { settled: increment(alloc.applied), remaining: increment(-alloc.applied), ...this.editMeta() });
       this.audit(batch, { action:'allocate', entityType:'sale', entityId:allocSale.id, before:allocSale, after:{ ...allocSale, remaining: round2((Number(allocSale.remaining)||0)-alloc.applied) } });
+    }
+    if(allocPur && purApplied>0.001){
+      const purRem = Math.round(((Number(allocPur.remaining)||0)-purApplied)*100)/100;
+      paymentDoc.purchaseId = allocPur.id; paymentDoc.allocatedAmount = purApplied;
+      batch.update(doc(cols.purchases, allocPur.id), { paid: increment(purApplied), remaining: increment(-purApplied), ...this.editMeta() });
+      this.audit(batch, { action:'allocate', entityType:'purchase', entityId:allocPur.id, before:allocPur, after:{ ...allocPur, paid:(Number(allocPur.paid)||0)+purApplied, remaining:purRem } });
     }
     this.audit(batch, { action:'create', entityType:'payment', entityId:paymentId, before:null, after:paymentDoc });
     if(currency==='USD') paymentDoc.rate = payRate;
