@@ -3298,12 +3298,12 @@ const App = {
       ${type==='suppliers' && Math.abs(p.balanceUSD||0)>0.5 ? `<div style="margin-top:6px;text-align:left;"><span class="badge ${p.balanceUSD>0.5?'red':'green'} num">$${fmt2(Math.abs(p.balanceUSD))} ${p.balanceUSD>0.5?'بدهکار (دالر)':'طلبکار (دالر)'}</span>${this.usdRate()>0?`<div class="sub" style="margin-top:2px;">معادل امروز: ${fmt(Math.abs(p.balanceUSD)*this.usdRate())} ${this.state.settings.currency} (به نرخ ${fmt2(this.usdRate())})</div>`:`<div class="sub" style="margin-top:2px;color:var(--red);">نرخ دالر تنظیم نشده — <span onclick="App.quickSetUsdRate()" style="cursor:pointer;text-decoration:underline;">تنظیم کنید</span></div>`}</div>` : ''}
       ${p.phone?`<div class="sub" style="margin-top:6px;display:flex;align-items:center;gap:5px;">${ic('phone',13)}<span class="num">${escapeHtml(p.phone)}</span></div>`:''}
       ${p.address?`<div class="sub" style="display:flex;align-items:center;gap:5px;">${ic('map-pin',13)}${escapeHtml(p.address)}</div>`:''}
-      <div class="grid2" style="margin-top:12px;">
-        <button class="btn btn-outline" style="margin-top:0;" onclick="App.editParty('${type}','${p.id}')">${ic('pencil',15)}ویرایش</button>
-        <button class="btn btn-danger" style="margin-top:0;" onclick="App.deleteParty('${type}','${p.id}')">${ic('trash',15)}حذف</button>
+      <button class="btn btn-green" style="margin-top:12px;" onclick="App.recordPartyPayment('${type}','${p.id}')">${ic(type==='customers'?'arrow-left':'arrow-right',16)}${actionLabel}</button>
+      <div class="grid2" style="margin-top:8px;">
+        <button class="btn btn-outline" style="margin-top:0;" onclick="App.editParty('${type}','${p.id}')">${ic('pencil',15)}ویرایش اطلاعات</button>
+        <button class="btn btn-outline" style="margin-top:0;" onclick="App.setOpeningBalance('${type}','${p.id}')">${ic('clipboard',15)}بدهی افتتاحیه</button>
       </div>
-      <button class="btn btn-green" onclick="App.recordPartyPayment('${type}','${p.id}')">${ic(type==='customers'?'arrow-left':'arrow-right',16)}${actionLabel}</button>
-      <button class="btn btn-outline" onclick="App.setOpeningBalance('${type}','${p.id}')">${ic('clipboard',16)}ثبت/اصلاح بدهی افتتاحیه (قبل از سیستم)</button>
+      <div style="text-align:center;margin-top:10px;"><span onclick="App.deleteParty('${type}','${p.id}')" style="cursor:pointer;color:var(--red);font-size:12px;">${ic('trash',12)} حذف این طرف از فهرست</span></div>
       ${this.payFormOpen ? `
       <div class="subpanel">
         <div>
@@ -3313,6 +3313,7 @@ const App = {
             <option value="USD">دالر</option>
           </select>
           <div class="field-note">نرخ فعلی دالر: <b class="num">${this.usdRate()>0?fmt2(this.usdRate()):'تنظیم نشده'}</b> <span onclick="App.quickSetUsdRate()" style="cursor:pointer;color:var(--gold-d);">ویرایش</span></div>` : ''}
+          ${type==='suppliers' ? this.purchasePickHTML(p) : ''}
           <label>${type==='customers'?'مبلغ دریافتی از مشتری':'مبلغ پرداختی به شرکت/عمده‌فروش'}</label>
           <input id="pay-amount" type="number" inputmode="decimal" step="0.01" placeholder="0">
           ${type==='customers' ? (()=>{
@@ -3321,7 +3322,6 @@ const App = {
           <select id="pay-sale"><option value="">بدون تخصیص (حساب عمومی مشتری)</option>${open.map(s=>`<option value="${s.id}">فاکتور ${escapeHtml(this.invoiceNoLabel(s.id))} — باقی ${fmt(s.remaining)}</option>`).join('')}</select>
           <div class="field-note">اگر فاکتور را انتخاب کنید، همان فاکتور تسویه می‌شود؛ مبلغ اضافه بدون تخصیص می‌ماند.</div>` : '';
           })() : ''}
-          ${type==='suppliers' ? this.purchasePickHTML(p) : ''}
           <label>تاریخ</label>
           <input id="pay-date" type="date" value="${todayISO()}">
           <label>عکس رسید ${type==='suppliers'?'(پیشنهاد می‌شود ضمیمه کنید)':'(اختیاری)'}</label>
@@ -3343,11 +3343,18 @@ const App = {
     this.render();
   },
   cancelPartyPaymentForm(){ this.payFormOpen=false; this.render(); },
+  onPurchasePick(id){
+    const pur=this.state.purchases.find(x=>x.id===id); const amtEl=document.getElementById('pay-amount');
+    if(!pur || !amtEl) return;
+    const curEl=document.getElementById('pay-currency');
+    if(curEl) curEl.value = pur.currency==='USD' ? 'USD' : 'AFN';
+    amtEl.value = (Math.round((Number(pur.remaining)||0)*100)/100).toString();
+  },
   purchasePickHTML(p){
     const open=this.state.purchases.filter(s=>s.supplierId===p.id && s.status!=='cancelled' && (Number(s.remaining)||0)>0.001);
     if(!open.length) return '';
     return `<label>بابت کدام بل خرید؟</label>
-          <select id="pay-purchase"><option value="">بدون تخصیص (حساب عمومی شرکت)</option>${open.map(s=>`<option value="${s.id}">بل ${escapeHtml(this.purchaseNoLabel(s.id))} — باقی ${fmt(s.remaining)}${s.currency==='USD'?' دالر':''}</option>`).join('')}</select>
+          <select id="pay-purchase" onchange="App.onPurchasePick(this.value)"><option value="">بدون تخصیص (حساب عمومی شرکت)</option>${open.map(s=>`<option value="${s.id}">بل ${escapeHtml(this.purchaseNoLabel(s.id))} — باقی ${fmt(s.remaining)}${s.currency==='USD'?' دالر':''}</option>`).join('')}</select>
           <div class="field-note">اگر بل را انتخاب کنید، همان بل تسویه می‌شود و در صفحهٔ بل خرید دیگر بدهکار نشان داده نمی‌شود؛ مبلغ اضافه بدون تخصیص می‌ماند.</div>`;
   },
   /* ابطال پرداخت: پرداخت اصلی حذف نمی‌شود؛ یک رویداد معکوس (مبلغ منفی) ثبت می‌شود،
