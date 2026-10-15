@@ -1443,7 +1443,7 @@ const App = {
       ${this.totalPayableUSD()!==0?`<div class="chip"><div class="t">قرض از عمده‌فروش (دالر)</div><div class="v num">$${fmt2(this.totalPayableUSD())}</div></div>`:''}
       ${this.lowStockList().length?`<div class="chip warn" onclick="App.navigate('more','lowstock')" style="cursor:pointer;"><div class="t">${ic('alert-triangle',12)}کم‌موجودی</div><div class="v num">${this.lowStockList().length} کالا</div></div>`:''}
       ${this.totalPayableUSD()!==0 && this.usdRate()>0?`<div class="chip"><div class="t">مجموع کل قرض به ${cur}</div><div class="v num">${fmt(this.totalPayableCombinedAFN())}</div></div>`:''}
-      <div class="chip set" onclick="App.quickSetUsdRate()" style="cursor:pointer;"><div class="t">${ic('pencil',12)}نرخ دالر</div><div class="v num">${this.usdRate()>0?fmt2(this.usdRate()):'تنظیم کنید'}</div></div>
+      <div class="chip set" ${this.isOwner()?`onclick="App.quickSetUsdRate()" style="cursor:pointer;"`:''}><div class="t">${this.isOwner()?ic('pencil',12):''}نرخ دالر</div><div class="v num">${this.usdRate()>0?fmt2(this.usdRate()):(this.isOwner()?'تنظیم کنید':'—')}</div></div>
     </div>
     <div class="quick-actions">
       <div class="qa-btn" onclick="App.navigate('sale')"><span class="ic">${ic('receipt',19)}</span>فروش جدید</div>
@@ -1895,7 +1895,7 @@ const App = {
         <td class="num">${escapeHtml(this.itemQtyLabelForInvoice(it))}${this.itemBaseNote(it)?`<div class="sub">${escapeHtml(this.itemBaseNote(it))}</div>`:''}</td>
         <td class="num">${fmt(this.itemPricePerTxUnit(it))}<div class="sub">هر ${escapeHtml(this.itemUnitName(it))}</div></td>
         <td class="num">${fmt(it.qty*it.unitPrice)}</td>
-        <td class="no-print">${!cancelled?`<span class="menu-dots" onclick='App.openActionMenu([
+        <td class="no-print">${(!cancelled && App.canWrite())?`<span class="menu-dots" onclick='App.openActionMenu([
           {label:"مرجوعی این قلم", icon:"rotate-ccw", onClick:()=>App.saleReturnItem("${sale.id}",${idx})},
           {label:"افزودن تعداد", icon:"plus", onClick:()=>App.saleIncreaseItemQty("${sale.id}",${idx})},
           {label:"کم کردن چند ${escapeHtml(it.unit||'عدد')} (کاستی)", icon:"minus", onClick:()=>App.saleShrinkItem("${sale.id}",${idx})}
@@ -2430,7 +2430,7 @@ const App = {
       ${cur==='USD'?`
       <div class="row-item" style="padding:10px 0;">
         <div class="r-left"><b>نرخ فعلی دالر</b><span class="sub">${rate>0?('۱ دالر = '+fmt2(rate)+' '+this.state.settings.currency):'هنوز تنظیم نشده'}</span></div>
-        <div class="r-right"><button class="btn btn-outline btn-sm" onclick="App.quickSetUsdRate()">${ic('pencil',15)}نرخ دالر</button></div>
+        ${this.isOwner()?`<div class="r-right"><button class="btn btn-outline btn-sm" onclick="App.quickSetUsdRate()">${ic('pencil',15)}نرخ دالر</button></div>`:''}
       </div>
       ${rate>0 && total>0?`<div class="field-note">معادل مجموع فاکتور به ${this.state.settings.currency} (به نرخ امروز): <b class="num">${fmt(total*rate)}</b></div>`:''}
       <div class="field-note">قیمت میانگین و فروش کالاها خودکار بر اساس همین نرخ به ${this.state.settings.currency} محاسبه و ذخیره می‌شود.</div>
@@ -2514,7 +2514,7 @@ const App = {
         <td class="num">${escapeHtml(this.itemQtyLabelForInvoice(it))}${this.itemBaseNote(it)?`<div class="sub">${escapeHtml(this.itemBaseNote(it))}</div>`:''}</td>
         <td class="num">${pur.currency==='USD'?fmt2(this.itemCostPerTxUnit(it)):fmt(this.itemCostPerTxUnit(it))}<div class="sub">هر ${escapeHtml(this.itemUnitName(it))}${this.itemFactor(it)>1?` · هر ${escapeHtml(it.unit||'عدد')}: ${fmt2(round2(it.unitCost))}`:''}</div></td>
         <td class="num">${pur.currency==='USD'?fmt2(it.qty*it.unitCost):fmt(it.qty*it.unitCost)}</td>
-        <td class="no-print">${!cancelled?`<span class="menu-dots" onclick='App.openActionMenu([
+        <td class="no-print">${(!cancelled && App.canWrite())?`<span class="menu-dots" onclick='App.openActionMenu([
           {label:"واپس به فروشنده", icon:"rotate-ccw", onClick:()=>App.purchaseReturnItem("${pur.id}",${idx})},
           {label:"افزودن تعداد", icon:"plus", onClick:()=>App.purchaseIncreaseItemQty("${pur.id}",${idx})},
           {label:"کم کردن چند ${escapeHtml(it.unit||'عدد')} (کاستی)", icon:"minus", onClick:()=>App.purchaseShrinkItem("${pur.id}",${idx})}
@@ -2532,7 +2532,7 @@ const App = {
       <button class="btn btn-outline" onclick="App.navigate('dashboard')">${ic('home',15)}داشبورد</button>
       <button class="btn btn-primary" onclick="App.printInvoice()">${ic('printer',15)}چاپ</button>
     </div>
-    ${!cancelled?`
+    ${(!cancelled && App.canWrite())?`
     <div class="inv-actions no-print">
       <button class="btn btn-outline" onclick="App.purchaseAddItem('${pur.id}')">${ic('plus',15)}افزودن قلم</button>
       ${pur.remaining>0.5?`<button class="btn btn-outline" onclick="App.forgiveRoundoff('${pur.id}')">${ic('coins',15)}نادیده‌گرفتن خرده‌پول</button>`:''}
@@ -2543,7 +2543,7 @@ const App = {
       ${pur.billImage
         ? `<img src="${escapeHtml(pur.billImage)}" class="bill-thumb" style="margin-top:10px;" onclick="App.viewPurchaseBillImage('${pur.id}')">`
         : `<div class="field-note">هنوز عکسی برای این خرید ثبت نشده.</div>`}
-      <button class="btn btn-outline" onclick="App.addPurchaseBillPhoto('${pur.id}')">${ic('camera',16)}${pur.billImage?'تغییر عکس بل':'افزودن عکس بل شرکت'}</button>
+      ${App.canWrite()?`<button class="btn btn-outline" onclick="App.addPurchaseBillPhoto('${pur.id}')">${ic('camera',16)}${pur.billImage?'تغییر عکس بل':'افزودن عکس بل شرکت'}</button>`:''}
     </div>
     <div id="invoice-print" class="card">
       ${cancelled?`<div class="inv-void">${ic('ban',16)}این بل خرید باطل شده است</div>`:''}
@@ -2560,7 +2560,7 @@ const App = {
       <div class="inv-cust">
         <div class="l1">شرکت / عمده‌فروش: ${escapeHtml(pur.supplierName||'—')}</div>
         ${pur.supplierInvoiceNo?`<div class="l1">شمارهٔ بل عمده‌فروش: <b class="num">${escapeHtml(pur.supplierInvoiceNo)}</b></div>`:''}
-        <div class="l1 no-print" style="margin-top:4px;color:var(--gold-d);cursor:pointer;display:flex;align-items:center;gap:5px;" onclick="App.editPurchaseInvoiceNo('${pur.id}')">${ic('pencil',14)}${pur.supplierInvoiceNo?'ویرایش شمارهٔ بل':'ثبت شمارهٔ بل عمده‌فروش'}</div>
+        ${App.canWrite()?`<div class="l1 no-print" style="margin-top:4px;color:var(--gold-d);cursor:pointer;display:flex;align-items:center;gap:5px;" onclick="App.editPurchaseInvoiceNo('${pur.id}')">${ic('pencil',14)}${pur.supplierInvoiceNo?'ویرایش شمارهٔ بل':'ثبت شمارهٔ بل عمده‌فروش'}</div>`:''}
       </div>
       <table class="inv-table">
         <thead><tr><th>#</th><th>شرح کالا</th><th>تعداد</th><th>فی واحد</th><th>مجموع</th><th class="no-print"></th></tr></thead>
@@ -3322,7 +3322,7 @@ const App = {
         </div>
         <div class="r-right" style="display:flex;align-items:center;gap:10px;">
           ${badge}
-          <span class="icon-btn" onclick="event.stopPropagation(); App.editParty('${sub}','${c.id}')" title="ویرایش">${ic('pencil',16)}</span>
+          ${App.canWrite()?`<span class="icon-btn" onclick="event.stopPropagation(); App.editParty('${sub}','${c.id}')" title="ویرایش">${ic('pencil',16)}</span>`:''}
         </div>
       </div>`;
     }).join('') : `<div class="empty"><span class="ic">${ic(sub==='customers'?'users':'factory',26)}</span><b>${sub==='customers'?'هنوز مشتری‌ای ثبت نشده':'هنوز عمده‌فروش/شرکتی ثبت نشده'}</b>با دکمهٔ بالا اضافه کنید، یا با ثبت اولین فروش/خرید خودکار ساخته می‌شود</div>`;
@@ -3393,11 +3393,11 @@ const App = {
       ${p.phone?`<div class="sub" style="margin-top:6px;display:flex;align-items:center;gap:5px;">${ic('phone',13)}<span class="num">${escapeHtml(p.phone)}</span></div>`:''}
       ${p.address?`<div class="sub" style="display:flex;align-items:center;gap:5px;">${ic('map-pin',13)}${escapeHtml(p.address)}</div>`:''}
       <button class="btn btn-green" style="margin-top:12px;" onclick="App.recordPartyPayment('${type}','${p.id}')">${ic(type==='customers'?'arrow-left':'arrow-right',16)}${actionLabel}</button>
-      <div class="grid2" style="margin-top:8px;">
+      ${App.canWrite()?`<div class="grid2" style="margin-top:8px;">
         <button class="btn btn-outline" style="margin-top:0;" onclick="App.editParty('${type}','${p.id}')">${ic('pencil',15)}ویرایش اطلاعات</button>
         <button class="btn btn-outline" style="margin-top:0;" onclick="App.setOpeningBalance('${type}','${p.id}')">${ic('clipboard',15)}بدهی افتتاحیه</button>
       </div>
-      <div style="text-align:center;margin-top:10px;"><span onclick="App.deleteParty('${type}','${p.id}')" style="cursor:pointer;color:var(--red);font-size:12px;">${ic('trash',12)} حذف این طرف از فهرست</span></div>
+      <div style="text-align:center;margin-top:10px;"><span onclick="App.deleteParty('${type}','${p.id}')" style="cursor:pointer;color:var(--red);font-size:12px;">${ic('trash',12)} حذف این طرف از فهرست</span></div>`:''}
       ${this.payFormOpen ? `
       <div class="subpanel">
         <div>
@@ -3735,7 +3735,7 @@ const App = {
       <button onclick="App.navigate('more','history')"><span class="ic">${ic('history',17)}</span><span class="lbl">تاریخچهٔ کامل معاملات</span><span class="chev">${ic('chevron-left',17)}</span></button>
       ${this.canSeeBooks()?`<button onclick="App.navigate('more','expenses')"><span class="ic">${ic('banknote',17)}</span><span class="lbl">مصارف روزانه و برداشت شخصی</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
       ${this.canSeeReports()?`<button onclick="App.navigate('more','reports')"><span class="ic">${ic('bar-chart',17)}</span><span class="lbl">گزارش سود روزانه / هفته‌وار / ماهوار</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
-      <button onclick="App.navigate('more','products')"><span class="ic">${ic('archive',17)}</span><span class="lbl">${this.isOwner()?'مدیریت محصولات و موجودی':'مشاهدهٔ محصولات و موجودی (فقط خواندنی)'}</span><span class="chev">${ic('chevron-left',17)}</span></button>
+      <button onclick="App.navigate('more','products')"><span class="ic">${ic('archive',17)}</span><span class="lbl">${this.isOwner()?'مدیریت محصولات و موجودی':'مشاهدهٔ محصولات و موجودی'}</span><span class="chev">${ic('chevron-left',17)}</span></button>
       ${this.isAdmin()?`<button onclick="App.navigate('more','settings')"><span class="ic">${ic('settings',17)}</span><span class="lbl">تنظیمات و پشتیبان‌گیری</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
       ${this.user?`<button onclick="App.lockNow()"><span class="ic">${ic('lock',17)}</span><span class="lbl">قفل صفحه</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
       <button class="danger" onclick="App.logout()"><span class="ic">${ic('log-out',17)}</span><span class="lbl">خروج از حساب <span class="sub" style="font-size:var(--fs-xs);color:var(--ink-500);">${escapeHtml(this.user?this.user.email:'')}</span></span></button>
@@ -4247,7 +4247,6 @@ const App = {
     return `
     <button class="back-btn" onclick="App.navigate('more')">${ic('chevron-right',16)}بازگشت</button>
     <h2 class="section-title" style="margin-top:0;">${ic('archive',17)}محصولات و موجودی</h2>
-    ${!owner?`<div class="hint">${ic('lock',13)}این بخش فقط برای مشاهده است — تغییر موجودی/قیمت/محصولات فقط با حساب مدیر ممکن است. موجودی همچنان با ثبت خرید یا فروش شما به‌صورت خودکار درست می‌شود.</div>`:''}
     ${owner?`
     <div class="card">
       <label>افزودن محصول جدید</label>
