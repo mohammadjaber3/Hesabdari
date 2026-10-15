@@ -4478,6 +4478,31 @@ const App = {
     const inventorySummary = this.inventorySummaryRows(inventoryRows);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(inventorySummary), 'خلاصه انبار');
 
+    // ثبت‌های دریافت و پرداخت واقعی؛ ابطال‌ها با مبلغ منفی باقی می‌مانند تا خالص محاسبه شود.
+    // فاکتورهای فروش/خرید و پرداخت‌های تخصیص‌یافته جداگانه جمع نمی‌شوند تا دوباره‌شماری نشود.
+    const paymentRows = this.state.payments
+      .filter(p=>p.date>=start && p.date<=end && !p.voided)
+      .sort((a,b)=>(a.date||'').localeCompare(b.date||'') || (a.ts||0)-(b.ts||0))
+      .map(p=>({
+        'شناسه پرداخت':p.id, 'تاریخ':p.date,
+        'نوع':p.reversalOf ? 'ابطال دریافت/پرداخت' : (p.type==='receive'?'دریافت از مشتری':'پرداخت به فروشنده'),
+        'طرف حساب':p.partyName||'', 'ارز':p.currency||'AFN',
+        'مبلغ خالص رویداد':Number(p.amount)||0,
+        'شناسه فاکتور فروش':p.saleId||'', 'شناسه فاکتور خرید':p.purchaseId||'',
+        'یادداشت':p.note||'', 'وضعیت':p.status||''
+      }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(paymentRows), 'گردش دریافت پرداخت');
+    const paymentTotals = {};
+    paymentRows.forEach(p=>{
+      const key=(p['ارز']||'AFN')+'|'+p['نوع'];
+      paymentTotals[key]=(paymentTotals[key]||0)+(Number(p['مبلغ خالص رویداد'])||0);
+    });
+    const paymentSummaryRows=Object.entries(paymentTotals).map(([key,amount])=>{
+      const [currency,type]=key.split('|');
+      return {'ارز':currency,'نوع رویداد':type,'مجموع خالص رویدادها':round2(amount)};
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(paymentSummaryRows), 'خلاصه دریافت پرداخت');
+
     XLSX.writeFile(wb, 'گزارش-'+label+'-'+todayISO()+'.xlsx');
   },
   renderReports(){
@@ -4653,6 +4678,12 @@ const App = {
       'خرید': s.purchases.map(x=>({شناسه:x.id, تاریخ:x.date, 'شماره بل عمده‌فروش':x.supplierInvoiceNo||'', عمده‌فروش:x.supplierName||'نقدی', ارز:x.currency||'AFN', مجموع:x.total, پرداختی:x.paid, باقیمانده:x.remaining, وضعیت:x.status||''})),
       'مصارف': s.expenses.map(x=>({شناسه:x.id, تاریخ:x.date, نوع:x.category||'', مبلغ:x.amount, یادداشت:x.note||''})),
       'دریافت-پرداخت': s.payments.map(x=>({شناسه:x.id, تاریخ:x.date, نوع:x.type==='receive'?'دریافت':'پرداخت', طرف:x.partyName||'', شناسه_طرف:x.partyId||'', ارز:x.currency||'AFN', مبلغ:x.amount})),
+      'گردش دریافت پرداخت': s.payments.filter(x=>!x.voided).map(x=>({
+        شناسه:x.id, تاریخ:x.date||'', نوع:x.reversalOf?'ابطال دریافت/پرداخت':(x.type==='receive'?'دریافت':'پرداخت'),
+        طرف:x.partyName||'', شناسه_طرف:x.partyId||'', ارز:x.currency||'AFN',
+        مبلغ_خالص_رویداد:Number(x.amount)||0, شناسه_فاکتور_فروش:x.saleId||'',
+        شناسه_فاکتور_خرید:x.purchaseId||'', یادداشت:x.note||'', وضعیت:x.status||''
+      })),
       'بدهی افتتاحیه': (s.openingEntries||[]).map(x=>({شناسه:x.id, تاریخ:x.date||'', نوع_طرف:x.partyType||'', طرف:x.partyName||'', شناسه_طرف:x.partyId||'', ارز:x.currency||'AFN', مبلغ:x.amount, یادداشت:x.note||''})),
       'مرجوعی و ابطال': (s.returns||[]).map(x=>({شناسه:x.id, تاریخ:x.date||'', نوع:({return:'مرجوعی',cancel:'ابطال فاکتور',shortage:'کاستی'})[x.kind]||x.kind||'', شماره_فاکتور:x.originalSaleId?this.invoiceNoLabel(x.originalSaleId):'', مشتری:x.customerName||'', مبلغ:x.amount, بهای_کالا:x.cost, دلیل:x.reason||''})),
       'وضعیت انبار': inventoryRows,
