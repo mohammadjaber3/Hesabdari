@@ -14,7 +14,7 @@ import {
   round2, round4, fmtQty, todayISO, addDaysISO, daysBetweenISO, startOfWeekISO, startOfMonthISO, dateLabelFa,
   setBusinessTimezone, calcInvoice, rebalanceAfterTotalChange, calculateReturnRefund, nextAvgCost, describeAuthError,
   makePinRecord, verifyPin, pinStateAfterFailure, pinStateAfterSuccess, pinLockRemainingMs,
-  buildBackup, validateBackup, normalizeName
+  buildBackup, validateBackup, normalizeName, costPerBase, previousRange, changePercent
 } from "./core.js";
 import {
   normalizeProductUnitsRecord, productUnits as _productUnits, saleUnits as _saleUnits,
@@ -25,9 +25,11 @@ import {
 import {
   buildMovement, isNonCashExpense, cashExpensesTotal, buildPaymentReversal, allocatePayment,
   reconcileCustomers, reconcileSuppliers, reconcileStock, reconcileInvoices, negativeStockProducts,
-  buildAuditEntry, summarizeDoc, WASTE_CATEGORY, DEFAULT_WAREHOUSE,
-  buildReturnEvent, salesSummary, reconcileReturns, saleReturnedAmount
+  buildAuditEntry, summarizeDoc, WASTE_CATEGORY, WITHDRAWAL_CATEGORY, DEFAULT_WAREHOUSE,
+  buildReturnEvent, salesSummary, reconcileReturns, saleReturnedAmount,
+  productProfitSummary, debtAging, AGING_BUCKETS
 } from "./ledger.js";
+import { buildTrendChartSvg, buildChartLegend } from "./chart.js";
 
 /* ---------- قفل نرمِ نقش «شریک» (فقط دیدن) ----------
    دیوارِ اصلی همان firestore.rules است، ولی اگر همان‌جا جلوی نوشتن گرفته شود
@@ -197,7 +199,6 @@ function immutableInvoiceNo(id,prefix){
 /* ---------- شناسهٔ دستگاه (گوشی) ----------
    هر گوشی/مرورگر یک شناسهٔ ثابت محلی می‌گیرد که در تمام رکوردهای ثبت‌شده از همان گوشی ذخیره می‌شود.
    کاربر می‌تواند یک نام دلخواه (مثلاً «گوشی احمد») هم برای این دستگاه در تنظیمات بگذارد. */
-const WITHDRAWAL_CATEGORY = 'برداشت شخصی';
 function getDeviceId(){
   let id;
   try{ id = localStorage.getItem('hesabdari_device_id'); }catch(e){}
@@ -433,14 +434,13 @@ const ICON_PATHS = {
   'wifi-off':'<path d="M2.5 8.5a15 15 0 0 1 5-3"/><path d="M21.5 8.5a15 15 0 0 0-8.5-3.4"/><path d="M6.3 12.3a10 10 0 0 1 2.6-1.7"/><path d="M17.7 12.3a10 10 0 0 0-3.4-2"/><path d="M10 15.9a5 5 0 0 1 4 0"/><path d="M12 19.7h.01"/><path d="M2.5 2.5l19 19"/>',
   building:'<rect x="5" y="3.5" width="14" height="17" rx="1.6"/><path d="M9 7.5h2M13 7.5h2M9 11.5h2M13 11.5h2"/><path d="M10 20.5v-4h4v4"/>'
 };
-/* ---------- بارگذاری تنبلِ کتابخانه‌های بیرونیِ سنگین (Chart.js / xlsx) ----------
+/* ---------- بارگذاری تنبلِ کتابخانهٔ بیرونیِ سنگین (xlsx؛ نمودار دیگر کتابخانهٔ بیرونی ندارد) ----------
    قبلاً این دو با <script defer> در <head> بودند، یعنی هر بار که اپ باز می‌شد
    (حتی فقط برای ثبت یک فروش ساده)، خودِ باز شدنِ صفحه به رسیدن به cdnjs.cloudflare.com
    گره خورده بود. در اتصال ضعیف/آفلاین، مرورگر تا رسیدن به timeout شبکه صبر می‌کرد و رویداد
    load (که ثبتِ سرویس‌ورکر هم به آن گره خورده) خیلی دیر یا هیچ‌وقت اجرا نمی‌شد.
    حالا این کتابخانه‌ها فقط وقتی واقعاً لازم می‌شوند (صفحهٔ گزارش، خروجی اکسل) بارگذاری
    می‌شوند — بازشدنِ اصلِ اپ دیگر به این دو وابسته نیست. */
-const CHART_JS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js';
 const XLSX_JS_URL   = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
 const _scriptLoadPromises = {};
 function loadExternalScript(url){
@@ -903,7 +903,6 @@ const App = {
       default: html=this.renderDashboard();
     }
     s.innerHTML = html + this.renderImageViewer();
-    if(this.tab==='more' && this.sub==='reports') setTimeout(()=>this.drawTrendChart(),0);
   },
   renderImageViewer(){
     if(!this.imageViewerSrc) return '';
@@ -1593,6 +1592,13 @@ const App = {
     // همه‌چیز به واحد پایه تبدیل و ذخیره می‌شود؛ واحد انتخابی فقط برای نمایش نگه داشته می‌شود
     const qty = round2(qtyIn*u.factor);
     const price = priceIn/u.factor;
+    if(product._draftOnly){
+      // محصول جدید در فروش: قیمت خرید اجباری است (وگرنه بهای تمام‌شده صفر و کل فروش «سود» حساب می‌شد)
+      const costIn = parseFloat((document.getElementById('sp-newcost')||{}).value);
+      const costBase = costPerBase(costIn, u.factor);
+      if(costBase===null){ this.toast('قیمت خرید محصول جدید را بنویسید (باید بزرگ‌تر از صفر باشد).'); return; }
+      product.avgCost = costBase;
+    }
     /* قلم فقط بعد از تأیید نهایی اضافه می‌شود — هشدار کم‌موجودی حالا مودال داخلی است، نه confirm() مرورگر */
     const finish = ()=>{
       if(product._draftOnly){
@@ -1658,8 +1664,9 @@ const App = {
         this.saleDraft.items.forEach(it=>{
           const draftP=draftProducts.find(dp=>dp.id===it.productId);
           if(draftP){
-            totalCost += it.qty*0;
-            batch.set(doc(cols.products,draftP.id), {id:draftP.id,name:draftP.name,unit:draftP.unit,stock:-it.qty,avgCost:0,sellPrice:it.unitPrice,
+            const draftCost = Number(draftP.avgCost)||Number(it.cost)||0;
+            totalCost += it.qty*draftCost;
+            batch.set(doc(cols.products,draftP.id), {id:draftP.id,name:draftP.name,unit:draftP.unit,stock:-it.qty,avgCost:draftCost,sellPrice:it.unitPrice,
               baseTradable:!!draftP.baseTradable,midUnit:draftP.midUnit||'',midPer:draftP.midPer||0,packUnit:draftP.packUnit||'',packPer:draftP.packPer||0,
               defaultSaleUnit:draftP.defaultSaleUnit||draftP.packUnit||draftP.midUnit||'',
               saleUnits:draftP.saleUnits||[draftP.packUnit||draftP.midUnit||''].filter(Boolean),allowFractionalSale:!!draftP.allowFractionalSale,
@@ -1674,7 +1681,7 @@ const App = {
         totalCost=round2(totalCost);
         const newSale={id:saleId,invoiceNo:this.invoiceNoForNew(saleId,'S'),ts:Date.now(),date,customerId,customerName:customerNameFinal,
           customerPhone:custPhone,customerAddress:custAddress,
-          items:this.saleDraft.items.map(it=>({...it,cost:Number((this.state.products.find(p=>p.id===it.productId)||{}).avgCost)||0,returnedQty:0})),
+          items:this.saleDraft.items.map(it=>({...it,cost:Number((this.state.products.find(p=>p.id===it.productId)||{}).avgCost)||Number(it.cost)||0,returnedQty:0})),
           total,totalCost,profit:round2(total-totalCost),paid,remaining,note,status:'active',returns:[],originalTotal:total,discount:0,returnedAmount:0,returnedCost:0,...this.recordMeta()};
         batch.set(doc(cols.sales,saleId),newSale);
         this.audit(batch,{action:'create',entityType:'sale',entityId:saleId,before:null,after:newSale});
@@ -2114,6 +2121,9 @@ const App = {
           <div><label>هر قوطی/بسته حاوی چند عدد؟ (اختیاری)</label><input id="sp-newmidper" type="number" inputmode="decimal" placeholder="24 — یا خالی" oninput="App.fillUnitSelect('sp',true)"></div>
         </div>
         <div class="field-note">اگر محصول عدد داخلی ندارد «چند عدد» را خالی بگذارید. فقط یک واحد (مثلاً کارتن)؟ فقط «واحد بزرگ» را بنویسید.</div>
+        <label>قیمت خرید هر «واحد فروش» (اجباری)</label>
+        <input id="sp-newcost" type="number" inputmode="decimal" placeholder="مثلاً قیمتی که این جنس را به آن خریده‌اید">
+        <div class="field-note">بدون قیمت خرید، سود این فاکتور درست حساب نمی‌شود؛ پس نوشتن آن اجباری است. قیمت خرید برای همان واحدی است که در «واحد فروش» پایین انتخاب می‌کنید.</div>
       </div>
       <div class="grid2">
         <div>
@@ -4255,27 +4265,8 @@ const App = {
 
   /* ---------- Reports ---------- */
   setPeriod(p){ this.reportPeriod=p; this.render(); },
-  _trendChartInstance:null,
-  drawTrendChart(chartRetries){
-    const canvas=document.getElementById('trend-chart'); if(!canvas) return;
-    if(typeof Chart==='undefined'){
-      if(!chartRetries) loadExternalScript(CHART_JS_URL).catch(()=>{}); // فقط یک‌بار درخواست دانلود را شروع کن
-      // تا کتابخانه برسد (چه از کش سرویس‌ورکر، چه از شبکه)، چند بار با فاصله چک می‌کنیم —
-      // ولی نه برای همیشه — وگرنه اگر واقعاً هیچ‌وقت نرسد، این تلاش هر ۲۰۰ میلی‌ثانیه تا ابد ادامه پیدا می‌کند.
-      const tries=(chartRetries||0)+1;
-      if(tries<=15){ setTimeout(()=>this.drawTrendChart(tries), 200); return; }
-      /* سقف تلاش: بعد از ۱۵ بار دیگر تلاش نمی‌کنیم (قبلاً بی‌نهایت بود) و یک پیام ساکت می‌دهیم */
-      console.warn('Chart.js بارگذاری نشد؛ نمودار نمایش داده نمی‌شود.');
-      const box=canvas.parentElement;
-      if(box) box.innerHTML = '<div class="field-note">نمودار بارگذاری نشد (احتمالاً اولین اجرای آفلاین). بعد از وصل شدن اینترنت و باز کردن دوبارهٔ این صفحه، نمودار نشان داده می‌شود. بقیهٔ ارقام گزارش درست است.</div>';
-      return;
-    }
-    const today=todayISO();
-    let start,end=today;
-    if(this.reportPeriod==='today'){ start=today; }
-    else if(this.reportPeriod==='week'){ start=startOfWeek(today); }
-    else if(this.reportPeriod==='month'){ start=startOfMonth(today); }
-    else { start=this.reportStart||today; end=this.reportEnd||today; }
+  /* نمودار روند فروش و سود — SVG داخلی (بدون Chart.js و بدون اینترنت). همزمان با خود صفحه ساخته می‌شود. */
+  trendChartHtml(start,end){
     // برای دورهٔ «امروز» یا بازه‌های خیلی کوتاه، ۷ روز آخر را نشان بده تا نمودار خالی نباشد
     let dStartISO=start; const dEndISO=end;
     let days = daysBetweenISO(dStartISO,dEndISO)+1;
@@ -4284,21 +4275,19 @@ const App = {
     const labels=[], salesSeries=[], profitSeries=[];
     for(let i=0;i<days;i++){
       const iso=addDaysISO(dStartISO,i);
-      const daySales=this.salesInRange(iso,iso);
       labels.push(iso.slice(5));
       const dsm=salesSummary({ sales:this.state.sales, returns:this.state.returns, from:iso, to:iso });
       salesSeries.push(dsm.net);
       profitSeries.push(dsm.grossProfit - sum(this.expensesInRange(iso,iso).filter(e=>e.category!==WITHDRAWAL_CATEGORY),'amount'));
     }
-    if(this._trendChartInstance){ this._trendChartInstance.destroy(); }
-    this._trendChartInstance = new Chart(canvas.getContext('2d'), {
-      type:'line',
-      data:{ labels, datasets:[
-        {label:'فروش', data:salesSeries, borderColor:'#C9922B', backgroundColor:'rgba(201,146,43,.12)', tension:.3, fill:true},
-        {label:'سود', data:profitSeries, borderColor:'#227A57', backgroundColor:'rgba(34,122,87,.12)', tension:.3, fill:true}
-      ]},
-      options:{ responsive:true, plugins:{legend:{position:'bottom', labels:{font:{family:'Vazirmatn'}}}}, scales:{ x:{ticks:{font:{size:10}}}, y:{ticks:{font:{size:10}}} } }
-    });
+    const series=[
+      {name:'فروش', color:'#C9922B', values:salesSeries},
+      {name:'سود', color:'#227A57', values:profitSeries}
+    ];
+    const empty = salesSeries.every(v=>!v) && profitSeries.every(v=>!v);
+    return `<div class="chart-box" dir="ltr">${buildTrendChartSvg({labels, series})}</div>`
+      + buildChartLegend(series)
+      + (empty ? '<div class="field-note">در این بازه هنوز فروشی ثبت نشده؛ خط‌ها صفر نشان داده می‌شوند.</div>' : '');
   },
   async exportReportExcel(start,end,label){
     if(typeof XLSX==='undefined'){
@@ -4355,6 +4344,32 @@ const App = {
     const withdrawalTotal=sum(withdrawals,'amount');
     const purchTotal = purchases.reduce((a,p)=> a + (p.currency==='USD' ? (Number(p.total)||0)*(Number(p.rateAtPurchase)||this.usdRate()||0) : (Number(p.total)||0)), 0);
 
+    /* ----- مقایسه با دورهٔ قبل ----- */
+    const prevR = previousRange({ period:this.reportPeriod, start, end });
+    const prevSm = salesSummary({ sales:this.state.sales, returns:this.state.returns, from:prevR.start, to:prevR.end });
+    const prevExp = sum(this.expensesInRange(prevR.start,prevR.end).filter(e=>e.category!==WITHDRAWAL_CATEGORY),'amount');
+    const prevNet = prevSm.grossProfit - prevExp;
+    const cmpRow = (label, cur, prev)=>{
+      const pct = changePercent(cur, prev);
+      const up = cur >= prev;
+      const txt = pct===null ? (Math.abs(cur-prev)<0.005 ? 'بدون تغییر' : 'دورهٔ قبل صفر بود') : ((pct>0?'+':'')+pct+'٪');
+      return `<div class="row-item"><div class="r-left">${label}<span class="sub">دورهٔ قبل: ${fmt(prev)} (${prevR.start===prevR.end?prevR.start:prevR.start+' تا '+prevR.end})</span></div><div class="r-right num" style="color:${up?'var(--green)':'var(--red)'}">${ic(up?'trending-up':'trending-down',15)} ${txt}</div></div>`;
+    };
+    const compareCard = `<div class="eyebrow"><span>مقایسه با دورهٔ قبل</span></div><div class="card">${cmpRow('فروش خالص', revenue, prevSm.net)}${cmpRow('سود خالص', netProfit, prevNet)}</div>`;
+
+    /* ----- سود به تفکیک محصول ----- */
+    const prodProfit = productProfitSummary({ sales:this.state.sales, from:start, to:end });
+    const prodRows = prodProfit.slice(0,10).map(r=>
+      `<div class="row-item"><div class="r-left"><b>${escapeHtml(r.name)}</b><span class="sub">فروش ${fmt(r.revenue)} · بهای تمام‌شده ${fmt(r.cost)}</span></div><div class="r-right num" style="color:${r.profit>=0?'var(--green)':'var(--red)'}">${fmt(r.profit)}</div></div>`).join('');
+    const prodCard = `<div class="eyebrow"><span>سود به تفکیک محصول (۱۰ محصولِ برتر)</span></div><div class="card">${prodRows || '<div class="empty">در این بازه فروشی نیست.</div>'}${prodProfit.length?'<div class="field-note">بر اساس تاریخ فاکتور و پس از کسر مرجوعی؛ ممکن است با «سود ناخالص» بالا کمی فرق کند.</div>':''}</div>`;
+
+    /* ----- سن بدهی مشتریان (وضعیت امروز، مستقل از بازهٔ انتخاب‌شده) ----- */
+    const aging = debtAging({ customers:this.state.customers, sales:this.state.sales, today });
+    const agingRows = AGING_BUCKETS.map(b=>`<div class="row-item"><div class="r-left">${b.label}</div><div class="r-right num" style="${b.key==='d90p'&&aging.totals[b.key]>0?'color:var(--red)':''}">${fmt(aging.totals[b.key])}</div></div>`).join('')
+      + (aging.totals.noInvoice>0.001 ? `<div class="row-item"><div class="r-left">بدون فاکتور <span class="sub">(مانده افتتاحیه/قدیمی)</span></div><div class="r-right num">${fmt(aging.totals.noInvoice)}</div></div>` : '');
+    const topDebtors = aging.rows.slice(0,5).map(r=>`<div class="row-item"><div class="r-left"><b>${escapeHtml(r.name)}</b><span class="sub">قدیمی‌ترین بدهی: ${r.oldestDays} روز پیش</span></div><div class="r-right num" style="color:var(--red)">${fmt(r.balance)}</div></div>`).join('');
+    const agingCard = `<div class="eyebrow"><span>سن بدهی مشتریان (تا امروز)</span></div><div class="card">${aging.rows.length?agingRows+'<div class="total-line"><span>مجموع بدهی مشتریان</span><span class="num">'+fmt(aging.totals.total)+'</span></div>':'<div class="empty">مشتری بدهکاری نیست.</div>'}</div>${topDebtors?`<div class="card"><div class="field-note">بدهکارترین‌ها</div>${topDebtors}</div>`:''}`;
+
     const catMap={};
     expenses.forEach(e=>{ catMap[e.category]=(catMap[e.category]||0)+e.amount; });
     const catRows = Object.keys(catMap).length ? Object.entries(catMap).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
@@ -4388,7 +4403,7 @@ const App = {
     </div>`:''}
     <div class="card">
       <div class="eyebrow" style="margin-top:0;"><span>روند فروش و سود</span></div>
-      <div class="chart-box"><canvas id="trend-chart" height="170"></canvas></div>
+      ${this.trendChartHtml(start,end)}
     </div>
     <button class="btn btn-outline" onclick="App.exportReportExcel('${start}','${end}','${escapeHtml(label)}')">${ic('sheet',16)}خروجی اکسل از همین گزارش</button>
     <div class="card">
@@ -4408,6 +4423,9 @@ const App = {
       <div class="row-item"><div class="r-left">تعداد فاکتور فروش (فعال)</div><div class="r-right num">${sales.filter(s=>s.status!=='cancelled').length}</div></div>
       ${sales.some(s=>s.status==='cancelled')?`<div class="row-item"><div class="r-left">فاکتورهای باطل‌شده در این بازه</div><div class="r-right num" style="color:var(--red)">${sales.filter(s=>s.status==='cancelled').length}</div></div>`:''}
     </div>
+    ${compareCard}
+    ${prodCard}
+    ${agingCard}
     <div class="eyebrow"><span>مصارف بر اساس نوع</span></div>
     <div class="card">${catRows}</div>
     <h2 class="section-title">${ic('hand-coins',17)}برداشت‌های شخصی (جدا از سود/زیان)</h2>

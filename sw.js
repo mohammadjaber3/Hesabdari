@@ -20,6 +20,7 @@ const APP_SHELL = [
   './core.js',
   './units.js',
   './ledger.js',
+  './chart.js',
   './firebase-sdk.js',
   './manifest.json',
   './icons/icon-72.png',

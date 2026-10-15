@@ -649,6 +649,9 @@ table.inv-table .sub{font-size:var(--fs-xs)}
 
 /* ================= نمودار ================= */
 .chart-box{position:relative;margin-top:var(--sp-2)}
+.chart-legend{display:flex;gap:var(--sp-4);justify-content:center;margin-top:var(--sp-2);font-size:13px;color:var(--ink-600)}
+.chart-legend span{display:inline-flex;align-items:center;gap:6px}
+.chart-legend i{width:12px;height:12px;border-radius:3px;display:inline-block}
 
 /* ================= واکنش‌گرا ================= */
 @media (min-width:560px){

@@ -26,6 +26,12 @@ export function calculateReturnRefund({ items, itemIndex, qty, discount }){
   const discountAfter = grossSubtotal>0 ? round2(discountAmount*Math.min(grossSubtotal,returnedAfter)/grossSubtotal) : 0;
   return Math.max(0,round2(quantity*price-Math.max(0,discountAfter-discountBefore)));
 }
+/** قیمت خرید هر «واحد فروش» → قیمت هر واحد پایه. اگر خالی/نامعتبر/صفر یا منفی باشد null (یعنی رد شود). */
+export function costPerBase(costIn, factor){
+  const c = Number(costIn), f = Number(factor);
+  if(!Number.isFinite(c) || c <= 0 || !Number.isFinite(f) || f <= 0) return null;
+  return c / f;
+}
 export function fmtQty(n){
   const r = Math.round((Number(n)||0)*1000)/1000;
   return Number.isInteger(r) ? r.toLocaleString('en-US') : String(r);
@@ -321,4 +327,29 @@ export function validateBackup(b){
     });
   });
   return { ok: errors.length === 0, errors: errors.slice(0,50), warnings, counts };
+}
+
+/* ---------- مقایسه با دورهٔ قبل (گزارش) ----------
+   امروز → دیروز | این هفته → همان روزهای هفتهٔ قبل | این ماه → همان تعداد روزِ ماهِ قبل |
+   بازهٔ دلخواه → بازه‌ای هم‌طول که بلافاصله قبل از آن تمام شده. */
+export function previousRange({ period, start, end }){
+  const days = daysBetweenISO(start, end) + 1;
+  if(period === 'today' || days <= 1){ const y = addDaysISO(start, -1); return { start: y, end: y }; }
+  if(period === 'week') return { start: addDaysISO(start, -7), end: addDaysISO(end, -7) };
+  if(period === 'month'){
+    const p = parseISO(start);
+    if(p){
+      const py = p.mo === 1 ? p.y - 1 : p.y, pm = p.mo === 1 ? 12 : p.mo - 1;
+      const dim = new Date(Date.UTC(py, pm, 0)).getUTCDate();
+      const s = py + '-' + String(pm).padStart(2, '0') + '-01';
+      return { start: s, end: addDaysISO(s, Math.min(days, dim) - 1) };
+    }
+  }
+  return { start: addDaysISO(start, -days), end: addDaysISO(start, -1) };
+}
+/* درصد تغییر؛ اگر دورهٔ قبل صفر بود null (درصد معنی ندارد) */
+export function changePercent(cur, prev){
+  const c = num(cur), p = num(prev);
+  if(Math.abs(p) < 0.005) return null;
+  return Math.round(((c - p) / Math.abs(p)) * 100);
 }

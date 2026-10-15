@@ -2,7 +2,7 @@
    ledger.js — رویدادهای انبار/حساب و ابزارهای «تطبیق» (Reconcile)
    منطق خالص (بدون صفحه/Firebase) تا هم برنامه هم تست‌ها از یک کد استفاده کنند.
    ===================================================================== */
-import { round2, round4 } from "./core.js";
+import { round2, round4, daysBetweenISO } from "./core.js";
 
 export const MOVEMENT_TYPES = ['PURCHASE','SALE','RETURN','WASTE','ADJUSTMENT','TRANSFER_IN','TRANSFER_OUT','OPENING','COST_CORRECTION'];
 export const WASTE_CATEGORY = 'کاستی و ضایعات جنس';
@@ -197,4 +197,79 @@ export function reconcileReturns({ sales, returns }){
   const known = new Set((sales||[]).map(s=>s.id));
   Object.keys(byId).forEach(id=>{ if(!known.has(id)) out.push({ id, name:'(فاکتور پیدا نشد)', cached:0, expected:round2(byId[id]), diff:round2(-byId[id]) }); });
   return out;
+}
+
+
+/* =====================================================================
+   سود به تفکیک محصول (بر اساس تاریخ فاکتور، پس از کسر مرجوعیِ ثبت‌شده روی قلم‌ها)
+   تخفیف کلی فاکتور به نسبت مبلغ هر قلم پخش می‌شود. چون مرجوعی‌ها اینجا با تاریخِ خودِ فاکتور
+   حساب می‌شوند (نه تاریخ مرجوعی)، جمع این جدول ممکن است با «سود ناخالص» گزارش کمی فرق کند.
+   ===================================================================== */
+export function productProfitSummary({ sales, from, to }){
+  const map = new Map();
+  (sales||[]).filter(s=>s && s.status!=='cancelled' && s.date>=from && s.date<=to).forEach(s=>{
+    const rows = (s.items||[]).map(it=>{
+      const q = Math.max(0, (Number(it.qty)||0) - (Number(it.returnedQty)||0));
+      return { it, q, rev: q * Math.max(0, Number(it.unitPrice)||0) };
+    });
+    const sub = rows.reduce((a,x)=>a+x.rev, 0);
+    const disc = Math.min(sub, Math.max(0, Number(s.discount)||0));
+    rows.forEach(x=>{
+      if(x.q <= 0) return;
+      const revenue = x.rev - (sub > 0 ? disc * x.rev / sub : 0);
+      const cost = x.q * (Number(x.it.cost)||0);
+      const key = x.it.productId || x.it.name || '?';
+      const cur = map.get(key) || { id:key, name:x.it.name||'', revenue:0, cost:0, profit:0, qty:0 };
+      cur.revenue += revenue; cur.cost += cost; cur.profit += revenue - cost; cur.qty += x.q;
+      map.set(key, cur);
+    });
+  });
+  return Array.from(map.values()).map(r=>({ ...r, revenue:round2(r.revenue), cost:round2(r.cost), profit:round2(r.profit), qty:round4(r.qty) }))
+    .sort((a,b)=>b.profit-a.profit);
+}
+
+/* =====================================================================
+   سن بدهی مشتریان
+   مانده هر مشتری مرجع است. اگر مانده از مجموع باقیماندهٔ فاکتورها کمتر بود (یعنی پرداخت
+   تخصیص‌نیافته دارد)، آن مبلغ از قدیمی‌ترین فاکتورها کم می‌شود. اگر بیشتر بود (مانده
+   افتتاحیه/قدیمی بدون فاکتور)، در گروه «بدون فاکتور» می‌آید.
+   ===================================================================== */
+export const AGING_BUCKETS = [
+  { key:'d0_30',  label:'۰ تا ۳۰ روز',   max:30 },
+  { key:'d31_60', label:'۳۱ تا ۶۰ روز',  max:60 },
+  { key:'d61_90', label:'۶۱ تا ۹۰ روز',  max:90 },
+  { key:'d90p',   label:'بیش از ۹۰ روز', max:Infinity }
+];
+function agingKey(age){ return (AGING_BUCKETS.find(b=>age<=b.max)||AGING_BUCKETS[AGING_BUCKETS.length-1]).key; }
+export function debtAging({ customers, sales, today }){
+  const inv = new Map();
+  (sales||[]).forEach(s=>{
+    const r = Number(s && s.remaining) || 0;
+    if(!s || s.status==='cancelled' || r <= 0.001) return;
+    const list = inv.get(s.customerId) || []; list.push({ date:s.date, remaining:r }); inv.set(s.customerId, list);
+  });
+  const totals = { d0_30:0, d31_60:0, d61_90:0, d90p:0, noInvoice:0, total:0 };
+  const rows = [];
+  (customers||[]).forEach(c=>{
+    const bal = Number(c.balance) || 0;
+    if(bal <= 0.001) return;
+    const list = (inv.get(c.id)||[]).slice().sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+    const sum = list.reduce((a,x)=>a+x.remaining, 0);
+    let credit = Math.max(0, sum - bal);
+    const per = { d0_30:0, d31_60:0, d61_90:0, d90p:0, noInvoice:0 };
+    let oldest = 0;
+    list.forEach(x=>{
+      const used = Math.min(credit, x.remaining); credit -= used;
+      const left = x.remaining - used;
+      if(left <= 0.001) return;
+      const age = Math.max(0, daysBetweenISO(x.date, today));
+      per[agingKey(age)] += left; if(age > oldest) oldest = age;
+    });
+    per.noInvoice = Math.max(0, bal - sum);
+    Object.keys(per).forEach(k=>{ per[k] = round2(per[k]); totals[k] = round2(totals[k] + per[k]); });
+    totals.total = round2(totals.total + bal);
+    rows.push({ id:c.id, name:c.name||'', balance:round2(bal), oldestDays:oldest, ...per });
+  });
+  rows.sort((a,b)=>b.balance-a.balance);
+  return { totals, rows };
 }
