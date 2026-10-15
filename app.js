@@ -1366,6 +1366,39 @@ const App = {
   inventoryValue(){
     return this.state.products.reduce((a,p)=>a+(p.stock*p.avgCost),0);
   },
+  inventoryReportRows(){
+    const threshold = this.state.settings.lowStockThreshold!==undefined ? Number(this.state.settings.lowStockThreshold) : 1;
+    return this.state.products.map(p=>{
+      const stock = Number(p.stock)||0;
+      const avgCost = Number(p.avgCost)||0;
+      const unit = this.unitByName(p, p.defaultSaleUnit);
+      let status = 'موجود';
+      if(p.archived) status = 'بایگانی‌شده';
+      else if(stock < 0) status = 'موجودی منفی';
+      else if(stock === 0) status = 'تمام‌شده';
+      else if(this.isLowStock(p, threshold)) status = 'کم‌موجود';
+      return {
+        'شناسه محصول':p.id||'', 'نام محصول':p.name||'', 'واحد پایه':p.unit||'',
+        'موجودی (نمایش)':this.qtyBreakdown(p, stock), 'موجودی پایه':stock,
+        'واحد هشدار':unit&&unit.name||p.unit||'', 'حد هشدار':threshold,
+        'میانگین بهای خرید هر واحد پایه (افغانی)':avgCost,
+        'ارزش موجودی (افغانی)':round2(stock*avgCost),
+        'قیمت فروش ثبت‌شده':Number(p.sellPrice)||0, 'وضعیت':status
+      };
+    }).sort((a,b)=>String(a['نام محصول']).localeCompare(String(b['نام محصول']), 'fa'));
+  },
+  inventorySummaryRows(rows){
+    const products = rows || this.inventoryReportRows();
+    const active = products.filter(r=>r['وضعیت']!=='بایگانی‌شده');
+    return [
+      {'شرح':'تعداد کل محصولات','مقدار':products.length},
+      {'شرح':'محصولات فعال','مقدار':active.length},
+      {'شرح':'محصولات کم‌موجود','مقدار':active.filter(r=>r['وضعیت']==='کم‌موجود').length},
+      {'شرح':'محصولات تمام‌شده','مقدار':active.filter(r=>r['وضعیت']==='تمام‌شده').length},
+      {'شرح':'محصولات با موجودی منفی','مقدار':active.filter(r=>r['وضعیت']==='موجودی منفی').length},
+      {'شرح':'ارزش کل موجودی (افغانی، شامل موجودی منفی)','مقدار':round2(products.reduce((sum,r)=>sum+(Number(r['ارزش موجودی (افغانی)'])||0),0))},
+    ];
+  },
   totalReceivable(){ return this.state.customers.reduce((a,c)=>a+Math.max(0,c.balance||0),0); },
   totalPayable(){ return this.state.suppliers.reduce((a,c)=>a+Math.max(0,c.balance||0),0); },
   totalPayableUSD(){ return this.state.suppliers.reduce((a,c)=>a+Math.max(0,c.balanceUSD||0),0); },
@@ -4439,6 +4472,12 @@ const App = {
     }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(withdrawalRows), 'برداشت شخصی');
 
+    // Snapshot of current stock; valuation uses the same weighted-average cost stored in avgCost.
+    const inventoryRows = this.inventoryReportRows();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(inventoryRows), 'وضعیت انبار');
+    const inventorySummary = this.inventorySummaryRows(inventoryRows);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(inventorySummary), 'خلاصه انبار');
+
     XLSX.writeFile(wb, 'گزارش-'+label+'-'+todayISO()+'.xlsx');
   },
   renderReports(){
@@ -4604,6 +4643,8 @@ const App = {
     }
     const wb=XLSX.utils.book_new();
     const s=this.state;
+    const inventoryRows = this.inventoryReportRows();
+    const inventorySummary = this.inventorySummaryRows(inventoryRows);
     const sheets = {
       'محصولات': s.products.map(p=>({شناسه:p.id, نام:p.name, واحد:p.unit, موجودی:p.stock, 'میانگین قیمت خرید':p.avgCost, 'قیمت فروش':p.sellPrice})),
       'مشتریان': s.customers.map(c=>({شناسه:c.id, نام:c.name, تلفن:c.phone||'', آدرس:c.address||'', مانده:c.balance||0})),
@@ -4614,6 +4655,8 @@ const App = {
       'دریافت-پرداخت': s.payments.map(x=>({شناسه:x.id, تاریخ:x.date, نوع:x.type==='receive'?'دریافت':'پرداخت', طرف:x.partyName||'', شناسه_طرف:x.partyId||'', ارز:x.currency||'AFN', مبلغ:x.amount})),
       'بدهی افتتاحیه': (s.openingEntries||[]).map(x=>({شناسه:x.id, تاریخ:x.date||'', نوع_طرف:x.partyType||'', طرف:x.partyName||'', شناسه_طرف:x.partyId||'', ارز:x.currency||'AFN', مبلغ:x.amount, یادداشت:x.note||''})),
       'مرجوعی و ابطال': (s.returns||[]).map(x=>({شناسه:x.id, تاریخ:x.date||'', نوع:({return:'مرجوعی',cancel:'ابطال فاکتور',shortage:'کاستی'})[x.kind]||x.kind||'', شماره_فاکتور:x.originalSaleId?this.invoiceNoLabel(x.originalSaleId):'', مشتری:x.customerName||'', مبلغ:x.amount, بهای_کالا:x.cost, دلیل:x.reason||''})),
+      'وضعیت انبار': inventoryRows,
+      'خلاصه انبار': inventorySummary,
     };
     Object.entries(sheets).forEach(([name, rows])=>{
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), name);
