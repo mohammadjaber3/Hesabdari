@@ -31,17 +31,56 @@ import {
 } from "./ledger.js";
 import { buildTrendChartSvg, buildChartLegend } from "./chart.js";
 
-/* ---------- قفل نرمِ نقش «شریک» (فقط دیدن) ----------
-   دیوارِ اصلی همان firestore.rules است، ولی اگر همان‌جا جلوی نوشتن گرفته شود
-   کاربر یک خطای انگلیسیِ نامفهوم می‌بیند. پس همهٔ نوشتن‌ها از یک نقطه رد می‌شوند
-   و برای شریک با یک پیام فارسیِ روشن متوقف می‌شوند.
-   استثنا: setDocRaw — فقط برای PIN شخصی خودِ کاربر. */
-function _assertCanWrite(){
-  let _r=null;
-  try{ _r = App && App.role; }catch(e){ _r=null; }
-  if(_r==='partner'){
-    throw new Error('حساب شما «شریک» است: همه‌چیز را می‌بینید، اما اجازهٔ تغییر، ثبت یا حذف ندارید.');
+/* ---------- سیاست دسترسی نقش «شریک» (راننده) ----------
+   دیوارِ اصلی firestore.rules است؛ این‌جا همان قانون‌ها یک بار هم در خود برنامه چک می‌شود
+   تا کاربر به‌جای خطای انگلیسیِ نامفهومِ سرور، پیام فارسیِ روشن ببیند.
+   شریک «همه‌چیز را می‌بیند» و کارهای روزانه را ثبت می‌کند، ولی:
+     • محصول/موجودی: دیدن؛ تغییر فقط از مسیر فروش و ثبت بل خرید (ویرایش دستی و قیمت‌ها بسته است)
+     • پرداخت/دریافت: فقط «ثبت جدید»؛ ویرایش یا حذف ندارد (فقط یک بار می‌تواند عکس رسید اضافه کند)
+     • مصارف: فقط ثبت جدید؛ حذف/ویرایش ندارد
+     • هیچ حذفی، هیچ مرجوعی/ابطال/ویرایش فاکتور، هیچ خرید جدید و هیچ تنظیماتی ندارد
+   اگر سیاست عوض شد، فقط همین جدول و بخش partner در firestore.rules را عوض کنید. */
+const PARTNER_CAN_CREATE = ['sales','customers','payments','expenses','suppliers','purchases','products','stockLedger','auditLog'];
+const PARTNER_CAN_UPDATE = {
+  sales:['settled','remaining'],            // تسویهٔ فاکتور هنگام دریافت پول
+  customers:['balance','phone','address'],  // مانده و اطلاعات تماس
+  suppliers:['balance','balanceUSD'],       // مانده هنگام پرداخت به عمده‌فروش
+  purchases:['paid','remaining'],           // تسویهٔ بل هنگام پرداخت
+  products:['stock','avgCost','sellPrice'], // موجودی (فروش/خرید)، میانگین بهای خرید، و قیمت فروشِ «اولیه» فقط وقتی هنوز خالی است
+  payments:['receiptImage'],                // فقط افزودن عکس رسید (نه عوض‌کردنش)
+};
+const _PARTNER_META_KEYS = ['lastEditedByEmail','lastEditedByDevice','lastEditedTs','createdByEmail','createdByDevice'];
+const PARTNER_DENIED_MSG = 'حساب شما «شریک» است: این کار (تغییر مهم یا حذف) برای شما مجاز نیست.';
+function _partnerCheck(op, ref, data){
+  let role=null;
+  try{ role = App && App.role; }catch(e){ role=null; }
+  if(role!=='partner') return null;
+  const col = (ref && ref.parent && ref.parent.id) || '';
+  if(op==='delete') return PARTNER_DENIED_MSG;
+  if(op==='create'){
+    if(PARTNER_CAN_CREATE.indexOf(col)<0) return PARTNER_DENIED_MSG;
+    if(col==='payments' && !(Number(data&&data.amount)>0 && !(data&&data.reversalOf))) return PARTNER_DENIED_MSG;
+    if(col==='expenses' && !(Number(data&&data.amount)>0)) return PARTNER_DENIED_MSG;
+    return null;
   }
+  // update
+  const allowed = PARTNER_CAN_UPDATE[col];
+  if(!allowed) return PARTNER_DENIED_MSG;
+  const keys = Object.keys(data||{}).filter(k=>_PARTNER_META_KEYS.indexOf(k)<0);
+  if(keys.some(k=>allowed.indexOf(k)<0)) return PARTNER_DENIED_MSG;
+  if(col==='products' && keys.indexOf('sellPrice')>=0){
+    const op=((App.state&&App.state.products)||[]).find(x=>x.id===ref.id);
+    if(op && Number(op.sellPrice)>0) return PARTNER_DENIED_MSG;   // قیمت فروشِ تعیین‌شده را شریک عوض نمی‌کند
+  }
+  if(col==='payments'){
+    const old=((App.state&&App.state.payments)||[]).find(x=>x.id===ref.id);
+    if(!old || old.receiptImage) return PARTNER_DENIED_MSG;   // عوض‌کردن رسید یعنی ویرایش پرداخت
+  }
+  return null;
+}
+function _assertCanWrite(op, ref, data){
+  const m=_partnerCheck(op, ref, data);
+  if(m) throw new Error(m);
 }
 /* increment() که مقدارش را هم روی خودش نگه می‌دارد تا لایهٔ Stock Ledger بتواند
    «چقدر کم/زیاد شد» را بخواند (SDK خودش این عدد را نمایش نمی‌دهد). */
@@ -61,9 +100,9 @@ function _localFirst(p){
   return Promise.resolve();
 }
 const setDocRaw = (...a)=> _localFirst(_setDoc(...a));
-function setDoc(...a){ _assertCanWrite(); return _localFirst(_setDoc(...a)); }
-function updateDoc(...a){ _assertCanWrite(); return _localFirst(_updateDoc(...a)); }
-function deleteDoc(...a){ _assertCanWrite(); return _localFirst(_deleteDoc(...a)); }
+function setDoc(...a){ _assertCanWrite('create', a[0], a[1]); return _localFirst(_setDoc(...a)); }
+function updateDoc(...a){ _assertCanWrite('update', a[0], a[1]); return _localFirst(_updateDoc(...a)); }
+function deleteDoc(...a){ _assertCanWrite('delete', a[0]); return _localFirst(_deleteDoc(...a)); }
 /* خواندنِ سریع: اول از حافظهٔ گوشی (فوری، بدون شبکه)؛ فقط اگر آنجا نبود از سرور.
    getDoc معمولی در اینترنتِ ضعیف تا ~۱۰ ثانیه منتظر سرور می‌ماند. */
 async function getDocQuick(ref){
@@ -83,7 +122,8 @@ function isConnectivityError(err){
    نوع حرکت (SALE/PURCHASE/...) را کد عملیات قبل از ساخت batch با App._mv(...) مشخص می‌کند. */
 function writeBatch(d, opts){
   const b=_writeBatch(d);
-  const commit=b.commit.bind(b), _set=b.set.bind(b), _update=b.update.bind(b);
+  const commit=b.commit.bind(b), _set=b.set.bind(b), _update=b.update.bind(b), _delete=b.delete.bind(b);
+  let denied=null;   // اولین نقضِ سیاست دسترسی؛ هنگام commit رد می‌شود (نه وسط ساختن batch)
   const noLedger = !!(opts && opts.noLedger);
   let ctx=null;
   try{ if(App){ ctx=App._mvCtx||null; App._mvCtx=null; } }catch(e){ ctx=null; }
@@ -93,7 +133,12 @@ function writeBatch(d, opts){
     if(m && !refId){ refType = m[1]==='sales' ? 'sale' : 'purchase'; refId = m[2]; }
   };
   const prodId=(ref)=>{ const m=/\/products\/([^\/]+)$/.exec((ref&&ref.path)||''); return m?m[1]:null; };
+  b.delete=function(ref,...rest){
+    denied = denied || _partnerCheck('delete', ref);
+    return _delete(ref,...rest);
+  };
   b.update=function(ref,data,...rest){
+    denied = denied || _partnerCheck('update', ref, data);
     noteRef(ref);
     const pid=prodId(ref);
     if(!noLedger && pid && data && data.stock && typeof data.stock.__delta==='number' && data.stock.__delta!==0){
@@ -102,6 +147,7 @@ function writeBatch(d, opts){
     return _update(ref,data,...rest);
   };
   b.set=function(ref,data,...rest){
+    denied = denied || _partnerCheck('create', ref, data);
     noteRef(ref);
     const pid=prodId(ref);
     if(!noLedger && pid && data && typeof data.stock==='number' && data.stock!==0){
@@ -110,7 +156,7 @@ function writeBatch(d, opts){
     return _set(ref,data,...rest);
   };
   b.commit=function(){
-    try{ _assertCanWrite(); }catch(e){ return Promise.reject(e); }
+    if(denied) return Promise.reject(new Error(denied));
     try{
       const running={};
       pending.forEach(mv=>{
@@ -243,6 +289,21 @@ function fmt2(n){
 /* قیمت تمام‌شدهٔ واحد پایه هرگز نباید گرد شود: یک کارتن ۱۶۰۰ افغانی با ۱۴۴ عدد
    می‌شود ۱۱.۱۱۱۱ — اگر ۱۱.۱۱ ذخیره شود، ارزش انبار و سود به‌مرور جابه‌جا می‌شود. */
 function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+/* دفاع لایهٔ دوم در برابر XSS ذخیره‌شده: هر سندی که از Firestore می‌رسد قبل از ورود به state پاک‌سازی می‌شود.
+   شناسه‌ها فقط نویسه‌های امن، تاریخ‌ها فقط ارقام و جداکننده، و عکس‌ها فقط data:image معتبر می‌مانند؛
+   پس حتی اگر سندِ مخرب در دیتابیس باشد، هیچ‌وقت داخل onclick/src/قالب‌ها اجرا نمی‌شود. */
+const _SAFE_IMG = /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+\/=]+$/;
+const _IMG_KEYS = new Set(['billImage','receiptImage','image','photo']);
+function sanitizeDoc(v, key){
+  if(Array.isArray(v)) return v.map(x=>sanitizeDoc(x, key));
+  if(v && typeof v==='object'){ const o={}; for(const k of Object.keys(v)) o[k]=sanitizeDoc(v[k], k); return o; }
+  if(typeof v!=='string') return v;
+  const k = key||'';
+  if(_IMG_KEYS.has(k)) return (v==='' || _SAFE_IMG.test(v)) ? v : '';
+  if(k==='id' || /Id$/.test(k)) return v.replace(/[^A-Za-z0-9_.:\-]/g,'');
+  if(k==='date' || /Date$/.test(k)) return v.replace(/[^0-9\-:T.+Z ]/g,'');
+  return v;
+}
 function sum(arr,key){ return arr.reduce((a,b)=>a+(Number(b[key])||0),0); }
 /* ---------- فشرده‌سازی عکس (بل شرکت / رسید پرداخت) ----------
    عکس‌ها به‌صورت JPEG فشرده و base64 مستقیم داخل سند Firestore ذخیره می‌شوند
@@ -680,7 +741,7 @@ const App = {
         // قبلاً هر تأییدِ سرور کل صفحه را دوباره می‌ساخت و فرم نیمه‌پرشده پاک می‌شد.
         if(this._loadedParts.has(name) && snap.docChanges().length===0){ markPart(name, snap.metadata.hasPendingWrites); return; }
         const arr = [];
-        snap.forEach(d=>arr.push(d.data()));
+        snap.forEach(d=>arr.push(sanitizeDoc(d.data())));
         if(name==='products'){
           const normalized=arr.map(normalizeProductUnitsRecord);
           this.state[name]=normalized;
@@ -699,7 +760,7 @@ const App = {
         this._loadedParts.add(name);
         markPart(name, snap.metadata.hasPendingWrites);
         checkReady();
-      }, (err)=>console.error('sync error ('+name+')', err));
+      }, (err)=>this._onSyncError(name, err, ()=>{ this._loadedParts.add(name); checkReady(); }));
       this._unsubs.push(unsub);
     });
 
@@ -717,7 +778,7 @@ const App = {
       this._loadedParts.add('settings');
       markPart('settings', snap.metadata.hasPendingWrites);
       checkReady();
-    }, (err)=>console.error('sync error (settings)', err));
+    }, (err)=>this._onSyncError('settings', err, ()=>{ this._loadedParts.add('settings'); checkReady(); }));
     this._unsubs.push(unsubSettings);
 
     if(!this._netListenersAdded){
@@ -726,6 +787,20 @@ const App = {
       window.addEventListener('offline', ()=> this._recomputeSyncState());
     }
     this._recomputeSyncState();
+  },
+  /* خطای گوش‌دادن به یک کالکشن (مثلاً رد شدن توسط قوانین Firestore): قبلاً فقط در console می‌ماند و برنامه
+     همیشه روی «در حال بارگذاری» می‌ماند. حالا آن بخش «بارگذاری‌شده (خالی)» حساب می‌شود، برنامه باز می‌شود
+     و کاربر پیام روشن می‌بیند. */
+  _onSyncError(name, err, markLoaded){
+    console.error('sync error ('+name+')', err);
+    try{ markLoaded(); }catch(e){}
+    const denied = err && err.code==='permission-denied';
+    this._syncErrors = this._syncErrors || {};
+    if(!this._syncErrors[name]){
+      this._syncErrors[name] = true;
+      this.toastError(denied ? 'اجازهٔ دیدن بخش «'+name+'» برای حساب شما نیست (قوانین سرور).' : 'خطا در همگام‌سازی بخش «'+name+'».');
+    }
+    if(denied) this._lastWriteError = 'permission-denied: '+name;
   },
   /* رندر ناشی از همگام‌سازی: چند رویداد پشت‌سرهم یک رندر می‌شود، و اگر کاربر وسط پر کردن فرم است
      (فاکتور فروش/خرید، پرداخت و...) صفحه را بازسازی نمی‌کنیم تا چیزی که نوشته پاک نشود. */
@@ -781,7 +856,7 @@ const App = {
   // داده شود، تا وقتی ایمیلش manager@motar.com نباشد، دسترسی مدیریتی نمی‌گیرد.
   OWNER_EMAIL: 'manager@motar.com',
   // مالک عملیاتی: هر کس در Firebase نقش owner داشته باشد (محصول، موجودی، فروش، خرید، پرداخت، گزارش)
-  isOwner(){ return this.role==='owner'; },
+  isOwner(){ return this.role==='owner' && !!this.user && String(this.user.email||'').toLowerCase()===this.OWNER_EMAIL; },
   // مدیر فنی: فقط manager@motar.com — تنظیمات، پشتیبان‌گیری/بازیابی، ابزار تطبیق، پاک‌کردن همه
   isAdmin(){ return this.role==='owner' && !!this.user && String(this.user.email||'').toLowerCase()===this.OWNER_EMAIL; },
   /* --- نقش‌ها ---
@@ -795,11 +870,11 @@ const App = {
   canSeeBooks(){ return !this.isSeller(); },            // خرید/مصارف/شرکت‌ها/سود
   canSeeReports(){ return this.isOwner() || this.isPartner(); },
   roleLabel(){
-    return this.role==='owner' ? 'مالک' : this.role==='partner' ? 'شریک (فقط دیدن)'
+    return this.role==='owner' ? 'مالک' : this.role==='partner' ? 'شریک'
          : this.role==='seller' ? 'فروشنده' : 'کارمند';
   },
   guardWrite(){
-    if(!this.canWrite()){ this.toastError('حساب شما «شریک» است: فقط دیدن، بدون تغییر یا حذف.'); return false; }
+    if(!this.canWrite()){ this.toastError(PARTNER_DENIED_MSG); return false; }
     return true;
   },
   guardBooks(){
@@ -869,6 +944,7 @@ const App = {
   navigate(tab,sub){ this.tab=tab; this.sub=sub||null; this.renderNav(); this.render(); window.scrollTo(0,0); },
 
   renderNav(){
+    { const sb=document.getElementById('btn-settings'); if(sb) sb.style.display = (this.dataReady && this.isAdmin()) ? '' : 'none'; }   // شریک حتی آیکن تنظیمات را نمی‌بیند
     const tabs=[
       {id:'dashboard',ic:'home',lb:'داشبورد'},
       {id:'sale',ic:'receipt',lb:'فروش'},
@@ -1733,6 +1809,7 @@ const App = {
   purchaseNoLabel(purchaseId){ const p=this.state.purchases.find(x=>x.id===purchaseId); return '#'+this.invoiceNoValue(p,'B'); },
   purchaseBillLabel(pur){ return pur.supplierInvoiceNo ? ('بل #'+pur.supplierInvoiceNo) : this.purchaseNoLabel(pur.id); },
   editPurchaseInvoiceNo(purchaseId){
+    if(!this.guardWrite()) return;
     const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
     this.openFormModal({
       title:'شمارهٔ بل عمده‌فروش',
@@ -1837,7 +1914,7 @@ const App = {
       <button class="btn btn-primary" onclick="App.printInvoice()">${ic('printer',15)}چاپ فاکتور</button>
       <button class="btn btn-wa" onclick="App.sendInvoiceWhatsApp('${sale.id}')">${ic('message-circle',15)}ارسال واتساپ</button>
     </div>
-    ${!cancelled?`
+    ${(!cancelled && App.canWrite())?`
     <div class="inv-actions no-print">
       <button class="btn btn-outline" onclick="App.startEditInvoice('${sale.id}')">${ic('pencil',15)}ویرایش فاکتور</button>
       <button class="btn btn-outline" onclick="App.saleAddItem('${sale.id}')">${ic('plus',15)}افزودن قلم</button>
@@ -1952,6 +2029,7 @@ const App = {
   },
 
   startEditInvoice(saleId){
+    if(!this.guardWrite()) return;
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
     if(sale.status==='cancelled'){ this.toast('این فاکتور باطل شده است و قابل ویرایش نیست.'); return; }
     this.editingInvoiceId=saleId;
@@ -2463,7 +2541,7 @@ const App = {
     <div class="card no-print">
       <b style="display:flex;align-items:center;gap:6px;">${ic('camera',16)}عکس بل/فاکتور شرکت</b>
       ${pur.billImage
-        ? `<img src="${pur.billImage}" class="bill-thumb" style="margin-top:10px;" onclick="App.viewPurchaseBillImage('${pur.id}')">`
+        ? `<img src="${escapeHtml(pur.billImage)}" class="bill-thumb" style="margin-top:10px;" onclick="App.viewPurchaseBillImage('${pur.id}')">`
         : `<div class="field-note">هنوز عکسی برای این خرید ثبت نشده.</div>`}
       <button class="btn btn-outline" onclick="App.addPurchaseBillPhoto('${pur.id}')">${ic('camera',16)}${pur.billImage?'تغییر عکس بل':'افزودن عکس بل شرکت'}</button>
     </div>
@@ -2569,6 +2647,7 @@ const App = {
     catch(e){ console.error(e); this._markWriteResult(false,e); throw new Error('خطا در ثبت مرجوعی؛ فاکتور تغییری نکرد. '+(e.message||'')); }
   },
   cancelSale(saleId){
+    if(!this.guardWrite()) return;
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
     if(sale.status==='cancelled'){ this.toast('این فاکتور قبلاً باطل شده است.'); return; }
     this.openConfirmModal({
@@ -2758,6 +2837,7 @@ const App = {
   // را با این دکمه به‌عنوان تخفیف می‌بخشید تا در «طلب از مشتریان» باقی نماند.
   
   applySaleDiscount(saleId){
+    if(!this.guardWrite()) return;
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
     if(sale.status==='cancelled'){ this.toast('این فاکتور باطل شده است.'); return; }
     const remaining=sale.remaining||0;
@@ -2878,6 +2958,7 @@ const App = {
     return {product, u, qty, perBase, addAmount, addPaid};
   },
   saleAddItem(saleId){
+    if(!this.guardWrite()) return;
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
     if(sale.status==='cancelled'){ this.toast('این فاکتور باطل شده است.'); return; }
     if(!this.state.products.length){ this.toast('فهرست محصولات خالی است؛ اول یک محصول اضافه کنید.'); return; }
@@ -3066,6 +3147,7 @@ const App = {
     });
   },
   cancelPurchase(purchaseId){
+    if(!this.guardWrite()) return;
     const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
     if(pur.status==='cancelled'){ this.toast('این بل قبلاً باطل شده است.'); return; }
     let ok=true;
@@ -3166,6 +3248,7 @@ const App = {
     if(pur && pur.billImage) this.viewImage(pur.billImage);
   },
   addPurchaseBillPhoto(purchaseId){
+    if(!this.guardWrite()) return;
     const input=document.createElement('input');
     input.type='file'; input.accept='image/*'; input.capture='environment';
     input.onchange=async ()=>{
@@ -3178,6 +3261,7 @@ const App = {
     input.click();
   },
   purchaseAddItem(purchaseId){
+    if(!this.guardWrite()) return;
     const pur=this.state.purchases.find(x=>x.id===purchaseId); if(!pur) return;
     if(pur.status==='cancelled'){ this.toast('این بل باطل شده است.'); return; }
     if(!this.state.products.length){ this.toast('فهرست محصولات خالی است؛ اول یک محصول اضافه کنید.'); return; }
@@ -3499,6 +3583,7 @@ const App = {
     input.click();
   },
   addPartyManual(type){
+    if(!this.guardWrite()) return;
     const arr = type==='customers' ? this.state.customers : this.state.suppliers;
     const fields = [
       {key:'name', label: type==='customers'?'نام مشتری جدید':'نام شرکت/عمده‌فروش جدید', type:'text'},
@@ -3534,6 +3619,7 @@ const App = {
     });
   },
   setOpeningBalance(type,id){
+    if(!this.guardWrite()) return;
     const arr = type==='customers' ? this.state.customers : this.state.suppliers;
     const p = arr.find(x=>x.id===id); if(!p) return;
     const label = type==='customers'
@@ -3558,6 +3644,7 @@ const App = {
     });
   },
   editParty(type,id){
+    if(!this.guardWrite()) return;
     const arr = type==='customers' ? this.state.customers : this.state.suppliers;
     const p=arr.find(x=>x.id===id); if(!p) return;
     this.openFormModal({
@@ -3585,6 +3672,7 @@ const App = {
     });
   },
   deleteParty(type,id){
+    if(!this.guardWrite()) return;
     const arr = type==='customers' ? this.state.customers : this.state.suppliers;
     const p=arr.find(x=>x.id===id); if(!p) return;
     const hasDebt = Math.abs(p.balance||0)>0.5 || (type==='suppliers' && Math.abs(p.balanceUSD||0)>0.5);
@@ -3673,6 +3761,7 @@ const App = {
     this.navigate('more','expenses');
   },
   deleteExpense(id){
+    if(!this.isOwner()){ this.toastError(PARTNER_DENIED_MSG); return; }
     this.openConfirmModal({ title:'حذف مصرف', msg:'این مصرف حذف شود؟', danger:true, confirmLabel:'حذف شود',
       onConfirm: ()=> deleteDoc(doc(cols.expenses, id)).then(()=>this.toast('حذف شد')).catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); })
     });
@@ -3687,7 +3776,7 @@ const App = {
       if(e.note) subParts.push(e.note);
       const who=this.whoLabel(e);
       return `<div class="row-item"><span class="avt neu">${ic(isW?'hand-coins':'banknote',16)}</span><div class="r-left"><b>${escapeHtml(e.category)}</b><span class="sub">${subParts.map(escapeHtml).join(' · ')}</span>${who?`<span class="sub">${escapeHtml(who)}</span>`:''}</div>
-      <div class="r-right"><span class="num" style="color:var(--red)">-${fmt(e.amount)}</span><span class="icon-btn danger" onclick="App.deleteExpense('${e.id}')" title="حذف">${ic('trash',15)}</span></div></div>`;
+      <div class="r-right"><span class="num" style="color:var(--red)">-${fmt(e.amount)}</span>${App.isOwner()?`<span class="icon-btn danger" onclick="App.deleteExpense('${e.id}')" title="حذف">${ic('trash',15)}</span>`:''}</div></div>`;
     }).join('') : `<div class="empty"><span class="ic">${ic('banknote',24)}</span>هنوز مصرفی ثبت نشده</div>`;
 
     return `
@@ -4446,6 +4535,7 @@ const App = {
     this.render();
   },
   saveSettings(){
+    if(!this.guardWrite()) return;
     const fields = {
       businessName:(document.getElementById('set-name').value||'').trim()||'فروشگاه صانع',
       currency:(document.getElementById('set-currency').value||'').trim()||'افغانی',

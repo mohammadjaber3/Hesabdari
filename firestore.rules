@@ -3,28 +3,27 @@ rules_version = '2';
 // =====================================================================
 //  قوانین امنیتی Firestore — حساب‌داری فروشگاه صانع
 //
-//  ⚠️ پیش‌نویس تست‌نشده روی Emulator. قبل از Publish در Firebase Console:
-//     1) کاتالوگ مشتریان (بخش انتهای این فایل) را حتماً اضافه/ادغام کنید؛
-//        Firebase فقط «یک» فایل قوانین برای کل پروژه دارد و مسیرهای ناشناخته
-//        در اینجا عمداً deny می‌شوند.
-//     2) برای هر کاربر باید سند businesses/main/team/{uid} با فیلد role وجود داشته باشد
-//        (بدون آن دسترسی نمی‌گیرد).
-//     3) اول روی یک پروژهٔ آزمایشی یا با Emulator تست شود (tests/rules.test.mjs).
+//  ⚠️ این فایل روی Emulator اجرا نشده. قبل از Publish:
+//     1) npm install  &&  npm run test:rules   (tests/rules.test.mjs)
+//     2) کاتالوگ مشتریان (بخش انتهایی) را اضافه/ادغام کنید؛ Firebase فقط «یک»
+//        فایل قوانین برای کل پروژه دارد و مسیرهای ناشناخته deny می‌شوند.
+//     3) برای هر کاربر باید سند businesses/main/team/{uid} با فیلد role وجود داشته باشد.
 //
-//  نقش‌ها (فیلد role در سند team):
-//    owner      مالک — همه‌کار (و ایمیلش باید دقیقاً همان ایمیل مالک باشد)
-//    manager    مدیر — عملیات کسب‌وکار، بدون حذف و بدون تنظیمات حساس
-//    accountant حسابدار — دیدن همه، ثبت پرداخت/مصرف/مانده‌های افتتاحیه
-//    warehouse  انباردار — موجودی کالا
-//    salesman   فروشنده (همان seller قدیمی) — فروش/مشتری/دریافت
-//    driver     راننده — فعلاً فقط دیدن کالا و مشتری (مسیر/ماشین در مرحلهٔ بعد)
-//    partner    شریک — فقط دیدن
-//    staff      نقش قدیمی — نوشتن بدون حذف و بدون تنظیمات
+//  نقش‌ها (همان نقش‌هایی که خود برنامه می‌شناسد — دیگر نقشِ بی‌استفاده نداریم):
+//    owner    مالک — همه‌کار (role=owner و ایمیل دقیقاً manager@motar.com)
+//    partner  شریک (راننده) — همه‌چیز را می‌بیند و کارهای روزانه را ثبت می‌کند، ولی:
+//               • محصول/موجودی: دیدن؛ تغییر فقط از مسیر فروش و ثبت بل خرید
+//                 (موجودی/میانگین بها؛ قیمت فروش فقط اگر هنوز خالی باشد)
+//               • بل خرید جدید ثبت می‌کند، ولی ویرایش/ابطال بل ندارد (فقط تسویهٔ پرداخت)
+//               • پرداخت/دریافت و مصارف: فقط ثبت جدید؛ ویرایش/حذف ندارد
+//                 (فقط یک بار می‌تواند عکس رسید اضافه کند)
+//               • هیچ حذفی، مرجوعی، ابطال، ویرایش فاکتور، خرید جدید یا تنظیماتی ندارد
+//    seller   فروشنده (salesman هم قبول می‌شود) — فروش/مشتری/دریافت؛ دفترهای خرید را نمی‌بیند
+//    staff    نقش قدیمی — نوشتن بدون حذف و بدون تنظیمات
 //
-//  محدودیت شناخته‌شده: Firestore نمی‌تواند «یک فیلد» از یک سند را پنهان کند.
-//  قیمت خرید (avgCost) و سود در همان سند محصول/فاکتور هستند؛ پس فروشنده/راننده
-//  در UI نمی‌بینند ولی از طریق API می‌شود خواند. راه‌حل کامل: جدا کردن قیمت
-//  خرید/سود در یک کالکشن خصوصی (مرحلهٔ بعد).
+//  نکته: «همه چیز را ببیند» برای شریک واقعاً اجرا می‌شود (قیمت خرید و سود هم دیده می‌شود).
+//  محدودیت شناخته‌شده: Firestore نمی‌تواند یک فیلد از سند را پنهان کند، و نمی‌تواند تشخیص دهد
+//  تغییر موجودی/بهای شریک «از فروش یا خرید» بوده یا دستی؛ این فقط در UI برنامه بسته است.
 // =====================================================================
 
 service cloud.firestore {
@@ -39,30 +38,32 @@ service cloud.firestore {
     function roleOf(biz) { return get(teamDocPath(biz)).data.role; }
     function isRole(biz, r) { return isMember(biz) && roleOf(biz) == r; }
 
-    // مالک: هم role=owner، هم دقیقاً همان ایمیل (مثل منطق app.js)
     function isOwner(biz) {
       return isRole(biz, 'owner') && request.auth.token.email == 'manager@motar.com';
     }
-    function isManager(biz)    { return isRole(biz, 'manager'); }
-    function isAccountant(biz) { return isRole(biz, 'accountant'); }
-    function isWarehouse(biz)  { return isRole(biz, 'warehouse'); }
-    function isSalesman(biz)   { return isRole(biz, 'salesman') || isRole(biz, 'seller'); }
-    function isDriver(biz)     { return isRole(biz, 'driver'); }
-    function isPartner(biz)    { return isRole(biz, 'partner'); }
-    function isStaff(biz)      { return isRole(biz, 'staff'); }
+    function isPartner(biz) { return isRole(biz, 'partner'); }
+    function isSeller(biz)  { return isRole(biz, 'seller') || isRole(biz, 'salesman'); }
+    function isStaff(biz)   { return isRole(biz, 'staff'); }
 
-    // چه کسانی «دفترها» (خرید، مصارف، عمده‌فروشان، مانده‌ها) را می‌بینند — فروشنده/راننده/انباردار نه
-    function canReadBooks(biz) {
-      return isOwner(biz) || isManager(biz) || isAccountant(biz) || isPartner(biz) || isStaff(biz);
-    }
-    // دیدن فروش و مشتری و کالا
-    function canReadSalesSide(biz) {
-      return canReadBooks(biz) || isSalesman(biz) || isWarehouse(biz) || isDriver(biz);
-    }
+    // دیدن دفترها (خرید، مصارف، عمده‌فروشان): فروشنده نه
+    function canReadBooks(biz)     { return isOwner(biz) || isPartner(biz) || isStaff(biz); }
+    function canReadSalesSide(biz) { return canReadBooks(biz) || isSeller(biz); }
+    // «عملیات روزانه» (فروش، مشتری، دریافت، مصرف)
+    function canOperate(biz)       { return isOwner(biz) || isPartner(biz) || isStaff(biz) || isSeller(biz); }
 
-    // اعتبارسنجی ساده: شناسهٔ سند = فیلد id، و مبلغ عدد معتبر
     function idMatches(docId) { return request.resource.data.id == docId; }
     function num(v) { return v is number; }
+
+    // ---------- اعتبارسنجی محتوا (دفاع در برابر XSS ذخیره‌شده) ----------
+    function d() { return request.resource.data; }
+    function safeDate() {
+      return !('date' in d()) || (d().date is string && d().date.matches('^[0-9\\-:T.+Z ]*$'));
+    }
+    function safeImage(k) {
+      return !(k in d()) || (d()[k] is string && (d()[k] == '' || d()[k].matches('^data:image/(png|jpeg|jpg|webp|gif);base64,.*')));
+    }
+    function safeContent() { return safeDate() && safeImage('billImage') && safeImage('receiptImage'); }
+
     function immutableIdentity() {
       return request.resource.data.id == resource.data.id
         && (!resource.data.keys().hasAny(['invoiceNo']) || request.resource.data.invoiceNo == resource.data.invoiceNo)
@@ -71,43 +72,40 @@ service cloud.firestore {
         && (!resource.data.keys().hasAny(['ts']) || request.resource.data.ts == resource.data.ts);
     }
 
-    // فقط این کلیدها تغییر کرده‌اند
-    function onlyChanges(keys) {
-      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys);
-    }
-    // کلیدهای ردگیری که هر ثبت/ویرایش اضافه می‌کند
-    function metaKeys() {
-      return ['lastEditedByEmail', 'lastEditedByDevice', 'lastEditedTs', 'createdByEmail', 'createdByDevice'];
+    function changedKeys() { return request.resource.data.diff(resource.data).affectedKeys(); }
+    function onlyChanges(keys) { return changedKeys().hasOnly(keys); }
+    function metaKeys() { return ['lastEditedByEmail', 'lastEditedByDevice', 'lastEditedTs']; }
+    function onlyChangesPlusMeta(keys) { return changedKeys().hasOnly(keys.concat(metaKeys())); }
+
+    // فاکتوری که باطل شده دیگر وضعیت/اقلام/مرجوعی/مجموعش عوض نمی‌شود:
+    // جلوی «ابطال همزمان از دو دستگاه» که موجودی و مانده را دو بار تغییر می‌داد.
+    function cancelLocked() {
+      return resource.data.get('status', '') != 'cancelled'
+        || !changedKeys().hasAny(['status', 'items', 'returns', 'total']);
     }
 
     match /businesses/{biz} {
 
-      // ---------- تیم/نقش‌ها: هیچ کلاینتی نمی‌تواند نقش را عوض کند ----------
-      // (نقش‌ها را فقط از Firebase Console یا Admin SDK بسازید/تغییر دهید)
+      // ---------- تیم/نقش‌ها: هیچ کلاینتی نقش را عوض نمی‌کند (فقط Console/Admin SDK) ----------
       match /team/{uid} {
         allow read: if signedIn() && (request.auth.uid == uid || isOwner(biz));
         allow write: if false;
       }
 
-      // ---------- PIN شخصی: هر کس فقط سند خودش ----------
+      // ---------- PIN شخصی ----------
       match /pins/{uid} {
         allow read, write: if signedIn() && request.auth.uid == uid && isMember(biz);
       }
 
-      // ---------- تنظیمات ----------
+      // ---------- تنظیمات: فقط مالک می‌نویسد؛ همه می‌خوانند (برنامه برای بالا آمدن لازم دارد) ----------
       match /meta/settings {
         allow read: if isMember(biz);
-        allow create: if isOwner(biz) || isManager(biz);
-        // تنظیمات حساس فقط مالک؛ نرخ دالر را مدیر/حسابدار هم می‌توانند عوض کنند
-        allow update: if isOwner(biz)
-                      || ((isManager(biz) || isAccountant(biz)) && onlyChanges(['usdRate']));
+        allow create, update: if isOwner(biz);
         allow delete: if false;
       }
       match /meta/{other} {
         allow read, write: if isOwner(biz);
       }
-
-      // ساختار قدیمی (فقط مهاجرت یک‌باره)
       match /data/{doc} {
         allow read, write: if isOwner(biz);
       }
@@ -115,82 +113,92 @@ service cloud.firestore {
       // ---------- محصولات ----------
       match /products/{id} {
         allow read: if canReadSalesSide(biz);
-        allow create: if isOwner(biz) || isManager(biz) || isWarehouse(biz) || isStaff(biz) || isSalesman(biz);
-        allow update: if isOwner(biz) || isManager(biz) || isWarehouse(biz) || isStaff(biz)
-                      // فروشنده فقط موجودی را (با فروش) تغییر می‌دهد، نه قیمت‌ها
-                      || (isSalesman(biz) && onlyChanges(['stock']));
+        // شریک: ساخت کالای جدید فقط برای ثبت بل خرید (در UI از مسیر دیگری بسته است)
+        allow create: if isOwner(biz) || isStaff(biz) || isSeller(biz) || isPartner(biz);
+        allow update: if isOwner(biz) || isStaff(biz)
+                      || (isSeller(biz) && onlyChangesPlusMeta(['stock']))
+                      // شریک: موجودی و میانگین بها (بل خرید)؛ قیمت فروش فقط وقتی هنوز خالی است
+                      || (isPartner(biz) && onlyChangesPlusMeta(['stock', 'avgCost', 'sellPrice'])
+                          && (!changedKeys().hasAny(['sellPrice']) || resource.data.get('sellPrice', 0) == 0));
         allow delete: if isOwner(biz);
       }
 
       // ---------- مشتریان ----------
       match /customers/{id} {
         allow read: if canReadSalesSide(biz);
-        allow create: if isOwner(biz) || isManager(biz) || isAccountant(biz) || isStaff(biz) || isSalesman(biz);
-        allow update: if isOwner(biz) || isManager(biz) || isAccountant(biz) || isStaff(biz) || isSalesman(biz);
+        allow create: if canOperate(biz);
+        allow update: if isOwner(biz) || isStaff(biz) || isSeller(biz)
+                      || (isPartner(biz) && onlyChangesPlusMeta(['balance', 'phone', 'address']));
         allow delete: if isOwner(biz);
       }
 
       // ---------- فروش ----------
       match /sales/{id} {
         allow read: if canReadSalesSide(biz);
-        allow create: if (isOwner(biz) || isManager(biz) || isStaff(biz) || isSalesman(biz))
+        allow create: if canOperate(biz) && safeContent()
                       && idMatches(id) && request.resource.data.invoiceNo is string && request.resource.data.invoiceNo.size() > 0
                       && num(request.resource.data.total) && request.resource.data.total >= 0
                       && request.resource.data.items is list;
-        allow update: if (isOwner(biz) || isManager(biz) || isStaff(biz) || isSalesman(biz)) && immutableIdentity();
-        allow delete: if isOwner(biz);   // فقط برای بازیابی/پاک‌سازی
+        allow update: if (((isOwner(biz) || isStaff(biz) || isSeller(biz)) && immutableIdentity() && cancelLocked())
+                         || (isPartner(biz) && onlyChangesPlusMeta(['settled', 'remaining'])))
+                      && safeContent();
+        allow delete: if isOwner(biz);
       }
 
-      // ---------- دفترها: خرید، عمده‌فروشان، مصارف، مانده‌های افتتاحیه ----------
+      // ---------- دفترها: خرید (شریک فقط تسویه)، عمده‌فروشان، مصارف، مانده‌های افتتاحیه ----------
       match /purchases/{id} {
         allow read: if canReadBooks(biz);
-        allow create: if (isOwner(biz) || isManager(biz) || isStaff(biz) || isWarehouse(biz))
+        allow create: if (isOwner(biz) || isStaff(biz) || isPartner(biz)) && safeContent()
                       && idMatches(id) && request.resource.data.invoiceNo is string && request.resource.data.invoiceNo.size() > 0
                       && num(request.resource.data.total) && request.resource.data.total >= 0
                       && request.resource.data.items is list;
-        allow update: if (isOwner(biz) || isManager(biz) || isStaff(biz) || isWarehouse(biz)) && immutableIdentity();
+        allow update: if (((isOwner(biz) || isStaff(biz)) && immutableIdentity() && cancelLocked())
+                         || (isPartner(biz) && onlyChangesPlusMeta(['paid', 'remaining'])))
+                      && safeContent();
         allow delete: if isOwner(biz);
       }
       match /suppliers/{id} {
         allow read: if canReadBooks(biz);
-        allow create, update: if isOwner(biz) || isManager(biz) || isAccountant(biz) || isStaff(biz) || isWarehouse(biz);
+        allow create: if isOwner(biz) || isStaff(biz) || isPartner(biz);
+        allow update: if isOwner(biz) || isStaff(biz)
+                      || (isPartner(biz) && onlyChangesPlusMeta(['balance', 'balanceUSD']));
         allow delete: if isOwner(biz);
       }
+      // مصارف («مصرف»): شریک فقط ثبت جدید؛ ویرایش و حذف ندارد
       match /expenses/{id} {
         allow read: if canReadBooks(biz);
-        allow create: if (isOwner(biz) || isManager(biz) || isAccountant(biz) || isStaff(biz))
+        allow create: if (isOwner(biz) || isStaff(biz) || isPartner(biz)) && safeContent()
                       && idMatches(id) && num(request.resource.data.amount) && request.resource.data.amount > 0;
-        allow update: if isOwner(biz) || isManager(biz) || isAccountant(biz) || isStaff(biz);
+        allow update: if (isOwner(biz) || isStaff(biz)) && safeContent();
         allow delete: if isOwner(biz);
       }
       match /openingEntries/{id} {
         allow read: if canReadBooks(biz);
-        allow create, update: if isOwner(biz) || isManager(biz) || isAccountant(biz) || isStaff(biz);
+        allow create, update: if isOwner(biz) || isStaff(biz);
         allow delete: if isOwner(biz);
       }
 
-      // ---------- مرجوعی / ابطال / کاستی فروش: رویداد جدا، فقط افزودنی ----------
+      // ---------- مرجوعی / ابطال / کاستی: رویداد جدا، فقط افزودنی؛ شریک ندارد ----------
       match /returns/{id} {
         allow read: if canReadSalesSide(biz);
-        allow create: if (isOwner(biz) || isManager(biz) || isStaff(biz) || isSalesman(biz))
+        allow create: if (isOwner(biz) || isStaff(biz) || isSeller(biz))
                       && idMatches(id) && num(request.resource.data.amount) && request.resource.data.amount >= 0
                       && request.resource.data.originalSaleId is string;
         allow update: if false;
-        allow delete: if isOwner(biz);   // فقط برای «بازیابی/پاک‌کردن همه»
+        allow delete: if isOwner(biz);
       }
 
       // ---------- Stock Ledger و Audit: فقط افزودنی ----------
-      // ثبت: هر نقش عملیاتی (همراه با عملیات فروش/خرید/اصلاح). ویرایش: هرگز. حذف: فقط مالک (برای «بازیابی/پاک‌کردن همه»).
       match /stockLedger/{id} {
-        allow read: if canReadBooks(biz) || isWarehouse(biz);
-        allow create: if (isOwner(biz) || isManager(biz) || isStaff(biz) || isWarehouse(biz) || isSalesman(biz))
+        allow read: if canReadBooks(biz);
+        allow create: if canOperate(biz)
                       && idMatches(id) && request.resource.data.type is string && num(request.resource.data.quantityBase);
         allow update: if false;
         allow delete: if isOwner(biz);
       }
       match /auditLog/{id} {
-        allow read: if isOwner(biz) || isManager(biz) || isAccountant(biz) || isPartner(biz);
-        allow create: if isMember(biz) && !isPartner(biz) && idMatches(id)
+        allow read: if isOwner(biz) || isPartner(biz);
+        allow create: if isMember(biz) && idMatches(id)
                       && request.resource.data.userId == request.auth.token.email;
         allow update, delete: if false;
       }
@@ -198,32 +206,33 @@ service cloud.firestore {
       // ---------- دریافت/پرداخت ----------
       match /payments/{id} {
         allow read: if canReadSalesSide(biz);
-        allow create: if (
-                        // پرداخت/دریافت عادی: مبلغ مثبت
-                        (isOwner(biz) || isManager(biz) || isAccountant(biz) || isStaff(biz) || isSalesman(biz))
-                        && idMatches(id) && num(request.resource.data.amount) && request.resource.data.amount > 0
-                      ) || (
-                        // رویداد معکوسِ ابطال پرداخت: مبلغ منفی، فقط مالک، و شناسهٔ پرداخت اصلی الزامی است
-                        isOwner(biz) && idMatches(id)
-                        && num(request.resource.data.amount) && request.resource.data.amount < 0
-                        && request.resource.data.reversalOf is string
-                        && request.resource.data.status == 'reversal'
+        allow create: if safeContent() && (
+                        // ثبت عادی: مبلغ مثبت، بدون علامت ابطال
+                        (canOperate(biz) && idMatches(id)
+                          && num(request.resource.data.amount) && request.resource.data.amount > 0
+                          && !('reversalOf' in request.resource.data))
+                        ||
+                        // رویداد معکوسِ ابطال: مبلغ منفی، فقط مالک
+                        (isOwner(biz) && idMatches(id)
+                          && num(request.resource.data.amount) && request.resource.data.amount < 0
+                          && request.resource.data.reversalOf is string
+                          && request.resource.data.status == 'reversal')
                       );
-        // ابطال پرداخت با رویداد معکوس انجام می‌شود (مالک): فقط علامت‌گذاری voided روی اصلی مجاز است
-        allow update: if isOwner(biz) || ((isManager(biz) || isAccountant(biz)) && onlyChanges(['receiptImage', 'lastEditedByEmail', 'lastEditedByDevice', 'lastEditedTs']));
-        // حذف واقعی فقط مالک و فقط برای «بازیابی/پاک‌کردن همه». اپ هرگز برای اصلاح اشتباه حذف نمی‌کند (Void).
+        // مالک: ابطال/اصلاح؛ بقیه: فقط یک بار افزودن عکس رسید (نه عوض‌کردنش، نه تغییر مبلغ)
+        allow update: if isOwner(biz)
+                      || ((isPartner(biz) || isSeller(biz) || isStaff(biz))
+                          && !('receiptImage' in resource.data)
+                          && onlyChangesPlusMeta(['receiptImage'])
+                          && safeImage('receiptImage'));
         allow delete: if isOwner(biz);
       }
     }
 
     // =================================================================
     //  کاتالوگ مشتریان (برنامهٔ جداگانه در همین پروژهٔ Firebase)
-    //  ⚠️ قوانین فعلی کاتالوگ در این فایل نیست. قبل از Publish، قوانین فعلی آن را
-    //  اینجا اضافه کنید (مثلاً catalogItems، customerAccounts، pendingOrders)، وگرنه
-    //  با «deny پیش‌فرض» پایین از کار می‌افتد.
+    //  ⚠️ قوانین فعلی کاتالوگ را قبل از Publish اینجا اضافه کنید، وگرنه با «deny پیش‌فرض» از کار می‌افتد.
     // =================================================================
 
-    // هر مسیر دیگر: بسته
     match /{document=**} {
       allow read, write: if false;
     }
