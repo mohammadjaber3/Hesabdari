@@ -4559,7 +4559,8 @@ const App = {
     const a=document.createElement('a');
     a.href=url; a.download=filename;
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    // بعضی مرورگرهای موبایل دانلود را غیرهم‌زمان آغاز می‌کنند؛ فوراً آزادکردن URL ممکن است فایل را خراب کند.
+    setTimeout(()=>URL.revokeObjectURL(url), 1000);
   },
   exportBackup(){
     this._downloadJSON(buildBackup({ businessId:BIZ_ID, state:this.state, appVersion:'hesabdari-app' }), 'backup-hesabdari-'+todayISO()+'.json');
@@ -4573,13 +4574,15 @@ const App = {
     const wb=XLSX.utils.book_new();
     const s=this.state;
     const sheets = {
-      'محصولات': s.products.map(p=>({name:p.name, unit:p.unit, stock:p.stock, avgCost:p.avgCost, sellPrice:p.sellPrice})),
-      'مشتریان': s.customers.map(c=>({name:c.name, phone:c.phone||'', address:c.address||'', balance:c.balance||0})),
-      'عمده‌فروشان': s.suppliers.map(c=>({name:c.name, phone:c.phone||'', address:c.address||'', balance:c.balance||0, balanceUSD:c.balanceUSD||0})),
-      'فروش': s.sales.map(x=>({شماره:this.invoiceNoLabel(x.id), تاریخ:x.date, مشتری:x.customerName, مجموع:x.total, پرداختی:x.paid, باقیمانده:x.remaining, سود:x.profit, وضعیت:x.status})),
-      'خرید': s.purchases.map(x=>({تاریخ:x.date, شماره_بل_عمده_فروش:x.supplierInvoiceNo||'', عمده_فروش:x.supplierName||'نقدی', ارز:x.currency||'AFN', مجموع:x.total, پرداختی:x.paid, باقیمانده:x.remaining, وضعیت:x.status})),
-      'مصارف': s.expenses.map(x=>({تاریخ:x.date, نوع:x.category, مبلغ:x.amount, یادداشت:x.note||''})),
-      'دریافت-پرداخت': s.payments.map(x=>({تاریخ:x.date, نوع:x.type==='receive'?'دریافت':'پرداخت', طرف:x.partyName||'', ارز:x.currency||'AFN', مبلغ:x.amount})),
+      'محصولات': s.products.map(p=>({شناسه:p.id, نام:p.name, واحد:p.unit, موجودی:p.stock, 'میانگین قیمت خرید':p.avgCost, 'قیمت فروش':p.sellPrice})),
+      'مشتریان': s.customers.map(c=>({شناسه:c.id, نام:c.name, تلفن:c.phone||'', آدرس:c.address||'', مانده:c.balance||0})),
+      'عمده‌فروشان': s.suppliers.map(c=>({شناسه:c.id, نام:c.name, تلفن:c.phone||'', آدرس:c.address||'', 'مانده افغانی':c.balance||0, 'مانده دالر':c.balanceUSD||0})),
+      'فروش': s.sales.map(x=>({شناسه:x.id, شماره:this.invoiceNoLabel(x.id), تاریخ:x.date, مشتری:x.customerName||'', مجموع:x.total, پرداختی:x.paid, باقیمانده:x.remaining, سود:x.profit, وضعیت:x.status||''})),
+      'خرید': s.purchases.map(x=>({شناسه:x.id, تاریخ:x.date, 'شماره بل عمده‌فروش':x.supplierInvoiceNo||'', عمده‌فروش:x.supplierName||'نقدی', ارز:x.currency||'AFN', مجموع:x.total, پرداختی:x.paid, باقیمانده:x.remaining, وضعیت:x.status||''})),
+      'مصارف': s.expenses.map(x=>({شناسه:x.id, تاریخ:x.date, نوع:x.category||'', مبلغ:x.amount, یادداشت:x.note||''})),
+      'دریافت-پرداخت': s.payments.map(x=>({شناسه:x.id, تاریخ:x.date, نوع:x.type==='receive'?'دریافت':'پرداخت', طرف:x.partyName||'', شناسه_طرف:x.partyId||'', ارز:x.currency||'AFN', مبلغ:x.amount})),
+      'بدهی افتتاحیه': (s.openingEntries||[]).map(x=>({شناسه:x.id, تاریخ:x.date||'', نوع_طرف:x.partyType||'', طرف:x.partyName||'', شناسه_طرف:x.partyId||'', ارز:x.currency||'AFN', مبلغ:x.amount, یادداشت:x.note||''})),
+      'مرجوعی و ابطال': (s.returns||[]).map(x=>({شناسه:x.id, تاریخ:x.date||'', نوع:({return:'مرجوعی',cancel:'ابطال فاکتور',shortage:'کاستی'})[x.kind]||x.kind||'', شماره_فاکتور:x.originalSaleId?this.invoiceNoLabel(x.originalSaleId):'', مشتری:x.customerName||'', مبلغ:x.amount, بهای_کالا:x.cost, دلیل:x.reason||''})),
     };
     Object.entries(sheets).forEach(([name, rows])=>{
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), name);
