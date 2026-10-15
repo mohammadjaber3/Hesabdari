@@ -4408,6 +4408,37 @@ const App = {
       {'شرح':'سود خالص','مبلغ':revenue-cogs-expTotal},
     ];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), 'خلاصه');
+
+    // جزئیات سود هر محصول؛ همان محاسبه‌ای که در گزارش روی صفحه نمایش داده می‌شود.
+    const productRows = productProfitSummary({ sales:this.state.sales, from:start, to:end }).map(r=>({
+      'شناسه محصول':r.id, 'نام محصول':r.name, 'مقدار فروخته‌شده':r.qty,
+      'فروش خالص قلم':r.revenue, 'بهای تمام‌شده':r.cost, 'سود':r.profit
+    }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(productRows), 'سود محصولات');
+
+    // سن بدهی مشتریان وضعیت امروز است و عمداً مستقل از بازه گزارش فروش باقی می‌ماند.
+    const aging = debtAging({ customers:this.state.customers, sales:this.state.sales, today:todayISO() });
+    const agingRows = aging.rows.map(r=>({
+      'شناسه مشتری':r.id, 'نام مشتری':r.name, 'مجموع بدهی':r.balance,
+      '۰ تا ۳۰ روز':r.d0_30, '۳۱ تا ۶۰ روز':r.d31_60,
+      '۶۱ تا ۹۰ روز':r.d61_90, 'بیش از ۹۰ روز':r.d90p,
+      'بدون فاکتور':r.noInvoice, 'قدیمی‌ترین بدهی (روز)':r.oldestDays
+    }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(agingRows), 'سن بدهی مشتریان');
+
+    // تفکیک مصارف بر اساس دسته و ثبت جداگانه برداشت‌های شخصی، بدون شمردن آن‌ها در سود خالص.
+    const categoryTotals = {};
+    expenses.filter(e=>e.category!==WITHDRAWAL_CATEGORY).forEach(e=>{
+      const category = e.category || 'بدون دسته';
+      categoryTotals[category] = (categoryTotals[category] || 0) + (Number(e.amount) || 0);
+    });
+    const categoryRows = Object.entries(categoryTotals).sort((a,b)=>b[1]-a[1]).map(([category,amount])=>({ 'دسته مصرف':category, 'مجموع مبلغ':round2(amount) }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(categoryRows), 'تفکیک مصارف');
+    const withdrawalRows = expenses.filter(e=>e.category===WITHDRAWAL_CATEGORY).map(e=>({
+      'تاریخ':e.date, 'برداشت‌کننده':e.withdrawnBy || 'نامشخص', 'مبلغ':e.amount, 'یادداشت':e.note || ''
+    }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(withdrawalRows), 'برداشت شخصی');
+
     XLSX.writeFile(wb, 'گزارش-'+label+'-'+todayISO()+'.xlsx');
   },
   renderReports(){
