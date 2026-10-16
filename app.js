@@ -4392,7 +4392,12 @@ const App = {
     const n = buckets.length;
     const key = start+'|'+end;
     // انتخاب پیش‌فرض: جدیدترین بازه. با تغییر دوره دوباره از همان‌جا شروع می‌شود.
-    if(this._chartKey !== key || this._chartSel == null || this._chartSel >= n){ this._chartKey = key; this._chartSel = n-1; }
+    if(this._chartKey !== key || this._chartSel == null || this._chartSel >= n){
+      // پیش‌فرض: آخرین بازه‌ای که معامله دارد (اگر امروز هنوز فروشی نداشته باشد، روز قبل نشان داده شود)
+      let last = n-1;
+      for(let i=n-1;i>=0;i--){ if(buckets[i].invoices || buckets[i].sales || buckets[i].expenses){ last = i; break; } }
+      this._chartKey = key; this._chartSel = last;
+    }
     const view = buckets.map(b=>({
       label: b.from.slice(5),
       title: b.from===b.to ? dateLabelFa(b.from) : (b.from+' تا '+b.to),

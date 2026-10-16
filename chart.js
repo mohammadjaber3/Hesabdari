@@ -89,7 +89,6 @@ export function buildTrendChart({ buckets, hidden, sel, cur, rangeNote, pickFn, 
     const sc = scaleFor(sv, true);
     yA = (v)=> aBot - ((v - sc.lo) / (sc.hi - sc.lo)) * plotS;
     zeroA = r1(yA(0));
-    g += '<text x="4" y="'+(T+11)+'" font-size="10.5" font-weight="700" fill="'+COL.sales+'">فروش خالص</text>';
     for(let k = sc.kLo; k <= sc.kHi; k++){
       const v = k * sc.step, y = r1(yA(v));
       g += '<line x1="'+L+'" y1="'+y+'" x2="'+(W-R)+'" y2="'+y+'" stroke="'+(k===0?'var(--ink-400, #999)':COL.grid)+'" stroke-width="'+(k===0?1.2:1)+'"'+(k===0?'':' stroke-dasharray="3 4"')+'/>';
@@ -104,7 +103,6 @@ export function buildTrendChart({ buckets, hidden, sel, cur, rangeNote, pickFn, 
     const sc = scaleFor(pv, true);
     yP = (v)=> pBot - ((v - sc.lo) / (sc.hi - sc.lo)) * plotP;
     zeroP = r1(yP(0));
-    g += '<text x="4" y="'+(pTop-7)+'" font-size="10.5" font-weight="700" fill="'+COL.profit+'">سود خالص</text>';
     for(let k = sc.kLo; k <= sc.kHi; k++){
       const v = k * sc.step, y = r1(yP(v));
       g += '<line x1="'+L+'" y1="'+y+'" x2="'+(W-R)+'" y2="'+y+'" stroke="'+(k===0?'var(--ink-400, #999)':COL.grid)+'" stroke-width="'+(k===0?1.2:1)+'"'+(k===0?'':' stroke-dasharray="3 4"')+'/>';
