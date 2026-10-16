@@ -1010,6 +1010,27 @@ const App = {
     return this.tab;
   },
 
+  /* ---- نسخهٔ ۲: تم روشن/تاریک، دکمهٔ شناور، برچسب جدول‌ها برای نمای کارتی موبایل ---- */
+  toggleTheme(){
+    const root=document.documentElement;
+    const next = root.getAttribute('data-theme')==='dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try{ localStorage.setItem('hesabdari_theme', next); }catch(e){}
+    const m=document.querySelector('meta[name="theme-color"]'); if(m) m.setAttribute('content', next==='dark' ? '#0E1319' : '#1B2430');
+  },
+  _syncFab(show){
+    const fab=document.getElementById('fab'); if(!fab) return;
+    fab.hidden = !(show && this.dataReady && this.canWrite());
+  },
+  _labelTables(root){
+    (root||document).querySelectorAll('table.inv-table').forEach(t=>{
+      const heads=[...t.querySelectorAll('thead th')].map(th=>th.textContent.trim());
+      t.querySelectorAll('tbody tr').forEach(tr=>{
+        [...tr.children].forEach((td,i)=>{ if(td.tagName==='TD' && heads[i]!==undefined) td.setAttribute('data-label', heads[i]); });
+      });
+    });
+  },
+
   renderNav(){
     { const sb=document.getElementById('btn-settings'); if(sb) sb.style.display = (this.dataReady && this.isAdmin()) ? '' : 'none'; }   // شریک حتی آیکن تنظیمات را نمی‌بیند
     const tabs=[
@@ -1019,18 +1040,19 @@ const App = {
       {id:'customers',ic:'users',lb:'بدهی‌ها'},
       {id:'more',ic:'menu',lb:'بیشتر'},
     ];
-    if(!this.dataReady){ document.getElementById('bottomnav').innerHTML=''; return; }
+    if(!this.dataReady){ document.getElementById('bottomnav').innerHTML=''; this._syncFab(false); return; }
     const visibleTabs = tabs.filter(t=> t.id!=='purchase' || this.canSeeBooks());
     const active = this._navTab();
     document.getElementById('bottomnav').innerHTML = visibleTabs.map(t=>
       `<button class="${active===t.id?'active':''}" onclick="App.navigate('${t.id}')" aria-current="${active===t.id?'page':'false'}">
         <span class="ic">${ic(t.ic,21)}</span><span class="lb">${t.lb}</span>
       </button>`).join('');
+    this._syncFab(active!=='sale');
   },
 
   render(){
     this._renderDeferred = false;
-    if(!this.dataReady){ this.renderLoading(); return; }
+    if(!this.dataReady){ this._syncFab(false); this.renderLoading(); return; }
     this.renderNav();
     const s = document.getElementById('screen');
     let html='';
@@ -5032,3 +5054,7 @@ const App = {
 
 window.App = App;
 App.init();
+
+// هر جا جدول فاکتور/بل روی صفحه یا در مودال ساخته شود، برچسب ستون‌ها برایش گذاشته می‌شود
+// (فقط یک ویژگی نمایشی data-label است؛ به هیچ داده یا محاسبه‌ای دست نمی‌زند)
+new MutationObserver(()=>App._labelTables()).observe(document.body,{childList:true,subtree:true});

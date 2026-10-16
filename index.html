@@ -15,6 +15,13 @@
 <!-- فونت وزیرمتن در styles.css با @font-face و font-display:swap لود می‌شود؛
      یعنی اگر شبکه کند/قطع باشد، متن فوراً با فونت جایگزین سیستم نشان داده می‌شود
      و به محض رسیدن فونت (چه از کش، چه از شبکه)، جایگزین می‌شود — هیچ‌چیزی معطلش نمی‌ماند. -->
+<script>
+  (function(){
+    var t='light';
+    try{ t=localStorage.getItem('hesabdari_theme') || (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); }catch(e){}
+    document.documentElement.setAttribute('data-theme', t);
+  })();
+</script>
 <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
@@ -28,6 +35,10 @@
     </div>
   </div>
   <div class="actions">
+    <button type="button" id="btn-theme" onclick="App.toggleTheme()" title="حالت روشن / تاریک" aria-label="تغییر حالت روشن و تاریک">
+      <svg class="icn moon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"></path></svg>
+      <svg class="icn sun" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+    </button>
     <button type="button" onclick="App.openSearch()" title="جستجو" aria-label="جستجو">
       <svg class="icn" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"></circle><path d="M20 20l-4.4-4.4"></path></svg>
     </button>
@@ -39,6 +50,9 @@
 
 <main id="screen"></main>
 <nav class="bottomnav" id="bottomnav"></nav>
+<button type="button" class="fab" id="fab" hidden onclick="App.navigate('sale')" title="فروش جدید" aria-label="فروش جدید">
+  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+</button>
 
 <div id="modal-root"></div>
 <div id="actionmenu-root"></div>
