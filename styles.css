@@ -9,19 +9,11 @@
 /* ---------- فونت: واقعاً لود می‌شود (قبلاً فقط در font-family نوشته شده بود) ---------- */
 @font-face{
   font-family:'Vazirmatn';
-  src:url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/webfonts/Vazirmatn-Regular.woff2') format('woff2');
-  font-weight:400; font-style:normal; font-display:swap;
+  src:url('./fonts/Vazirmatn-Variable.woff2') format('woff2');
+  font-weight:100 900; font-style:normal; font-display:swap;
 }
-@font-face{
-  font-family:'Vazirmatn';
-  src:url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/webfonts/Vazirmatn-SemiBold.woff2') format('woff2');
-  font-weight:600; font-style:normal; font-display:swap;
-}
-@font-face{
-  font-family:'Vazirmatn';
-  src:url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/webfonts/Vazirmatn-Bold.woff2') format('woff2');
-  font-weight:700; font-style:normal; font-display:swap;
-}
+
+
 
 :root{
   /* خنثی‌ها — سرمه‌ای سرد، هم‌رنگ‌شده با طلایی (خاکستری خالص نداریم) */
@@ -880,3 +872,52 @@ nav.bottomnav button.active .ic{transform:translateY(-1px)}
 :root[data-theme="dark"] .skel{background:linear-gradient(100deg,var(--surface-2) 30%,var(--line-strong) 50%,var(--surface-2) 70%);background-size:300% 100%}
 /* وقتی دکمهٔ شناور دیده می‌شود، فضای انتهای صفحه جا بماند که آخرین کارت زیرش نرود */
 body:has(#fab:not([hidden])){padding-bottom:150px}
+
+/* ---------- کلاس‌های کمکی (جایگزین style های ثابت inline؛ !important تا رفتار قبلی حفظ شود) ---------- */
+.u-height-132px{height:132px!important}
+.u-height-62px{height:62px!important}
+.u-height-190px{height:190px!important}
+.u-margin-top-0{margin-top:0!important}
+.u-color-var-green{color:var(--green)!important}
+.u-color-var-red{color:var(--red)!important}
+.u-cursor-pointer{cursor:pointer!important}
+.u-color-var-gold-700{color:var(--gold-700)!important}
+.u-color-var-gold-d{color:var(--gold-d)!important}
+.u-align-items-end{align-items:end!important}
+.u-margin-bottom-10px{margin-bottom:10px!important}
+.u-font-size-13-5px{font-size:13.5px!important}
+.u-margin-top-12px{margin-top:12px!important}
+.u-align-items-center{align-items:center!important}
+.u-gap-8px{gap:8px!important}
+.u-padding-10px-0{padding:10px 0!important}
+.u-gap-6px{gap:6px!important}
+.u-margin-top-10px{margin-top:10px!important}
+.u-margin-top-4px{margin-top:4px!important}
+.u-gap-5px{gap:5px!important}
+.u-gap-10px{gap:10px!important}
+.u-text-align-center{text-align:center!important}
+.u-font-size-20px{font-size:20px!important}
+.u-font-weight-800{font-weight:800!important}
+.u-font-size-18px{font-size:18px!important}
+.u-text-decoration-underline{text-decoration:underline!important}
+.u-opacity-75{opacity:.75!important}
+.u-justify-content-space-between{justify-content:space-between!important}
+.u-font-size-16px{font-size:16px!important}
+.u-margin-top-6px{margin-top:6px!important}
+.u-text-align-left{text-align:left!important}
+.u-margin-top-2px{margin-top:2px!important}
+.u-margin-top-8px{margin-top:8px!important}
+.u-font-size-12px{font-size:12px!important}
+.u-gap-7px{gap:7px!important}
+.u-margin-bottom-12px{margin-bottom:12px!important}
+.u-flex-1{flex:1!important}
+.u-margin-bottom-8px{margin-bottom:8px!important}
+.u-font-weight-600{font-weight:600!important}
+.u-opacity-8{opacity:.8!important}
+.u-margin-0{margin:0!important}
+.u-width-auto{width:auto!important}
+.u-padding-6px-10px{padding:6px 10px!important}
+.u-margin-top-14px{margin-top:14px!important}
+.u-color-var-red-700{color:var(--red-700)!important}
+.u-background-var-red-050{background:var(--red-050)!important}
+.u-border-color-oklch-89-04-27{border-color:oklch(89% .04 27)!important}
