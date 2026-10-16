@@ -728,3 +728,27 @@ table.inv-table .sub{font-size:var(--fs-xs)}
 @media (max-width:380px){
   .trend-detail .td-grid{grid-template-columns:1fr}
 }
+
+/* ---------- منوی «بیشتر»: گروه‌بندی + زیرعنوان ---------- */
+.more-list .lbl .sub{display:block;font-size:var(--fs-xs);color:var(--ink-500);font-weight:400;margin-top:2px}
+.more-list .ic.warn{background:var(--red-050);color:var(--red-600)}
+.more-list .stock-badge{margin-inline-start:auto}
+.more-list .chev{margin-inline-start:6px}
+
+/* ---------- فرم فروش: نوار ثبت چسبیده به پایین (بالای نوار ناوبری) ---------- */
+.sticky-submit{
+  position:sticky;bottom:calc(74px + env(safe-area-inset-bottom));z-index:var(--z-topbar);
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  margin:10px -4px 4px;padding:10px 12px;
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--r-md);
+  box-shadow:var(--sh-2);
+}
+.sticky-submit > div{display:grid;gap:2px;min-width:0}
+.sticky-submit > div span{font-size:var(--fs-xs);color:var(--ink-500)}
+.sticky-submit > div b{font-size:var(--fs-base);color:var(--ink-900);white-space:nowrap}
+.sticky-submit .btn{width:auto;min-width:140px;min-height:48px;flex:0 0 auto}
+
+/* ---------- تأیید: شیت پایین صفحه، دکمه‌های بزرگ روی هم ---------- */
+.modal-overlay.confirm-sheet .modal-sheet{padding-bottom:calc(var(--sp-4) + env(safe-area-inset-bottom))}
+.modal-actions.stack{flex-direction:column-reverse;gap:var(--sp-2)}
+.modal-actions.stack .btn{width:100%;min-height:50px;font-size:var(--fs-base)}

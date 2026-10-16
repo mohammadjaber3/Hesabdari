@@ -541,6 +541,7 @@ const App = {
     this.resetSaleDraft();
     this.resetPurchaseDraft();
     this.renderLoading();
+    this._initHistory();
     onAuthStateChanged(auth, (u)=>{
       this.user = u;
       if(u){ this.afterLogin(u); }
@@ -941,7 +942,73 @@ const App = {
   },
   resetPurchaseDraft(){ this.purchaseDraft = { items:[], currency:'AFN', txId:uid() }; },
 
-  navigate(tab,sub){ this.tab=tab; this.sub=sub||null; this.renderNav(); this.render(); window.scrollTo(0,0); },
+  /* ---------- دکمهٔ «بازگشت» گوشی ----------
+     هر تب/صفحه یک مرحلهٔ تاریخچه است؛ هر پنجرهٔ باز (فرم، تأیید، منو، جستجو، تصویر) هم یک مرحلهٔ جداست.
+     دکمهٔ بازگشت اول پنجرهٔ باز را می‌بندد، بعد به صفحهٔ قبلی برمی‌گردد. فقط در صفحهٔ اصلی از اپ خارج می‌شود.
+     پنجره‌هایی که با دکمهٔ خودشان بسته شده‌اند، مرحلهٔ «مرده» می‌مانند و popstate آن‌ها را بی‌صدا رد می‌کند. */
+  _pushState(extra){
+    try{ history.pushState(Object.assign({tab:this.tab, sub:this.sub}, extra||{}), ''); }catch(e){}
+  },
+  _pushLayer(){ this._pushState({layer:true}); },
+  _hasLayerTop(){ return !!(history.state && history.state.layer); },
+  /* بستن پنجره از داخل برنامه (دکمهٔ انصراف/ضربدر): اگر مرحلهٔ پنجره بالای تاریخچه است، یک مرحله برمی‌گردیم
+     تا مرحلهٔ «مرده» نماند (وگرنه یک بار زدن بازگشت هیچ‌چیز را عوض نمی‌کرد). */
+  _closeOverlay(clear){
+    clear();
+    if(this._fromPop) return;
+    if(this._hasLayerTop()){
+      this._pendingPops = (this._pendingPops||0) + 1;
+      const tok = this._popTok = (this._popTok||0) + 1;
+      // اگر popstate به هر دلیلی نیامد، قفل ناوبری باز نماند
+      setTimeout(()=>{ if(this._popTok===tok && this._pendingPops>0){ this._pendingPops=0; this._flushDeferred(); } }, 500);
+      try{ history.back(); }catch(e){ this._pendingPops=0; }
+    }
+  },
+  /* اگر یک بازگشتِ ناشی از بستن پنجره هنوز در راه است، کار جدید (باز کردن پنجره/تغییر صفحه) را تا بعد از آن نگه می‌داریم */
+  _defer(fn){
+    if((this._pendingPops||0) > 0){ (this._afterPops = this._afterPops||[]).push(fn); return true; }
+    return false;
+  },
+  _flushDeferred(){
+    const q = this._afterPops || []; this._afterPops = [];
+    q.forEach(f=>{ try{ f(); }catch(e){ console.error(e); } });
+  },
+  _applyNav(tab,sub){ this.tab=tab; this.sub=sub||null; this.renderNav(); this.render(); window.scrollTo(0,0); },
+  navigate(tab,sub){
+    if(this._defer(()=>this.navigate(tab,sub))) return;
+    const same = tab===this.tab && (sub||null)===(this.sub||null);
+    if(!same) this._pushState({tab, sub:sub||null});
+    this._applyNav(tab,sub);
+  },
+  _initHistory(){
+    try{ history.replaceState({tab:this.tab, sub:this.sub}, ''); }catch(e){}
+    window.addEventListener('popstate', (e)=>{
+      // بازگشتی که خودمان برای بستن پنجره فرستاده بودیم: فقط صف کارهای منتظر را اجرا کن
+      if((this._pendingPops||0) > 0){
+        this._pendingPops--;
+        if(this._pendingPops === 0){ this._popTok = (this._popTok||0)+1; this._flushDeferred(); }
+        return;
+      }
+      const st = e.state || {};
+      this._fromPop = true;
+      try{
+        if(this.imageViewerSrc){ this.closeImageViewer(); return; }
+        if(this.searchOpen){ this.closeSearch(); return; }
+        if(this.actionMenu){ this.closeActionMenu(); return; }
+        if(this.modal){ this.closeModal(); return; }
+        if(st.layer){ history.back(); return; }             // پنجرهٔ قبلاً بسته‌شده: ردش کن
+        if(st.tab && this.dataReady && !this.pinLocked && this.user){
+          if(st.tab!==this.tab || (st.sub||null)!==(this.sub||null)) this._applyNav(st.tab, st.sub);
+        }
+      } finally { this._fromPop = false; }
+    });
+  },
+  /* تب ناوبری فعال: صفحه‌های جزئیات زیر همان تب شمرده می‌شوند */
+  _navTab(){
+    if(this.tab==='invoice') return 'sale';
+    if(this.tab==='purchase-view') return 'purchase';
+    return this.tab;
+  },
 
   renderNav(){
     { const sb=document.getElementById('btn-settings'); if(sb) sb.style.display = (this.dataReady && this.isAdmin()) ? '' : 'none'; }   // شریک حتی آیکن تنظیمات را نمی‌بیند
@@ -954,11 +1021,10 @@ const App = {
     ];
     if(!this.dataReady){ document.getElementById('bottomnav').innerHTML=''; return; }
     const visibleTabs = tabs.filter(t=> t.id!=='purchase' || this.canSeeBooks());
-    const lowCount = this.lowStockList().length;
+    const active = this._navTab();
     document.getElementById('bottomnav').innerHTML = visibleTabs.map(t=>
-      `<button class="${this.tab===t.id?'active':''}" onclick="App.navigate('${t.id}')" style="position:relative;">
+      `<button class="${active===t.id?'active':''}" onclick="App.navigate('${t.id}')" aria-current="${active===t.id?'page':'false'}">
         <span class="ic">${ic(t.ic,21)}</span><span class="lb">${t.lb}</span>
-        ${t.id==='more' && lowCount ? `<span class="nav-dot">${lowCount>9?'9+':lowCount}</span>` : ''}
       </button>`).join('');
   },
 
@@ -987,28 +1053,34 @@ const App = {
       <button class="img-viewer-close" onclick="App.closeImageViewer()">${ic('x',16)}بستن</button>
     </div>`;
   },
-  viewImage(src){ if(!src) return; this.imageViewerSrc=src; this.render(); },
-  closeImageViewer(){ this.imageViewerSrc=null; this.render(); },
+  viewImage(src){ if(!src) return; if(this._defer(()=>this.viewImage(src))) return; this._pushLayer(); this.imageViewerSrc=src; this.render(); },
+  closeImageViewer(){ this._closeOverlay(()=>{ this.imageViewerSrc=null; this.render(); }); },
 
   /* =========================================================
      سیستم مودال/فرم داخل‌اپ — جایگزین prompt()/confirm() مرورگر
      ========================================================= */
   openFormModal({title, sub, fields, submitLabel, danger, onSubmit}){
+    if(this._defer(()=>this.openFormModal({title, sub, fields, submitLabel, danger, onSubmit}))) return;
+    this._pushLayer();
     this.modal = {kind:'form', title, sub, fields, submitLabel:submitLabel||'ذخیره', danger:!!danger, onSubmit};
     this.renderModalRoot();
   },
   // مودال با بدنهٔ دلخواه (برای فرم‌هایی که فیلدهایشان به هم وابسته‌اند،
   // مثلاً انتخاب محصول ← واحد ← قیمت خودکار)
   openCustomModal({title, sub, bodyHtml, submitLabel, danger, onSubmit, onOpen}){
+    if(this._defer(()=>this.openCustomModal({title, sub, bodyHtml, submitLabel, danger, onSubmit, onOpen}))) return;
+    this._pushLayer();
     this.modal = {kind:'custom', title, sub, bodyHtml, submitLabel:submitLabel||'ذخیره', danger:!!danger, onSubmit};
     this.renderModalRoot();
     if(onOpen) setTimeout(onOpen,0);
   },
   openConfirmModal({title, msg, danger, confirmLabel, onConfirm}){
+    if(this._defer(()=>this.openConfirmModal({title, msg, danger, confirmLabel, onConfirm}))) return;
+    this._pushLayer();
     this.modal = {kind:'confirm', title, msg, danger:!!danger, confirmLabel:confirmLabel||'تأیید', onConfirm};
     this.renderModalRoot();
   },
-  closeModal(){ this.modal=null; this.renderModalRoot(); },
+  closeModal(){ this._closeOverlay(()=>{ this.modal=null; this.renderModalRoot(); }); },
   /* خطای انگلیسیِ Firestore را به پیام فارسیِ قابل‌فهم تبدیل می‌کند */
   friendlyError(err){
     const code=(err&&err.code)||'', msg=(err&&err.message)||'';
@@ -1056,13 +1128,14 @@ const App = {
     const m=this.modal;
     if(m.kind==='confirm'){
       root.innerHTML = `
-      <div class="modal-overlay center" onclick="if(event.target===this) App.closeModal()">
-        <div class="modal-sheet" style="max-width:380px;">
-          <div class="modal-title">${escapeHtml(m.title||'تأیید')}<span class="close" onclick="App.closeModal()">${ic('x',18)}</span></div>
+      <div class="modal-overlay confirm-sheet" onclick="if(event.target===this) App.closeModal()">
+        <div class="modal-sheet">
+          <div class="sheet-handle"></div>
+          <div class="modal-title">${escapeHtml(m.title||'تأیید')}</div>
           <div class="modal-sub">${escapeHtml(m.msg||'')}</div>
-          <div class="modal-actions">
-            <button class="btn btn-outline" onclick="App.closeModal()">انصراف</button>
+          <div class="modal-actions stack">
             <button class="btn ${m.danger?'btn-danger':'btn-primary'}" onclick="App.confirmModalYes()">${ic(m.danger?'alert-triangle':'check',16)}${escapeHtml(m.confirmLabel)}</button>
+            <button class="btn btn-outline" onclick="App.closeModal()">انصراف</button>
           </div>
         </div>
       </div>`;
@@ -1118,8 +1191,8 @@ const App = {
     </div>`;
   },
 
-  openActionMenu(items){ this.actionMenu = items; this.renderActionMenuRoot(); },
-  closeActionMenu(){ this.actionMenu=null; this.renderActionMenuRoot(); },
+  openActionMenu(items){ if(this._defer(()=>this.openActionMenu(items))) return; this._pushLayer(); this.actionMenu = items; this.renderActionMenuRoot(); },
+  closeActionMenu(){ this._closeOverlay(()=>{ this.actionMenu=null; this.renderActionMenuRoot(); }); },
   runActionMenuItem(idx){
     const items=this.actionMenu; this.closeActionMenu();
     if(items && items[idx] && items[idx].onClick) items[idx].onClick();
@@ -1139,8 +1212,8 @@ const App = {
     </div>`;
   },
 
-  openSearch(){ this.searchOpen=true; this.searchQuery=''; this.renderSearchRoot(); setTimeout(()=>{ const el=document.getElementById('global-search-input'); if(el) el.focus(); },50); },
-  closeSearch(){ this.searchOpen=false; this.renderSearchRoot(); },
+  openSearch(){ if(this._defer(()=>this.openSearch())) return; this._pushLayer(); this.searchOpen=true; this.searchQuery=''; this.renderSearchRoot(); setTimeout(()=>{ const el=document.getElementById('global-search-input'); if(el) el.focus(); },50); },
+  closeSearch(){ this._closeOverlay(()=>{ this.searchOpen=false; this.renderSearchRoot(); }); },
   onSearchInput(v){ this.searchQuery=v; this.renderSearchResultsOnly(); },
   runGlobalSearch(q){
     q=(q||'').trim();
@@ -2272,6 +2345,9 @@ const App = {
       <div class="field-note">اگر مبلغ دریافتی کمتر از مجموع باشد، باقیمانده به عنوان بدهی مشتری ثبت می‌شود.</div>
       <label>یادداشت (اختیاری)</label>
       <input id="sale-note" placeholder="مثلاً تحویل با موتر شرکت">
+    </div>
+    <div class="sticky-submit">
+      <div><span>مجموع فاکتور</span><b class="num">${fmt(total)} ${escapeHtml(this.state.settings.currency)}</b></div>
       <button class="btn btn-primary" onclick="App.submitSale()">${ic('check',17)}ثبت فروش</button>
     </div>
     `;
@@ -3763,15 +3839,22 @@ const App = {
     const lowCount = this.lowStockList().length;
     return `
     <h2 class="section-title" style="margin-top:0;">${ic('menu',17)}بیشتر</h2>
+    ${this.canSeeBooks()||this.canSeeReports()?`<div class="eyebrow"><span>کار روزانه و گزارش</span></div>`:''}
     <div class="more-list">
-      <button onclick="App.navigate('more','lowstock')"><span class="ic">${ic('alert-triangle',17)}</span><span class="lbl">کالاهای کم‌موجود/تمام‌شده ${lowCount?`<span class="stock-badge">${lowCount}</span>`:''}</span><span class="chev">${ic('chevron-left',17)}</span></button>
-      <button onclick="App.navigate('more','history')"><span class="ic">${ic('history',17)}</span><span class="lbl">تاریخچهٔ کامل معاملات</span><span class="chev">${ic('chevron-left',17)}</span></button>
-      ${this.canSeeBooks()?`<button onclick="App.navigate('more','expenses')"><span class="ic">${ic('banknote',17)}</span><span class="lbl">مصارف روزانه و برداشت شخصی</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
-      ${this.canSeeReports()?`<button onclick="App.navigate('more','reports')"><span class="ic">${ic('bar-chart',17)}</span><span class="lbl">گزارش سود روزانه / هفته‌وار / ماهوار</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
-      <button onclick="App.navigate('more','products')"><span class="ic">${ic('archive',17)}</span><span class="lbl">${this.isOwner()?'مدیریت محصولات و موجودی':'مشاهدهٔ محصولات و موجودی'}</span><span class="chev">${ic('chevron-left',17)}</span></button>
+      ${this.canSeeBooks()?`<button onclick="App.navigate('more','expenses')"><span class="ic">${ic('banknote',17)}</span><span class="lbl">مصارف و برداشت شخصی<span class="sub">ثبت هزینه‌های روزانه</span></span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
+      ${this.canSeeReports()?`<button onclick="App.navigate('more','reports')"><span class="ic">${ic('bar-chart',17)}</span><span class="lbl">گزارش سود و زیان<span class="sub">روزانه، هفتگی، ماهانه</span></span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
+      <button onclick="App.navigate('more','history')"><span class="ic">${ic('history',17)}</span><span class="lbl">تاریخچهٔ معاملات<span class="sub">همهٔ فروش، خرید و مصرف</span></span><span class="chev">${ic('chevron-left',17)}</span></button>
+    </div>
+    <div class="eyebrow"><span>کالا و انبار</span></div>
+    <div class="more-list">
+      <button onclick="App.navigate('more','lowstock')"><span class="ic warn">${ic('alert-triangle',17)}</span><span class="lbl">کالاهای کم‌موجود<span class="sub">${lowCount?lowCount+' کالا نیاز به خرید دارد':'موجودی همه کالاها خوب است'}</span></span>${lowCount?`<span class="stock-badge">${lowCount}</span>`:''}<span class="chev">${ic('chevron-left',17)}</span></button>
+      <button onclick="App.navigate('more','products')"><span class="ic">${ic('archive',17)}</span><span class="lbl">${this.isOwner()?'محصولات و موجودی':'مشاهدهٔ محصولات و موجودی'}</span><span class="chev">${ic('chevron-left',17)}</span></button>
+    </div>
+    <div class="eyebrow"><span>حساب</span></div>
+    <div class="more-list">
       ${this.isAdmin()?`<button onclick="App.navigate('more','settings')"><span class="ic">${ic('settings',17)}</span><span class="lbl">تنظیمات و پشتیبان‌گیری</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
       ${this.user?`<button onclick="App.lockNow()"><span class="ic">${ic('lock',17)}</span><span class="lbl">قفل صفحه</span><span class="chev">${ic('chevron-left',17)}</span></button>`:''}
-      <button class="danger" onclick="App.logout()"><span class="ic">${ic('log-out',17)}</span><span class="lbl">خروج از حساب <span class="sub" style="font-size:var(--fs-xs);color:var(--ink-500);">${escapeHtml(this.user?this.user.email:'')}</span></span></button>
+      <button class="danger" onclick="App.logout()"><span class="ic">${ic('log-out',17)}</span><span class="lbl">خروج از حساب<span class="sub">${escapeHtml(this.user?this.user.email:'')}</span></span><span class="chev">${ic('chevron-left',17)}</span></button>
     </div>
     `;
   },
