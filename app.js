@@ -797,7 +797,10 @@ const App = {
     const q = this._afterPops || []; this._afterPops = [];
     q.forEach(f=>{ try{ f(); }catch(e){ console.error(e); } });
   },
-  _applyNav(tab,sub){ this.tab=tab; this.sub=sub||null; this.renderNav(); this.render(); window.scrollTo(0,0); },
+  _applyNav(tab,sub){
+    if(tab!==this.tab || (sub||null)!==(this.sub||null)) this.listUI = {};   // جستجو/فیلتر هر صفحه با ورود به صفحهٔ دیگر پاک می‌شود
+    this.tab=tab; this.sub=sub||null; this.renderNav(); this.render(); window.scrollTo(0,0);
+  },
   navigate(tab,sub){
     if(this._defer(()=>this.navigate(tab,sub))) return;
     const same = tab===this.tab && (sub||null)===(this.sub||null);
@@ -3348,6 +3351,14 @@ const App = {
      نشان می‌دهد — چیزی گم نمی‌شود. */
   setHistoryPeriod(p){ this.historyPeriod=p; this.render(); },
   setHistoryType(t){ this.historyType=t; this.render(); },
+  // ---- جستجو و فیلتر لیست‌ها ----
+  listState(key){ this.listUI = this.listUI || {}; return (this.listUI[key] = this.listUI[key] || {q:'', f:'all'}); },
+  setListQuery(key, value, caret){
+    this.listState(key).q = value;
+    this._restoreFocus = { id:'lq-'+key, pos: (caret==null ? value.length : caret) };   // تا کاربر وسط تایپ، کیبورد نپرد
+    this.render();
+  },
+  setListFilter(key, f){ this.listState(key).f = f; this.render(); },
   
   /* ---------- Reports ---------- */
   setPeriod(p){ this.reportPeriod=p; this.render(); },

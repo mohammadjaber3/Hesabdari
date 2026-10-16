@@ -23,6 +23,7 @@ const APP_SHELL = [
   './ledger.js',
   './views.js',
   './helpers.js',
+  './listtools.js',
   './chart.js',
   './firebase-sdk.js',
   './manifest.json',

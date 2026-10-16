@@ -2,6 +2,7 @@
 import { todayISO, round2, fmtQty, previousRange, changePercent } from "./core.js";
 import { WITHDRAWAL_CATEGORY, salesSummary, productProfitSummary, debtAging, AGING_BUCKETS } from "./ledger.js";
 import { escapeHtml, fmt, fmt2, getDeviceLabel, ic, startOfMonth, startOfWeek, sum } from './helpers.js';
+import { matchQ, listBar, noMatchHtml } from './listtools.js';
 
 let App = null;
 export function bindViews(a){ App = a; }
@@ -50,7 +51,6 @@ export const viewMethods = {
   },
 
   renderNav(){
-    { const sb=document.getElementById('btn-settings'); if(sb) sb.style.display = (this.dataReady && this.isAdmin()) ? '' : 'none'; }   // شریک حتی آیکن تنظیمات را نمی‌بیند
     const tabs=[
       {id:'dashboard',ic:'home',lb:'داشبورد'},
       {id:'sale',ic:'receipt',lb:'فروش'},
@@ -85,6 +85,11 @@ export const viewMethods = {
       default: html=this.renderDashboard();
     }
     s.innerHTML = html + this.renderImageViewer();
+    if(this._restoreFocus){
+      const f = this._restoreFocus; this._restoreFocus = null;
+      const el = document.getElementById(f.id);
+      if(el){ el.focus({preventScroll:true}); try{ el.setSelectionRange(f.pos, f.pos); }catch(e){} }
+    }
   },
 
   renderImageViewer(){
@@ -679,9 +684,19 @@ export const viewMethods = {
     }
     if(sub==='suppliers' && !this.canSeeBooks()) return this.renderNoAccess('شرکت‌ها / عمده‌فروشان');
     const listArr = sub==='customers' ? this.state.customers : this.state.suppliers;
+    const ls = this.listState(sub);
     const sorted = [...listArr].sort((a,b)=>(b.balance||0)-(a.balance||0));
+    const balOf = c => c.balance||0;
+    const chips = [
+      {k:'all', label:'همه', count:listArr.length},
+      {k:'debt', label:'بدهکار', count:listArr.filter(c=>balOf(c)>0.5).length},
+      {k:'credit', label:'طلب شما', count:listArr.filter(c=>balOf(c)<-0.5).length},
+      {k:'settled', label:'تسویه', count:listArr.filter(c=>Math.abs(balOf(c))<=0.5).length},
+    ];
+    const byFilter = c => ls.f==='debt' ? balOf(c)>0.5 : ls.f==='credit' ? balOf(c)<-0.5 : ls.f==='settled' ? Math.abs(balOf(c))<=0.5 : true;
+    const visible = sorted.filter(c => byFilter(c) && matchQ(ls.q, c.name, c.phone, c.address));
     const totalKey = sub==='customers' ? this.totalReceivable() : this.totalPayable();
-    const rows = sorted.length ? sorted.map(c=>{
+    const rows = visible.length ? visible.map(c=>{
       const bal=c.balance||0;
       let badge;
       if(sub==='suppliers'){
@@ -720,7 +735,8 @@ export const viewMethods = {
       <div class="num u-font-size-18px u-font-weight-800 u-color-var-gold-d">${this.usdRate()>0?fmt(this.totalPayableCombinedAFN())+' '+this.state.settings.currency:'نرخ دالر تنظیم نشده'}</div>`:''}
       <div class="field-note u-margin-top-10px">نرخ فعلی دالر: <b class="num">${this.usdRate()>0?fmt2(this.usdRate()):'—'}</b> <span class="u-cursor-pointer u-color-var-gold-d u-text-decoration-underline" onclick="App.quickSetUsdRate()">ویرایش نرخ</span></div>`:''}
     </div>
-    <div class="card">${rows}</div>
+    ${listBar({key:sub, placeholder: sub==='customers'?'جستجوی نام یا شماره مشتری':'جستجوی نام شرکت یا عمده‌فروش', q:ls.q, chips, active:ls.f})}
+    <div class="card">${visible.length || !listArr.length ? rows : noMatchHtml()}</div>
     `;
   },
 
@@ -914,7 +930,16 @@ export const viewMethods = {
     const owner=this.isOwner();
     const threshold = this.state.settings.lowStockThreshold!==undefined ? this.state.settings.lowStockThreshold : 1;
     const sorted=[...this.state.products].sort((a,b)=>a.name.localeCompare(b.name,'fa'));
-    const rows = sorted.length ? sorted.map(p=>{
+    const ls = this.listState('products');
+    const chips = [
+      {k:'all', label:'همه', count:sorted.length},
+      {k:'low', label:'کم‌موجود', count:sorted.filter(p=>this.isLowStock(p,threshold)).length},
+      {k:'out', label:'ناموجود', count:sorted.filter(p=>(p.stock||0)<=0).length},
+      {k:'archived', label:'بایگانی', count:sorted.filter(p=>p.archived).length},
+    ];
+    const byFilter = p => ls.f==='low' ? this.isLowStock(p,threshold) : ls.f==='out' ? (p.stock||0)<=0 : ls.f==='archived' ? !!p.archived : true;
+    const visible = sorted.filter(p => byFilter(p) && matchQ(ls.q, p.name, ...((this.productUnits(p)||[]).map(u=>u.name))));
+    const rows = visible.length ? visible.map(p=>{
       const ladder=this.productUnits(p);
       const txUnits=this.transactionUnits(p);
       const defUnit=this.unitByName(p, p.defaultSaleUnit);
@@ -963,7 +988,8 @@ export const viewMethods = {
     </div>`:''}
     <div class="eyebrow"><span>فهرست محصولات</span><span>${sorted.length} قلم</span></div>
     ${owner&&sorted.length?`<div class="field-note u-margin-bottom-8px">با دکمهٔ ${ic('sliders',13)} روی هر محصول، واحدهای واقعی معامله (کارتن ← قوطی/بسته) و قیمت‌هایشان را ویرایش کنید. «عدد» فقط واحد داخلی محاسبات است.</div>`:''}
-    <div class="card">${rows}</div>
+    ${listBar({key:'products', placeholder:'جستجوی نام کالا یا واحد', q:ls.q, chips, active:ls.f})}
+    <div class="card">${visible.length || !sorted.length ? rows : noMatchHtml()}</div>
     `;
   },
 
@@ -977,33 +1003,35 @@ export const viewMethods = {
     else { start=today; label='امروز'; this.historyPeriod='today'; }
 
     const type=this.historyType||'all';
+    const hq = this.listState('history');
     let rows=[];
     if(type==='all'||type==='sales'){
       this.salesInRange(start,end).forEach(x=>{
         const tag=x.status==='cancelled'?' <span class="badge gold">باطل</span>':'';
-        rows.push({ts:x.ts, html:`<div class="row-item clickable" onclick="App.viewInvoice('${x.id}')"><span class="avt">${ic('receipt',16)}</span><div class="r-left"><b>فروش ${this.invoiceNoLabel(x.id)} · ${escapeHtml(x.customerName)}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم${x.remaining>0.5?' · باقی‌مانده '+fmt(x.remaining):''}</span>${this.whoLabel(x)?`<span class="sub u-opacity-75">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num u-color-var-green">+${fmt(x.paid)}</div></div>`});
+        rows.push({ts:x.ts, q:[x.customerName, ...(x.items||[]).map(i=>i.name)].join(' '), html:`<div class="row-item clickable" onclick="App.viewInvoice('${x.id}')"><span class="avt">${ic('receipt',16)}</span><div class="r-left"><b>فروش ${this.invoiceNoLabel(x.id)} · ${escapeHtml(x.customerName)}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم${x.remaining>0.5?' · باقی‌مانده '+fmt(x.remaining):''}</span>${this.whoLabel(x)?`<span class="sub u-opacity-75">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num u-color-var-green">+${fmt(x.paid)}</div></div>`});
       });
     }
     if(type==='all'||type==='purchases'){
       this.purchasesInRange(start,end).forEach(x=>{
         const tag=x.status==='cancelled'?' <span class="badge gold">باطل</span>':(x.currency==='USD'?' <span class="badge gold">دالر</span>':'');
-        rows.push({ts:x.ts, html:`<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><span class="avt out">${ic('package',16)}</span><div class="r-left"><b>خرید${x.supplierInvoiceNo?' (بل #'+escapeHtml(x.supplierInvoiceNo)+')':''} · ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span>${this.whoLabel(x)?`<span class="sub u-opacity-75">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num u-color-var-red">-${x.currency==='USD'?fmt2(x.paid)+' $':fmt(x.paid)}</div></div>`});
+        rows.push({ts:x.ts, q:[x.supplierName, x.supplierInvoiceNo, ...(x.items||[]).map(i=>i.name)].join(' '), html:`<div class="row-item clickable" onclick="App.viewPurchase('${x.id}')"><span class="avt out">${ic('package',16)}</span><div class="r-left"><b>خرید${x.supplierInvoiceNo?' (بل #'+escapeHtml(x.supplierInvoiceNo)+')':''} · ${escapeHtml(x.supplierName||'—')}</b>${tag}<span class="sub">${x.date} · ${x.items.length} قلم</span>${this.whoLabel(x)?`<span class="sub u-opacity-75">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num u-color-var-red">-${x.currency==='USD'?fmt2(x.paid)+' $':fmt(x.paid)}</div></div>`});
       });
     }
     if(type==='all'||type==='expenses'){
       this.expensesInRange(start,end).forEach(x=>{
         const isW=x.category===WITHDRAWAL_CATEGORY;
-        rows.push({ts:x.ts, html:`<div class="row-item"><span class="avt neu">${ic(isW?'hand-coins':'banknote',16)}</span><div class="r-left"><b>${isW?'برداشت · '+escapeHtml(x.withdrawnBy||''):'مصرف · '+escapeHtml(x.category)}</b><span class="sub">${x.date}${x.note?(' · '+escapeHtml(x.note)):''}</span>${this.whoLabel(x)?`<span class="sub u-opacity-75">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num u-color-var-red">-${fmt(x.amount)}</div></div>`});
+        rows.push({ts:x.ts, q:[x.category, x.withdrawnBy, x.note].join(' '), html:`<div class="row-item"><span class="avt neu">${ic(isW?'hand-coins':'banknote',16)}</span><div class="r-left"><b>${isW?'برداشت · '+escapeHtml(x.withdrawnBy||''):'مصرف · '+escapeHtml(x.category)}</b><span class="sub">${x.date}${x.note?(' · '+escapeHtml(x.note)):''}</span>${this.whoLabel(x)?`<span class="sub u-opacity-75">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num u-color-var-red">-${fmt(x.amount)}</div></div>`});
       });
     }
     if(type==='all'||type==='payments'){
       this.state.payments.filter(x=>x.date>=start && x.date<=end).forEach(x=>{
         const color=x.type==='receive'?'var(--green)':'var(--red)';
         const photoBtn = x.receiptImage ? `<span class="icon-btn" onclick="App.viewPaymentReceipt('${x.id}')" title="مشاهده عکس رسید">${ic('image',15)}</span>` : '';
-        rows.push({ts:x.ts, html:`<div class="row-item"><span class="avt ${x.type==='receive'?'':'out'}">${ic(x.type==='receive'?'arrow-left':'arrow-right',16)}</span><div class="r-left"><b>${x.type==='receive'?'دریافت از':'پرداخت به'} ${escapeHtml(x.partyName||'')}</b>${photoBtn}<span class="sub">${x.date}${x.currency==='USD'?' · دالری':''}</span>${this.whoLabel(x)?`<span class="sub u-opacity-75">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num" style="color:${color}">${x.currency==='USD'?fmt2(x.amount)+' $':fmt(x.amount)}</div></div>`});
+        rows.push({ts:x.ts, q:x.partyName, html:`<div class="row-item"><span class="avt ${x.type==='receive'?'':'out'}">${ic(x.type==='receive'?'arrow-left':'arrow-right',16)}</span><div class="r-left"><b>${x.type==='receive'?'دریافت از':'پرداخت به'} ${escapeHtml(x.partyName||'')}</b>${photoBtn}<span class="sub">${x.date}${x.currency==='USD'?' · دالری':''}</span>${this.whoLabel(x)?`<span class="sub u-opacity-75">${escapeHtml(this.whoLabel(x))}</span>`:''}</div><div class="r-right num" style="color:${color}">${x.currency==='USD'?fmt2(x.amount)+' $':fmt(x.amount)}</div></div>`});
       });
     }
     rows.sort((a,b)=>(b.ts||0)-(a.ts||0));
+    rows = rows.filter(r => matchQ(hq.q, r.q));
 
     return `
     <button class="back-btn" onclick="App.navigate('more')">${ic('chevron-right',16)}بازگشت</button>
@@ -1029,8 +1057,9 @@ export const viewMethods = {
       <button class="${type==='expenses'?'active':''}" onclick="App.setHistoryType('expenses')">مصرف</button>
       <button class="${type==='payments'?'active':''}" onclick="App.setHistoryType('payments')">دریافت/پرداخت</button>
     </div>
+    ${listBar({key:'history', placeholder:'جستجوی نام مشتری، تأمین‌کننده، کالا یا بل', q:hq.q})}
     <div class="field-note">بازه: ${label} (${start==='0000-01-01'?'ابتدا':start} تا ${end}) — ${rows.length} مورد</div>
-    <div class="card">${rows.length?rows.map(r=>r.html).join(''):`<div class="empty"><span class="ic">${ic('history',24)}</span>در این بازه معامله‌ای نیست</div>`}</div>
+    <div class="card">${rows.length?rows.map(r=>r.html).join(''):(hq.q?noMatchHtml():`<div class="empty"><span class="ic">${ic('history',24)}</span>در این بازه معامله‌ای نیست</div>`)}</div>
     `;
   },
 

@@ -921,3 +921,33 @@ body:has(#fab:not([hidden])){padding-bottom:150px}
 .u-color-var-red-700{color:var(--red-700)!important}
 .u-background-var-red-050{background:var(--red-050)!important}
 .u-border-color-oklch-89-04-27{border-color:oklch(89% .04 27)!important}
+
+/* ---------- جستجو و فیلتر لیست‌ها ---------- */
+.list-tools{display:grid;gap:var(--sp-2);margin:var(--sp-3) 0}
+.search-box{
+  position:relative;display:flex;align-items:center;gap:8px;
+  background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--r-sm);
+  padding:0 10px;min-height:44px;color:var(--ink-500);transition:border-color .15s,box-shadow .15s;
+}
+.search-box:focus-within{border-color:var(--gold-500);box-shadow:0 0 0 3px oklch(70% .098 76 / .18)}
+.search-box input[type=search]{
+  flex:1;min-width:0;border:none;background:transparent;padding:10px 0;margin:0;
+  font:inherit;font-size:var(--fs-base);color:var(--ink-900);box-shadow:none;
+}
+.search-box input[type=search]:focus{outline:none;border:none;box-shadow:none}
+.search-box input[type=search]::-webkit-search-cancel-button{display:none}
+.search-clear{
+  flex:0 0 auto;width:26px;height:26px;border-radius:50%;border:none;cursor:pointer;
+  background:var(--surface-2);color:var(--ink-600);font-size:16px;line-height:1;
+}
+.chip-row{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}
+.chip-row::-webkit-scrollbar{display:none}
+.fchip{
+  flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:5px 12px;
+  border:1px solid var(--line-strong);border-radius:var(--r-full);background:var(--surface);
+  color:var(--ink-700);font:inherit;font-size:var(--fs-sm);font-weight:600;cursor:pointer;
+  transition:background .15s,color .15s,border-color .15s;
+}
+.fchip:active{transform:scale(.97)}
+.fchip.active{background:var(--ink-bg);border-color:var(--ink-bg);color:var(--on-dark)}
+.fchip-n{font-size:var(--fs-xs);opacity:.75}
