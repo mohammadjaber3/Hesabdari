@@ -2,7 +2,7 @@
    ledger.js — رویدادهای انبار/حساب و ابزارهای «تطبیق» (Reconcile)
    منطق خالص (بدون صفحه/Firebase) تا هم برنامه هم تست‌ها از یک کد استفاده کنند.
    ===================================================================== */
-import { round2, round4, daysBetweenISO } from "./core.js";
+import { round2, round4, daysBetweenISO, addDaysISO } from "./core.js";
 
 export const MOVEMENT_TYPES = ['PURCHASE','SALE','RETURN','WASTE','ADJUSTMENT','TRANSFER_IN','TRANSFER_OUT','OPENING','COST_CORRECTION'];
 export const WASTE_CATEGORY = 'کاستی و ضایعات جنس';
@@ -272,4 +272,30 @@ export function debtAging({ customers, sales, today }){
   });
   rows.sort((a,b)=>b.balance-a.balance);
   return { totals, rows };
+}
+
+/* =====================================================================
+   نقاط نمودار روند: هر «نقطه» یک بازهٔ زمانی است.
+   - تا ۴۵ روز: هر روز یک نقطه
+   - تا ۱۸۰ روز: هر هفته یک نقطه (بدون بریدن بی‌صدای بازه)
+   - بیشتر: هر ۳۰ روز
+   دورهٔ «امروز» (کمتر از ۷ روز) به ۷ روز آخر گسترش می‌یابد تا نمودار خالی نباشد.
+   ===================================================================== */
+export function trendBuckets({ sales, returns, expenses, start, end }){
+  let s = start;
+  const n0 = daysBetweenISO(start, end) + 1;
+  if(n0 < 7) s = addDaysISO(end, -6);
+  const n = daysBetweenISO(s, end) + 1;
+  const step = n <= 45 ? 1 : n <= 180 ? 7 : 30;
+  const buckets = [];
+  for(let i = 0; i < n; i += step){
+    const from = addDaysISO(s, i);
+    const to = addDaysISO(s, Math.min(n - 1, i + step - 1));
+    const sm = salesSummary({ sales, returns, from, to });
+    const exp = round2((expenses||[]).filter(x=>x.date>=from && x.date<=to && x.category!==WITHDRAWAL_CATEGORY)
+      .reduce((a,x)=>a+(Number(x.amount)||0),0));
+    buckets.push({ from, to, sales: sm.net, grossProfit: sm.grossProfit, expenses: exp,
+      profit: round2(sm.grossProfit - exp), invoices: sm.invoices });
+  }
+  return { buckets, step };
 }

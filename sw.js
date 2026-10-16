@@ -163,7 +163,11 @@ async function cacheFirstShell(req) {
 // فقط برای توسعه روی کامپیوتر خودتان: اول شبکه تا تغییرات فوراً دیده شود
 async function networkFirst(req) {
   try {
-    const res = await fetch(req);
+    // اگر شبکه تا ۳ ثانیه جواب نداد (مثلاً VPN روشن ولی اینترنت قطع)، از کش استفاده کن
+    const res = await Promise.race([
+      fetch(req),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('net-timeout')), 3000)),
+    ]);
     if (res && res.status === 200) { const copy = res.clone(); caches.open(CACHE_VERSION).then((c) => c.put(req, copy)); }
     return res;
   } catch (e) {

@@ -684,3 +684,47 @@ table.inv-table .sub{font-size:var(--fs-xs)}
   *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
 }
 .sync-badge.error .sync-dot{background:var(--red-500);box-shadow:0 0 0 3px oklch(62% .135 27 / .18);animation:pulse 1.2s infinite}
+
+/* ---------- نمودار روند فروش و سود (تعاملی، موبایل‌محور) ---------- */
+.trend-scroll{
+  overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;
+  overscroll-behavior-x:contain;touch-action:pan-x pan-y;
+  border-radius:12px;margin:0 -4px;padding:0 4px;
+  scrollbar-width:thin;
+}
+.trend-scroll svg{direction:ltr}
+.trend-scroll .trend-hit{cursor:pointer}
+.trend-scroll .trend-hit:focus{outline:none}
+.trend-scroll .trend-hit:focus-visible{stroke:var(--gold-500);stroke-width:2}
+.trend-chips{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 10px}
+.trend-chip{
+  display:inline-flex;align-items:center;gap:7px;min-height:36px;padding:6px 12px;
+  border:1px solid var(--line);border-radius:999px;background:var(--surface);
+  color:var(--ink-800);font:inherit;font-size:var(--fs-sm);cursor:pointer;
+  transition:opacity .15s ease,background .15s ease;
+}
+.trend-chip i{width:11px;height:11px;border-radius:3px;display:inline-block}
+.trend-chip[aria-pressed="false"]{opacity:.45;background:transparent}
+.trend-chip:active{transform:scale(.97)}
+.trend-detail{
+  margin-top:12px;padding:12px 14px;border-radius:12px;
+  background:var(--gold-050);border:1px solid var(--gold-300);
+}
+.trend-detail .td-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.trend-detail .td-head b{font-size:var(--fs-sm);color:var(--ink-900)}
+.trend-detail .td-head .sub{font-size:var(--fs-xs);color:var(--ink-500)}
+.trend-detail .td-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px}
+.trend-detail .td-grid span{display:block;font-size:var(--fs-xs);color:var(--ink-500);margin-bottom:2px}
+.trend-detail .td-grid b{font-size:var(--fs-sm);color:var(--ink-900);overflow-wrap:anywhere}
+.trend-detail .td-grid b.pos{color:var(--green-700)}
+.trend-detail .td-grid b.neg{color:var(--red-600)}
+.trend-total{
+  display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;
+  margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);
+  font-size:var(--fs-xs);color:var(--ink-600);
+}
+.trend-total b.pos{color:var(--green-700)}
+.trend-total b.neg{color:var(--red-600)}
+@media (max-width:380px){
+  .trend-detail .td-grid{grid-template-columns:1fr}
+}

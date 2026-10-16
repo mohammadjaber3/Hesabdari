@@ -1,9 +1,21 @@
 /* =====================================================================
-   chart.js — نمودار روند فروش و سود (SVG خالص، بدون هیچ کتابخانهٔ بیرونی)
-   قبلاً نمودار با Chart.js از cdnjs لود می‌شد؛ اگر اینترنت کند/قطع یا cdnjs
-   فیلتر بود، بعد از ۳ ثانیه نمودار حذف می‌شد. این نسخه همیشه و آفلاین کار می‌کند.
-   منطق خالص است (رشته برمی‌گرداند) تا جدا تست شود.
+   chart.js — نمودار روند فروش و سود (SVG خالص، بدون کتابخانهٔ بیرونی)
+   - ستون‌ها: فروش خالص هر بازه (طلایی)
+   - خط + ناحیه: سود خالص هر بازه (سبز؛ زیر صفر قرمز)
+   - لمس/کلیک روی هر ستون: جزئیات همان بازه زیر نمودار
+   - دکمه‌های راهنما: نمایش/پنهان کردن هر سری
+   - بازه‌های طولانی: محور افقی اسکرول می‌شود و از آخرین (جدیدترین) بازه شروع می‌کند
+   منطق خالص است (رشته HTML برمی‌گرداند) تا جدا تست شود.
    ===================================================================== */
+
+const COL = {
+  sales: '#C9922B',
+  profit: '#227A57',
+  loss: '#B5473A',
+  grid: 'var(--line, #e6e6e6)',
+  axis: 'var(--ink-500, #777)',
+  sel: 'rgba(120,120,120,.13)'
+};
 
 function num(n){ const x = Number(n); return Number.isFinite(x) ? x : 0; }
 
@@ -27,63 +39,115 @@ export function shortNum(n){
   return String(Math.round(v*100)/100);
 }
 
+export function fmtInt(n){ return Math.round(num(n)).toLocaleString('en-US'); }
+
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+const r1 = (x)=> Math.round(x*10)/10;
 
-/* series: [{ name, color, values:[...] }] — طول values با labels برابر است */
-export function buildTrendChartSvg({ labels, series, width, height, ariaLabel }){
-  const W = width || 640, H = height || 240;
-  const L = 46, R = 22, T = 12, B = 26;           // حاشیه‌ها
+/* buckets: [{ label:'10-16', title:'جمعه ۲۰۲۶-۱۰-۱۶', from, to, sales, profit, expenses, invoices }]
+   hidden: ['sales'|'profit'] سری‌های پنهان ؛ sel: اندیس بازهٔ انتخاب‌شده ؛ cur: واحد پول
+   toggleFn / pickFn: نام تابع‌های سراسری (App) که کلیک‌ها را می‌گیرند */
+export function buildTrendChart({ buckets, hidden, sel, cur, rangeNote, pickFn, toggleFn }){
+  const list = buckets || [];
+  const n = list.length;
+  const hid = hidden || [];
+  const showS = hid.indexOf('sales') < 0, showP = hid.indexOf('profit') < 0;
+  const selI = Math.min(Math.max(0, sel == null ? n - 1 : sel), Math.max(0, n - 1));
+
+  /* ---- ابعاد: هر بازه ستونی با عرض ثابت؛ اگر زیاد بود، SVG عریض‌تر و اسکرول می‌شود ---- */
+  const H = 236, L = 50, R = 14, T = 16, B = 30;
+  const band = 36;
+  const W = Math.max(330, n * band + L + R);
   const pw = W - L - R, ph = H - T - B;
-  const n = (labels || []).length;
-  const list = (series || []).map(s=>({ ...s, values: (s.values || []).map(num) }));
-  const all = list.reduce((a,s)=>a.concat(s.values), []);
-  let lo = Math.min(0, ...all, 0), hi = Math.max(0, ...all, 0);
-  if(hi === lo) hi = lo + 1;
-  const step = niceStep(hi - lo, 4);
-  lo = Math.floor(lo / step) * step;
-  hi = Math.ceil(hi / step) * step;
-  if(hi === lo) hi = lo + step;
 
-  const X = (i)=> L + (n <= 1 ? pw/2 : (pw * i) / (n - 1));
+  const sv = list.map(b=>num(b.sales)), pv = list.map(b=>num(b.profit));
+  const all = [0].concat(showS ? sv : [], showP ? pv : []);
+  let lo = Math.min.apply(null, all), hi = Math.max.apply(null, all);
+  if(hi === lo) hi = lo + 4;   // همه صفر: محور ۰ تا ۴ (گام ۱) نه ۰٫۲۵
+  const yStep = niceStep(hi - lo, 4);
+  const kLo = Math.floor(lo / yStep), kHi = Math.ceil(hi / yStep);
+  lo = kLo * yStep; hi = kHi * yStep;
+
+  const X = (i)=> L + band * (i + 0.5);
   const Y = (v)=> T + ph - ((v - lo) / (hi - lo)) * ph;
-  const f1 = (x)=> (Math.round(x*10)/10);
+  const zeroY = r1(Y(0));
 
   let g = '';
-  // خطوط شبکه و برچسب‌های محور عمودی
-  for(let v = lo; v <= hi + step/1000; v += step){
-    const y = f1(Y(v));
-    const zero = Math.abs(v) < step/1000;
-    g += '<line x1="'+L+'" y1="'+y+'" x2="'+(W-R)+'" y2="'+y+'" stroke="'+(zero?'var(--line-strong, #c9c9c9)':'var(--line, #e6e6e6)')+'" stroke-width="'+(zero?1.2:1)+'"'+(zero?'':' stroke-dasharray="3 4"')+'/>';
-    g += '<text x="'+(L-6)+'" y="'+(y+3.5)+'" text-anchor="end" font-size="10" fill="var(--ink-500, #777)">'+esc(shortNum(v))+'</text>';
+  /* خطوط شبکه و برچسب محور عمودی */
+  for(let k = kLo; k <= kHi; k++){
+    const v = k * yStep;
+    const y = r1(Y(v));
+    const isZero = k === 0;
+    g += '<line x1="'+L+'" y1="'+y+'" x2="'+(W-R)+'" y2="'+y+'" stroke="'+(isZero?'var(--ink-400, #999)':COL.grid)+'" stroke-width="'+(isZero?1.2:1)+'"'+(isZero?'':' stroke-dasharray="3 4"')+'/>';
+    g += '<text x="'+(L-7)+'" y="'+(y+3.5)+'" text-anchor="end" font-size="10.5" fill="'+COL.axis+'">'+esc(shortNum(v))+'</text>';
   }
-  // برچسب‌های محور افقی (کم‌شمار تا روی هم نیفتند)
-  const every = Math.max(1, Math.ceil(n / 7));
-  for(let i = 0; i < n; i++){
-    if(i % every !== 0 && i !== n - 1) continue;
-    if(i !== n - 1 && (n - 1 - i) < every / 2) continue; // نزدیکِ آخرین برچسب نباشد
-    g += '<text x="'+f1(X(i))+'" y="'+(H-8)+'" text-anchor="middle" font-size="10" fill="var(--ink-500, #777)">'+esc(labels[i])+'</text>';
-  }
-  // ناحیهٔ زیر خط + خط + نقطه‌ها
-  list.forEach(s=>{
-    if(!s.values.length) return;
-    const pts = s.values.map((v,i)=>[f1(X(i)), f1(Y(v))]);
-    const color = s.color || '#227A57';
-    if(pts.length > 1){
-      const base = f1(Y(Math.max(lo, Math.min(0, hi))));
-      g += '<path d="M'+pts[0][0]+' '+base+' L'+pts.map(p=>p[0]+' '+p[1]).join(' L')+' L'+pts[pts.length-1][0]+' '+base+' Z" fill="'+color+'" fill-opacity="0.10" stroke="none"/>';
-      g += '<polyline points="'+pts.map(p=>p[0]+','+p[1]).join(' ')+'" fill="none" stroke="'+color+'" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>';
-    }
-    if(pts.length <= 14){
-      pts.forEach((p,i)=>{ g += '<circle cx="'+p[0]+'" cy="'+p[1]+'" r="3" fill="var(--surface, #fff)" stroke="'+color+'" stroke-width="2"><title>'+esc(s.name)+' '+esc(labels[i])+': '+esc(Math.round(s.values[i]).toLocaleString('en-US'))+'</title></circle>'; });
-    }
+
+  /* ناحیهٔ انتخاب‌شده */
+  if(n) g += '<rect x="'+r1(L+band*selI+2)+'" y="'+T+'" width="'+(band-4)+'" height="'+ph+'" rx="6" fill="'+COL.sel+'"/>';
+
+  /* ستون‌های فروش */
+  if(showS) list.forEach((b,i)=>{
+    const bw = Math.min(22, band*0.56);
+    const y1 = Y(sv[i]);
+    const top = r1(Math.min(y1, zeroY)), h = Math.max(1, r1(Math.abs(y1 - zeroY)));
+    g += '<rect x="'+r1(X(i)-bw/2)+'" y="'+top+'" width="'+r1(bw)+'" height="'+h+'" rx="3" fill="'+COL.sales+'" fill-opacity="'+(i===selI?'1':'.6')+'"/>';
   });
 
-  return '<svg viewBox="0 0 '+W+' '+H+'" width="100%" role="img" aria-label="'+esc(ariaLabel || 'نمودار روند فروش و سود')+'" '
-    + 'style="display:block;max-width:100%;height:auto;font-family:inherit">'+g+'</svg>';
-}
+  /* خط سود + ناحیه */
+  if(showP && n){
+    const pts = pv.map((v,i)=>[r1(X(i)), r1(Y(v))]);
+    if(pts.length > 1){
+      g += '<path d="M'+pts[0][0]+' '+zeroY+' L'+pts.map(p=>p[0]+' '+p[1]).join(' L')+' L'+pts[pts.length-1][0]+' '+zeroY+' Z" fill="'+COL.profit+'" fill-opacity=".1"/>';
+      g += '<polyline points="'+pts.map(p=>p[0]+','+p[1]).join(' ')+'" fill="none" stroke="'+COL.profit+'" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>';
+    }
+    pts.forEach((p,i)=>{
+      const neg = pv[i] < 0, isSel = i === selI;
+      g += '<circle cx="'+p[0]+'" cy="'+p[1]+'" r="'+(isSel?5.5:3.2)+'" fill="'+(neg?COL.loss:COL.profit)+'" stroke="var(--surface, #fff)" stroke-width="'+(isSel?2:1.2)+'"/>';
+    });
+  }
 
-/* راهنمای رنگ‌ها (HTML) */
-export function buildChartLegend(series){
-  return '<div class="chart-legend">'+(series||[]).map(s=>
-    '<span><i style="background:'+esc(s.color)+'"></i>'+esc(s.name)+'</span>').join('')+'</div>';
+  /* برچسب محور افقی (فاصلهٔ بین برچسب‌ها حداقل ~۴۸px) */
+  const every = Math.max(1, Math.ceil(48 / band));
+  list.forEach((b,i)=>{
+    if(i % every !== 0 && i !== n-1) return;
+    const bold = i === selI;
+    g += '<text x="'+r1(X(i))+'" y="'+(H-9)+'" text-anchor="middle" font-size="10.5" fill="'+(bold?'var(--ink-900, #222)':COL.axis)+'"'+(bold?' font-weight="700"':'')+'>'+esc(b.label)+'</text>';
+  });
+
+  /* ناحیه‌های کلیک/لمس برای هر بازه */
+  if(pickFn) list.forEach((b,i)=>{
+    const t = esc(b.title)+': فروش '+fmtInt(sv[i])+' · سود '+fmtInt(pv[i]);
+    g += '<rect class="trend-hit" x="'+r1(L+band*i)+'" y="0" width="'+band+'" height="'+H+'" fill="transparent" role="button" tabindex="0" aria-label="'+t+'" onclick="'+pickFn+'('+i+')" onkeydown="if(event.key===\'Enter\')'+pickFn+'('+i+')"><title>'+t+'</title></rect>';
+  });
+
+  const svg = '<svg viewBox="0 0 '+W+' '+H+'" width="'+(W>330?W+'px':'100%')+'" role="img" aria-label="نمودار روند فروش و سود" style="display:block;font-family:inherit;user-select:none;-webkit-user-select:none">'+g+'</svg>';
+
+  /* ---- راهنمای تعاملی (دکمه‌ها) ---- */
+  const chip = (key, label, color, on)=>
+    '<button type="button" class="trend-chip" aria-pressed="'+(on?'true':'false')+'"'+(toggleFn?' onclick="'+toggleFn+'(\''+key+'\')"':'')+'>'
+    +'<i style="background:'+color+'"></i>'+esc(label)+'</button>';
+  const legend = '<div class="trend-chips">'+chip('sales','فروش خالص',COL.sales,showS)+chip('profit','سود خالص',COL.profit,showP)+'</div>';
+
+  /* ---- جزئیات بازهٔ انتخاب‌شده ---- */
+  let detail = '';
+  if(n){
+    const b = list[selI];
+    const pr = pv[selI];
+    detail = '<div class="trend-detail">'
+      + '<div class="td-head"><b>'+esc(b.title)+'</b><span class="sub">'+(b.invoices||0)+' فاکتور</span></div>'
+      + '<div class="td-grid">'
+      +   '<div><span>فروش خالص</span><b class="num">'+fmtInt(sv[selI])+' '+esc(cur||'')+'</b></div>'
+      +   '<div><span>سود خالص</span><b class="num '+(pr<0?'neg':'pos')+'">'+fmtInt(pr)+' '+esc(cur||'')+'</b></div>'
+      +   '<div><span>مصارف</span><b class="num">'+fmtInt(b.expenses)+'</b></div>'
+      +   '<div><span>سود ناخالص</span><b class="num">'+fmtInt(b.grossProfit)+'</b></div>'
+      + '</div></div>';
+  }
+
+  /* ---- مجموع کل بازه ---- */
+  const totS = sv.reduce((a,x)=>a+x,0), totP = pv.reduce((a,x)=>a+x,0);
+  const totals = '<div class="trend-total"><span>مجموع بازه'+(rangeNote?' ('+esc(rangeNote)+')':'')+'</span><span class="num">فروش '+fmtInt(totS)+' · سود <b class="'+(totP<0?'neg':'pos')+'">'+fmtInt(totP)+'</b></span></div>';
+
+  /* dir=rtl: نقطهٔ شروع اسکرول سمت راست است، یعنی جدیدترین بازه‌ها دیده می‌شوند */
+  const scroll = '<div class="trend-scroll" dir="rtl">'+svg+'</div>';
+  return legend + scroll + detail + totals;
 }

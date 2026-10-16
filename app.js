@@ -27,9 +27,9 @@ import {
   reconcileCustomers, reconcileSuppliers, reconcileStock, reconcileInvoices, negativeStockProducts,
   buildAuditEntry, summarizeDoc, WASTE_CATEGORY, WITHDRAWAL_CATEGORY, DEFAULT_WAREHOUSE,
   buildReturnEvent, salesSummary, reconcileReturns, saleReturnedAmount,
-  productProfitSummary, debtAging, AGING_BUCKETS
+  productProfitSummary, debtAging, AGING_BUCKETS, trendBuckets
 } from "./ledger.js";
-import { buildTrendChartSvg, buildChartLegend } from "./chart.js";
+import { buildTrendChart } from "./chart.js";
 
 /* ---------- سیاست دسترسی نقش «شریک» (راننده) ----------
    دیوارِ اصلی firestore.rules است؛ این‌جا همان قانون‌ها یک بار هم در خود برنامه چک می‌شود
@@ -4388,27 +4388,37 @@ const App = {
   setPeriod(p){ this.reportPeriod=p; this.render(); },
   /* نمودار روند فروش و سود — SVG داخلی (بدون Chart.js و بدون اینترنت). همزمان با خود صفحه ساخته می‌شود. */
   trendChartHtml(start,end){
-    // برای دورهٔ «امروز» یا بازه‌های خیلی کوتاه، ۷ روز آخر را نشان بده تا نمودار خالی نباشد
-    let dStartISO=start; const dEndISO=end;
-    let days = daysBetweenISO(dStartISO,dEndISO)+1;
-    if(days<7){ dStartISO=addDaysISO(dEndISO,-6); days=7; }
-    if(days>60){ dStartISO=addDaysISO(dEndISO,-59); days=60; }
-    const labels=[], salesSeries=[], profitSeries=[];
-    for(let i=0;i<days;i++){
-      const iso=addDaysISO(dStartISO,i);
-      labels.push(iso.slice(5));
-      const dsm=salesSummary({ sales:this.state.sales, returns:this.state.returns, from:iso, to:iso });
-      salesSeries.push(dsm.net);
-      profitSeries.push(dsm.grossProfit - sum(this.expensesInRange(iso,iso).filter(e=>e.category!==WITHDRAWAL_CATEGORY),'amount'));
-    }
-    const series=[
-      {name:'فروش', color:'#C9922B', values:salesSeries},
-      {name:'سود', color:'#227A57', values:profitSeries}
-    ];
-    const empty = salesSeries.every(v=>!v) && profitSeries.every(v=>!v);
-    return `<div class="chart-box" dir="ltr">${buildTrendChartSvg({labels, series})}</div>`
-      + buildChartLegend(series)
-      + (empty ? '<div class="field-note">در این بازه هنوز فروشی ثبت نشده؛ خط‌ها صفر نشان داده می‌شوند.</div>' : '');
+    const { buckets, step } = trendBuckets({ sales:this.state.sales, returns:this.state.returns, expenses:this.state.expenses, start, end });
+    const n = buckets.length;
+    const key = start+'|'+end;
+    // انتخاب پیش‌فرض: جدیدترین بازه. با تغییر دوره دوباره از همان‌جا شروع می‌شود.
+    if(this._chartKey !== key || this._chartSel == null || this._chartSel >= n){ this._chartKey = key; this._chartSel = n-1; }
+    const view = buckets.map(b=>({
+      label: b.from.slice(5),
+      title: b.from===b.to ? dateLabelFa(b.from) : (b.from+' تا '+b.to),
+      from: b.from, to: b.to, sales: b.sales, profit: b.profit, expenses: b.expenses, grossProfit: b.grossProfit, invoices: b.invoices
+    }));
+    const note = step>1 ? ('هر بازه '+step+' روز') : 'هر ستون یک روز';
+    const allZero = view.every(b=>!b.sales && !b.profit);
+    return buildTrendChart({ buckets:view, hidden:this._chartHidden||[], sel:this._chartSel, cur:this.state.settings.currency,
+      rangeNote:note, pickFn:'App.chartPick', toggleFn:'App.chartToggle' })
+      + (allZero ? '<div class="field-note">در این بازه هنوز فروشی ثبت نشده؛ خط‌ها صفر نشان داده می‌شوند.</div>' : '');
+  },
+  /* کلیک روی یک بازهٔ نمودار: فقط همان بازه را انتخاب کن و گزارش را دوباره بساز (اسکرول افقی حفظ می‌شود) */
+  chartPick(i){ this._chartSel = i; this._rerenderKeepChart(); },
+  chartToggle(k){
+    const hidden = (this._chartHidden||[]).slice();
+    const i = hidden.indexOf(k);
+    if(i >= 0) hidden.splice(i,1);
+    else if(hidden.length === 0) hidden.push(k);   // حداقل یک سری باید دیده شود
+    this._chartHidden = hidden;
+    this._rerenderKeepChart();
+  },
+  _rerenderKeepChart(){
+    const el = document.getElementById('trend-scroll') || document.querySelector('.trend-scroll');
+    const pos = el ? el.scrollLeft : null;
+    this.render();
+    if(pos !== null) requestAnimationFrame(()=>{ const e = document.querySelector('.trend-scroll'); if(e) e.scrollLeft = pos; });
   },
   async exportReportExcel(start,end,label){
     if(typeof XLSX==='undefined'){
