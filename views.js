@@ -326,7 +326,7 @@ export const viewMethods = {
     </div>
     ${(!cancelled && App.canWrite())?`
     <div class="inv-actions no-print">
-      <button class="btn btn-outline" onclick="App.startEditInvoice('${sale.id}')">${ic('pencil',15)}ویرایش فاکتور</button>
+      ${App.isAdmin()?`<button class="btn btn-outline" onclick="App.startEditInvoice('${sale.id}')">${ic('pencil',15)}ویرایش فاکتور</button>`:''}
       <button class="btn btn-outline" onclick="App.saleAddItem('${sale.id}')">${ic('plus',15)}افزودن قلم</button>
       ${sale.remaining>0.5?`<button class="btn btn-outline" onclick="App.applySaleDiscount('${sale.id}')">${ic('percent',15)}تخفیف به‌جای بدهی</button>`:''}
       <button class="btn btn-danger" onclick="App.cancelSale('${sale.id}')">${ic('ban',15)}کنسل کامل فاکتور</button>
@@ -631,6 +631,7 @@ export const viewMethods = {
     </div>
     ${(!cancelled && App.canWrite())?`
     <div class="inv-actions no-print">
+      ${App.isAdmin()?`<button class="btn btn-outline" onclick="App.editPurchaseInvoice('${pur.id}')">${ic('pencil',15)}ویرایش بل خرید</button>`:''}
       <button class="btn btn-outline" onclick="App.purchaseAddItem('${pur.id}')">${ic('plus',15)}افزودن قلم</button>
       ${pur.remaining>0.5?`<button class="btn btn-outline" onclick="App.forgiveRoundoff('${pur.id}')">${ic('coins',15)}نادیده‌گرفتن خرده‌پول</button>`:''}
       <button class="btn btn-danger" onclick="App.cancelPurchase('${pur.id}')">${ic('ban',15)}کنسل کامل بل خرید</button>

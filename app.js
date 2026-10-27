@@ -1616,6 +1616,7 @@ const App = {
      موجودی انبار همگی بر اساس مقدار جدید دوباره محاسبه و اصلاح می‌شوند. */
   
   startEditInvoice(saleId){
+    if(!this.isAdmin()){ this.toast('ویرایش کامل فاکتور فقط برای مدیر manager@motar.com فعال است.'); return; }
     if(!this.guardWrite()) return;
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
     if(sale.status==='cancelled'){ this.toast('این فاکتور باطل شده است و قابل ویرایش نیست.'); return; }
@@ -1628,6 +1629,7 @@ const App = {
     this.render();
   },
   saveEditInvoice(saleId, confirmedNegative){
+    if(!this.isAdmin()){ this.toast('ویرایش کامل فاکتور فقط برای مدیر manager@motar.com مجاز است.'); return; }
     const sale=this.state.sales.find(x=>x.id===saleId); if(!sale) return;
     if(sale.status==='cancelled'){ this.toast('این فاکتور باطل شده است.'); return; }
     // تشخیص تداخل: اگر بعد از باز شدن فرم، دستگاه دیگری همین فاکتور را عوض کرده باشد، رونویسی نمی‌کنیم
@@ -1928,6 +1930,43 @@ const App = {
 
   
   viewPurchase(id){ this.viewPurchaseId=id; this.navigate('purchase-view'); },
+
+  /* اصلاح محدود و حساب‌شدهٔ بل خرید؛ فقط مدیر می‌تواند مبلغ پرداختی/تاریخ/یادداشت را اصلاح کند. */
+  editPurchaseInvoice(purchaseId){
+    if(!this.isAdmin()){ this.toast('ویرایش بل خرید فقط برای مدیر manager@motar.com فعال است.'); return; }
+    const pur=this.state.purchases.find(x=>x.id===purchaseId);
+    if(!pur || pur.status==='cancelled'){ this.toast('بل خرید پیدا نشد یا باطل شده است.'); return; }
+    const allocated=(this.state.payments||[]).filter(p=>p.purchaseId===purchaseId && !p.voided && !p.reversalOf).reduce((a,p)=>a+(Number(p.allocatedAmount)||0),0);
+    if(allocated>0.001){ this.toast('این بل پرداخت تخصیص‌یافته دارد؛ برای جلوگیری از دو بار شمردن پول، ابتدا پرداخت تخصیص‌یافته را اصلاح کنید.'); return; }
+    this.openFormModal({
+      title:'ویرایش بل خرید '+this.purchaseBillLabel(pur),
+      sub:'فقط مدیر مجاز است. تغییر مبلغ پرداختی، ماندهٔ فروشنده و موجودی نقدی را اصلاح می‌کند.',
+      fields:[
+        {key:'paid',label:'مبلغ واقعاً پرداخت‌شده ('+(pur.currency==='USD'?'دالر':'افغانی')+')',type:'number',value:Number(pur.paid)||0,hint:'مجموع بل: '+fmt(pur.total)+'؛ ماندهٔ فعلی: '+fmt(pur.remaining)},
+        {key:'date',label:'تاریخ بل',type:'text',value:pur.date||todayISO()},
+        {key:'supplierInvoiceNo',label:'شمارهٔ بل شرکت (اختیاری)',type:'text',value:pur.supplierInvoiceNo||''},
+        {key:'note',label:'یادداشت',type:'text',value:pur.note||''},
+        {key:'reason',label:'دلیل اصلاح (اجباری)',type:'text',value:''}
+      ],
+      submitLabel:'ذخیرهٔ اصلاح',
+      onSubmit:async(v)=>{
+        if(!this.isAdmin()) throw new Error('فقط مدیر مجاز به ویرایش بل خرید است.');
+        const paid=round2(Number(v.paid));
+        if(!Number.isFinite(paid)||paid<0||paid>(Number(pur.total)||0)+0.001) throw new Error('مبلغ پرداختی باید بین صفر و مجموع بل باشد.');
+        const reason=String(v.reason||'').trim(); if(!reason) throw new Error('دلیل اصلاح را بنویسید.');
+        if((pur.lastEditedTs||0)!==(this.state.purchases.find(x=>x.id===purchaseId)?.lastEditedTs||0)) throw new Error('بل تغییر کرده است؛ صفحه را تازه کنید و دوباره تلاش کنید.');
+        const remaining=round2(Math.max(0,(Number(pur.total)||0)-paid));
+        const delta=round2(remaining-(Number(pur.remaining)||0));
+        const batch=writeBatch(db);
+        const balField=(pur.currency||'AFN')==='USD'?'balanceUSD':'balance';
+        if(pur.supplierId && Math.abs(delta)>0.001) batch.update(doc(cols.suppliers,pur.supplierId),{[balField]:increment(delta)});
+        const after={...pur,paid,remaining,date:String(v.date||pur.date||todayISO()),supplierInvoiceNo:String(v.supplierInvoiceNo||'').trim(),note:String(v.note||'').trim(),lastEditReason:reason,...this.editMeta()};
+        batch.update(doc(cols.purchases,purchaseId),{paid,remaining,date:after.date,supplierInvoiceNo:after.supplierInvoiceNo,note:after.note,lastEditReason:reason,...this.editMeta()});
+        this.audit(batch,{action:'edit',entityType:'purchase',entityId:purchaseId,before:pur,after});
+        await batch.commit(); this._markWriteResult(true); this.toast('بل خرید اصلاح شد؛ ماندهٔ فروشنده و حساب نقدی به‌روزرسانی شد.'); this.render();
+      }
+    });
+  },
   
   /* ---------- Invoice adjustments: cancel / return / edit items (sales) ----------
      نکته: این عملیات‌ها به‌جای «بازخوانی و بازنویسی کل رکورد»، فقط تغییرات (delta) را

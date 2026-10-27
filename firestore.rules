@@ -103,7 +103,9 @@ match /businesses/{biz} {
                   && idMatches(id) && request.resource.data.invoiceNo is string && request.resource.data.invoiceNo.size() > 0
                   && num(request.resource.data.total) && request.resource.data.total >= 0
                   && request.resource.data.items is list;
-    allow update: if (((isOwner(biz) || isStaff(biz) || isSeller(biz)) && immutableIdentity() && cancelLocked())
+    allow update: if (isOwner(biz)
+                     || ((isStaff(biz) || isSeller(biz)) && immutableIdentity() && cancelLocked()
+                         && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastEditReason']))
                      || (isPartner(biz) && onlyChangesPlusMeta(['settled', 'remaining'])))
                   && safeContent();
     allow delete: if isOwner(biz);
@@ -115,7 +117,9 @@ match /businesses/{biz} {
                   && idMatches(id) && request.resource.data.invoiceNo is string && request.resource.data.invoiceNo.size() > 0
                   && num(request.resource.data.total) && request.resource.data.total >= 0
                   && request.resource.data.items is list;
-    allow update: if (((isOwner(biz) || isStaff(biz)) && immutableIdentity() && cancelLocked())
+    allow update: if (isOwner(biz)
+                     || (isStaff(biz) && immutableIdentity() && cancelLocked()
+                         && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastEditReason']))
                      || (isPartner(biz) && onlyChangesPlusMeta(['paid', 'remaining'])))
                   && safeContent();
     allow delete: if isOwner(biz);
