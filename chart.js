@@ -12,6 +12,7 @@ const COL = {
   sales: '#C9922B',
   profit: '#227A57',
   loss: '#B5473A',
+  gross: '#3A3A3A',
   grid: 'var(--line, #e6e6e6)',
   axis: 'var(--ink-500, #777)',
   sel: 'rgba(120,120,120,.13)'
@@ -74,10 +75,11 @@ export function buildTrendChart({ buckets, hidden, sel, cur, rangeNote, pickFn, 
   const plotP = both ? 96 : 150;
   const H = T + (showS ? CAP + plotS : 0) + (both ? GAP : 0) + (showP ? CAP + plotP : 0) + XL;
   if(!n || (!showS && !showP)){
-    return buildChips(showS, showP, toggleFn) + '<div class="field-note">یک سری را روشن کنید.</div>';
+    return buildChips(showS, showP, showP && hid.indexOf('gross') < 0, toggleFn) + '<div class="field-note">یک سری را روشن کنید.</div>';
   }
 
-  const sv = list.map(b=>num(b.sales)), pv = list.map(b=>num(b.profit));
+  const sv = list.map(b=>num(b.sales)), pv = list.map(b=>num(b.profit)), gv = list.map(b=>num(b.grossProfit));
+  const showG = showP && hid.indexOf('gross') < 0;
   const X = (i)=> L + band * (i + 0.5);
   const selX = L + band * selI;
   let g = '';
@@ -100,7 +102,7 @@ export function buildTrendChart({ buckets, hidden, sel, cur, rangeNote, pickFn, 
   const pTop = (showS ? aBot + (both ? GAP : 0) + CAP : T + CAP), pBot = pTop + plotP;
   let yP = null, zeroP = null;
   if(showP){
-    const sc = scaleFor(pv, true);
+    const sc = scaleFor(showG ? pv.concat(gv) : pv, true);
     yP = (v)=> pBot - ((v - sc.lo) / (sc.hi - sc.lo)) * plotP;
     zeroP = r1(yP(0));
     for(let k = sc.kLo; k <= sc.kHi; k++){
@@ -132,7 +134,12 @@ export function buildTrendChart({ buckets, hidden, sel, cur, rangeNote, pickFn, 
     const y1 = yP(pv[i]);
     const top = r1(Math.min(y1, zeroP)), h = Math.max(1.2, r1(Math.abs(y1 - zeroP)));
     const col = pv[i] < 0 ? COL.loss : COL.profit;
-    g += '<rect x="'+r1(X(i)-bw/2)+'" y="'+top+'" width="'+r1(bw)+'" height="'+h+'" rx="3" fill="'+col+'" fill-opacity="'+(i===selI?'1':'.7')+'"/>';
+    g += '<rect x="'+r1(X(i)-bw/2)+'" y="'+top+'" width="'+r1(bw)+'" height="'+h+'" rx="3" fill="'+col+'" fill-opacity="'+(b.ctx?'.25':(i===selI?'1':'.7'))+'"/>';
+  });
+  /* خط کوتاه تیره = سود ناخالص (پیش از کم شدن مصارف) */
+  if(showG) list.forEach((b,i)=>{
+    const bw = Math.min(22, band*0.56), y = r1(yP(gv[i]));
+    g += '<line x1="'+r1(X(i)-bw/2-3)+'" y1="'+y+'" x2="'+r1(X(i)+bw/2+3)+'" y2="'+y+'" stroke="'+COL.gross+'" stroke-width="2.6" stroke-linecap="round" opacity="'+(b.ctx?'.3':'1')+'"/>';
   });
 
   /* ---- برچسب افقی ---- */
@@ -163,16 +170,17 @@ export function buildTrendChart({ buckets, hidden, sel, cur, rangeNote, pickFn, 
     +   '<div><span>سود ناخالص</span><b class="num">'+fmtInt(b.grossProfit)+'</b></div>'
     + '</div></div>';
 
-  const totS = sv.reduce((a,x)=>a+x,0), totP = pv.reduce((a,x)=>a+x,0);
+  const inList = list.filter(b=>!b.ctx);
+  const totS = inList.reduce((a,b)=>a+num(b.sales),0), totP = inList.reduce((a,b)=>a+num(b.profit),0);
   const totals = '<div class="trend-total"><span>مجموع بازه'+(rangeNote?' ('+esc(rangeNote)+')':'')+'</span><span class="num">فروش '+fmtInt(totS)+' · سود <b class="'+(totP<0?'neg':'pos')+'">'+fmtInt(totP)+'</b></span></div>';
 
   const scroll = '<div class="trend-scroll" dir="rtl">'+svg+'</div>';
-  return buildChips(showS, showP, toggleFn) + scroll + detail + totals;
+  return buildChips(showS, showP, showG, toggleFn) + scroll + detail + totals;
 }
 
-function buildChips(showS, showP, toggleFn){
+function buildChips(showS, showP, showG, toggleFn){
   const chip = (key, label, color, on)=>
     '<button type="button" class="trend-chip" aria-pressed="'+(on?'true':'false')+'"'+(toggleFn?' onclick="'+toggleFn+'(\''+key+'\')"':'')+'>'
     +'<i style="background:'+color+'"></i>'+esc(label)+'</button>';
-  return '<div class="trend-chips">'+chip('sales','فروش خالص',COL.sales,showS)+chip('profit','سود خالص',COL.profit,showP)+'</div>';
+  return '<div class="trend-chips">'+chip('sales','فروش خالص',COL.sales,showS)+chip('profit','سود خالص',COL.profit,showP)+(showP?chip('gross','سود ناخالص',COL.gross,showG):'')+'</div>';
 }

@@ -3410,15 +3410,17 @@ const App = {
     if(this._chartKey !== key || this._chartSel == null || this._chartSel >= n){
       // پیش‌فرض: آخرین بازه‌ای که معامله دارد (اگر امروز هنوز فروشی نداشته باشد، روز قبل نشان داده شود)
       let last = n-1;
-      for(let i=n-1;i>=0;i--){ if(buckets[i].invoices || buckets[i].sales || buckets[i].expenses){ last = i; break; } }
+      for(let i=n-1;i>=0;i--){ if(buckets[i].to>=start && (buckets[i].invoices || buckets[i].sales || buckets[i].expenses)){ last = i; break; } }
       this._chartKey = key; this._chartSel = last;
     }
     const view = buckets.map(b=>({
       label: b.from.slice(5),
       title: b.from===b.to ? dateLabelFa(b.from) : (b.from+' تا '+b.to),
-      from: b.from, to: b.to, sales: b.sales, profit: b.profit, expenses: b.expenses, grossProfit: b.grossProfit, invoices: b.invoices
+      from: b.from, to: b.to, sales: b.sales, profit: b.profit, expenses: b.expenses, grossProfit: b.grossProfit, invoices: b.invoices,
+      ctx: b.to < start   /* روزهای قبل از بازهٔ انتخاب‌شده (فقط برای پر شدن نمودار) کم‌رنگ می‌شوند و در مجموع نمی‌آیند */
     }));
-    const note = step>1 ? ('هر بازه '+step+' روز') : 'هر ستون یک روز';
+    const padded = view.some(b=>b.ctx);
+    const note = (step>1 ? ('هر بازه '+step+' روز') : 'هر ستون یک روز') + (padded ? ' — روزهای کم‌رنگ فقط برای مقایسه‌اند و در مجموع نیامده‌اند' : '');
     const allZero = view.every(b=>!b.sales && !b.profit);
     return buildTrendChart({ buckets:view, hidden:this._chartHidden||[], sel:this._chartSel, cur:this.state.settings.currency,
       rangeNote:note, pickFn:'App.chartPick', toggleFn:'App.chartToggle' })
@@ -3430,7 +3432,7 @@ const App = {
     const hidden = (this._chartHidden||[]).slice();
     const i = hidden.indexOf(k);
     if(i >= 0) hidden.splice(i,1);
-    else if(hidden.length === 0) hidden.push(k);   // حداقل یک سری باید دیده شود
+    else if(k === 'gross' || !hidden.some(h=>h==='sales'||h==='profit')) hidden.push(k);   // فروش و سود خالص: حداقل یکی باید دیده شود
     this._chartHidden = hidden;
     this._rerenderKeepChart();
   },
@@ -3458,7 +3460,7 @@ const App = {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(expRows), 'مصارف');
     const sm=salesSummary({ sales:this.state.sales, returns:this.state.returns, from:start, to:end });
     const revenue=sm.net, cogs=sm.cogs, expTotal=sum(expenses.filter(e=>e.category!==WITHDRAWAL_CATEGORY),'amount');
-    const retRows=this.state.returns.filter(r=>r.date>=start&&r.date<=end).sort((a,b)=>(a.ts||0)-(b.ts||0)).map(r=>({ 'تاریخ مرجوعی':r.date, 'نوع':({return:'مرجوعی',cancel:'ابطال فاکتور',shortage:'کاستی'})[r.kind]||r.kind, 'فاکتور':this.invoiceNoLabel(r.originalSaleId), 'مشتری':r.customerName||'', 'مبلغ':r.amount, 'بهای کالای برگشتی':r.cost, 'دلیل':r.reason||'' }));
+    const retRows=this.state.returns.filter(r=>{ const os=this.state.sales.find(s=>s.id===r.originalSaleId); const d=os?os.date:r.date; return d>=start&&d<=end; }).sort((a,b)=>(a.ts||0)-(b.ts||0)).map(r=>({ 'تاریخ مرجوعی':r.date, 'نوع':({return:'مرجوعی',cancel:'ابطال فاکتور',shortage:'کاستی'})[r.kind]||r.kind, 'فاکتور':this.invoiceNoLabel(r.originalSaleId), 'مشتری':r.customerName||'', 'مبلغ':r.amount, 'بهای کالای برگشتی':r.cost, 'دلیل':r.reason||'' }));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(retRows), 'مرجوعی');
     const summaryRows=[
       {'شرح':'فروش ناخالص (پیش از تخفیف و مرجوعی)','مبلغ':sm.gross},

@@ -1114,9 +1114,18 @@ export const viewMethods = {
 
     const catMap={};
     expenses.forEach(e=>{ catMap[e.category]=(catMap[e.category]||0)+e.amount; });
-    const catRows = Object.keys(catMap).length ? Object.entries(catMap).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
-      `<div class="row-item"><div class="r-left"><b>${escapeHtml(k)}</b></div><div class="r-right num">${fmt(v)}</div></div>`
-    ).join('') : `<div class="empty">مصرفی در این بازه ثبت نشده.</div>`;
+    const catTotal = Object.values(catMap).reduce((a,x)=>a+x,0);
+    const catRows = Object.keys(catMap).length ? Object.entries(catMap).sort((a,b)=>b[1]-a[1]).map(([k,v])=>{
+      const pct = catTotal>0 ? Math.round(v*1000/catTotal)/10 : 0;
+      return `<div class="cat-row"><div class="cat-top"><b>${escapeHtml(k)}</b><span class="num">${fmt(v)} <i class="cat-pct">${pct}٪</i></span></div><div class="cat-track"><div class="cat-fill" style="width:${Math.max(2,Math.min(100,pct))}%"></div></div></div>`;
+    }).join('') + `<div class="total-line"><span>مجموع مصارف</span><span class="num">${fmt(catTotal)}</span></div>` : `<div class="empty">مصرفی در این بازه ثبت نشده.</div>`;
+    const pctOf = (x)=> revenue>0.001 ? (Math.round(x*1000/revenue)/10)+'٪' : '—';
+    const kpiCards = `<div class="kpi-grid">
+      <div class="kpi"><span>فروش خالص</span><b class="num">${fmt(revenue)}</b></div>
+      <div class="kpi"><span>سود ناخالص</span><b class="num">${fmt(grossProfit)}</b><em>${pctOf(grossProfit)} از فروش</em></div>
+      <div class="kpi ${netProfit>=0?'good':'bad'}"><span>سود خالص</span><b class="num">${fmt(netProfit)}</b><em>پس از کم شدن مصارف</em></div>
+      <div class="kpi ${netProfit>=0?'good':'bad'}"><span>درصد سود خالص</span><b class="num">${pctOf(netProfit)}</b><em>سود ناخالص: ${pctOf(grossProfit)}</em></div>
+    </div>`;
 
     const wdByPerson={};
     withdrawals.forEach(w=>{ const name=w.withdrawnBy||'نامشخص'; wdByPerson[name]=(wdByPerson[name]||0)+w.amount; });
@@ -1143,6 +1152,7 @@ export const viewMethods = {
         <div><label>تا تاریخ</label><input type="date" value="${this.reportEnd||today}" onchange="App.reportEnd=this.value; App.render();"></div>
       </div>
     </div>`:''}
+    ${kpiCards}
     <div class="card">
       <div class="eyebrow u-margin-top-0"><span>روند فروش و سود</span></div>
       ${this.trendChartHtml(start,end)}

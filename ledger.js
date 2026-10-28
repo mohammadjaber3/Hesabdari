@@ -163,12 +163,14 @@ export function saleReturnedAmount(s){
 export function saleReturnedCost(s){ return Number(s && s.returnedCost) || 0; }
 
 /* گزارش یک بازه:
-   فروش ناخالص (با تاریخ خود فاکتور، پیش از تخفیف و مرجوعی) − تخفیف − مرجوعی (با تاریخ خود مرجوعی) = فروش خالص
+   فروش ناخالص (با تاریخ خود فاکتور، پیش از تخفیف و مرجوعی) − تخفیف − مرجوعی (با تاریخ فاکتور اصلی) = فروش خالص
    بهای تمام‌شده هم همین‌طور: بهای فروش‌های بازه − بهای کالاهای برگشتی در بازه. */
 export function salesSummary({ sales, returns, from, to }){
   const inRange = (d)=> d >= from && d <= to;
   const periodSales = (sales||[]).filter(s=>inRange(s.date));
-  const periodReturns = (returns||[]).filter(r=>inRange(r.date));
+  /* مرجوعی/ابطال/کاستی به تاریخ «فاکتور اصلی» حساب می‌شود (نه روز ثبت)؛ اگر فاکتور پیدا نشد، تاریخ خود رویداد */
+  const saleDate = new Map((sales||[]).map(s=>[s.id, s.date]));
+  const periodReturns = (returns||[]).filter(r=>inRange(saleDate.has(r.originalSaleId) ? saleDate.get(r.originalSaleId) : r.date));
   const gross = round2(sumBy(periodSales, s=>(Number(s.total)||0) + (Number(s.discount)||0) + saleReturnedAmount(s)));
   const discounts = round2(sumBy(periodSales, s=>s.discount));
   const returnsAmount = round2(sumBy(periodReturns, r=>r.amount));

@@ -951,3 +951,18 @@ body:has(#fab:not([hidden])){padding-bottom:150px}
 .fchip:active{transform:scale(.97)}
 .fchip.active{background:var(--ink-bg);border-color:var(--ink-bg);color:var(--on-dark)}
 .fchip-n{font-size:var(--fs-xs);opacity:.75}
+
+/* خلاصهٔ بالای گزارش سود و زیان */
+.kpi-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-2);margin:0 0 var(--sp-2)}
+.kpi{background:var(--surface,#fff);border:1px solid var(--line,#e6e6e6);border-radius:var(--r-sm,12px);padding:12px;display:flex;flex-direction:column;gap:3px;min-width:0}
+.kpi span{font-size:var(--fs-xs);color:var(--ink-500)}
+.kpi b{font-size:1.25rem;color:var(--ink-900);overflow-wrap:anywhere}
+.kpi em{font-style:normal;font-size:var(--fs-xs);color:var(--ink-500)}
+.kpi.good{background:var(--green-050)}.kpi.good b{color:var(--green-700)}
+.kpi.bad{background:var(--red-050)}.kpi.bad b{color:var(--red-600)}
+/* مصارف بر اساس نوع */
+.cat-row{padding:8px 0;border-bottom:1px solid var(--line,#eee)}
+.cat-top{display:flex;justify-content:space-between;gap:8px;margin-bottom:6px}
+.cat-pct{font-style:normal;font-size:var(--fs-xs);color:var(--ink-500);margin-inline-start:4px}
+.cat-track{height:8px;border-radius:6px;background:var(--surface-2,#eee);overflow:hidden}
+.cat-fill{height:100%;border-radius:6px;background:#C9922B}
