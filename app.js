@@ -1165,7 +1165,7 @@ const App = {
     return cash;
   },
   inventoryValue(){
-    return this.state.products.reduce((a,p)=>a+(p.stock*p.avgCost),0);
+    return this.state.products.filter(p=>!p.removed).reduce((a,p)=>a+(p.stock*p.avgCost),0);
   },
   inventoryReportRows(){
     const threshold = this.state.settings.lowStockThreshold!==undefined ? Number(this.state.settings.lowStockThreshold) : 1;
@@ -3451,13 +3451,14 @@ const App = {
   removeProductForever(id){
     if(!this.isOwner()){ this.toast('فقط مدیر می‌تواند محصول را حذف کند.'); return; }
     const p=this.state.products.find(x=>x.id===id); if(!p || p.removed) return;
-    if(Math.abs(Number(p.stock)||0) > 0.0001){
-      this.toast('موجودی این محصول صفر نیست. اول با «اصلاح موجودی» آن را صفر کنید تا ارزش انبار درست بماند.');
-      return;
-    }
+    const stock = Number(p.stock)||0;
+    const worth = Math.round(stock*(Number(p.avgCost)||0));
+    const stockMsg = Math.abs(stock)>0.0001
+      ? '\n\nتوجه: این محصول هنوز موجودی دارد ('+this.qtyBreakdown(p,stock)+') و با حذف، حدود '+fmt(worth)+' '+(this.state.settings.currency||'')+' از «ارزش کالای انبار» کم می‌شود.'
+      : '';
     this.openConfirmModal({
       title:'حذف کامل محصول',
-      msg:'«'+p.name+'» برای همیشه از فهرست محصولات، بایگانی، خرید، فروش و جستجو حذف شود؟\nفاکتورهای قبلی که این کالا در آن‌هاست دست‌نخورده می‌ماند.',
+      msg:'«'+p.name+'» برای همیشه از فهرست محصولات، بایگانی، خرید، فروش و جستجو حذف شود؟\nفاکتورهای قبلی که این کالا در آن‌هاست دست‌نخورده می‌ماند.'+stockMsg,
       danger:true, confirmLabel:'حذف کامل',
       onConfirm: ()=> updateDoc(doc(cols.products, id), { removed:true, archived:true, removedAt:Date.now(), removedBy:(this.user&&this.user.email)||'' }).then(()=>this.toast('محصول حذف شد.')).catch(e=>{ console.error(e); App.toastError('خطا در حذف محصول؛ دوباره تلاش کنید.'); })
     });
@@ -3869,8 +3870,8 @@ const App = {
       else if(kind==='stock'){
         title='تطبیق موجودی انبار';
         const snap=await getDocs(cols.stockLedger);
-        rows=reconcileStock({ products:s.products, movements:snap.docs.map(d=>d.data()) });
-        const neg=negativeStockProducts(s.products);
+        rows=reconcileStock({ products:s.products.filter(p=>!p.removed), movements:snap.docs.map(d=>d.data()) });
+        const neg=negativeStockProducts(s.products.filter(p=>!p.removed));
         if(neg.length) extra='<div class="field-note u-color-var-red">کالاهای با موجودی منفی: '+neg.map(n=>escapeHtml(n.name)+' ('+fmtQty(n.stock)+' عدد)').join('، ')+'</div>';
       } else return;
     }catch(e){ console.error(e); this.toastError('خطا در محاسبه؛ دوباره تلاش کنید.'); return; }
