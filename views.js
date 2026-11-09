@@ -753,19 +753,68 @@ export const viewMethods = {
   },
 
   renderPartyDetail(){
-    const type=this.sub;
+    const type=this.sub||'customers';
     const arr = type==='customers' ? this.state.customers : this.state.suppliers;
     const p = arr.find(x=>x.id===this.detailId);
     if(!p){ this.detailId=null; return this.renderCustomers(); }
     let history=[];
     if(type==='customers'){
-      history = this.state.sales.filter(s=>s.customerId===p.id).map(s=>({date:s.date,ts:s.ts,label:'فروش '+this.invoiceNoLabel(s.id),amount:s.total,paid:(Number(s.paid)||0)+(Number(s.settled)||0),saleId:s.id,status:s.status,currency:'AFN'}));
+      history = this.state.sales.filter(s=>s.customerId===p.id).map(s=>({date:s.date,ts:s.ts,label:'فروش '+this.invoiceNoLabel(s.id),amount:s.total,paid:(Number(s.paid)||0)+(Number(s.settled)||0),saleId:s.id,status:s.status,currency:'AFN',initPaid:Number(s.paid)||0}));
     } else {
-      history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید'+(s.currency==='USD'?' (دالر)':''),amount:s.total,paid:s.paid,purchaseId:s.id,status:s.status,currency:s.currency||'AFN'}));
+      // بخشی از paid که بعداً با «پرداخت پول» روی همین بل نشسته، خودش ردیف جدا دارد؛ اینجا فقط پرداخت زمان خرید حساب می‌شود
+      const allocByPur = {};
+      this.state.payments.forEach(x=>{ if(x.purchaseId) allocByPur[x.purchaseId]=(allocByPur[x.purchaseId]||0)+(Number(x.allocatedAmount)||0); });
+      history = this.state.purchases.filter(s=>s.supplierId===p.id).map(s=>({date:s.date,ts:s.ts,label:'خرید'+(s.currency==='USD'?' (دالر)':''),amount:s.total,paid:s.paid,purchaseId:s.id,status:s.status,currency:s.currency||'AFN',initPaid:(Number(s.paid)||0)-(allocByPur[s.id]||0)}));
     }
-    const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:(x.reversalOf?'↩ ابطال — ':'')+(x.type==='receive'?'دریافت پول':'پرداخت پول')+(x.currency==='USD'?' (دالر)':''),amount:x.amount,paid:null,isPayment:true,paymentId:x.id,voided:!!x.voided,reversalOf:x.reversalOf||'',receiptImage:x.receiptImage||null,who:this.whoLabel(x),currency:x.currency||'AFN'}));
+    const pays = this.state.payments.filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:(x.reversalOf?'↩ ابطال — ':'')+(x.type==='receive'?'دریافت پول':'پرداخت پول')+(x.currency==='USD'?' (دالر)':''),amount:x.amount,paid:null,isPayment:true,ptype:x.type,paymentId:x.id,voided:!!x.voided,reversalOf:x.reversalOf||'',receiptImage:x.receiptImage||null,who:this.whoLabel(x),currency:x.currency||'AFN'}));
     const openings = (this.state.openingEntries||[]).filter(x=>x.partyId===p.id).map(x=>({date:x.date,ts:x.ts,label:'بدهی افتتاحیه (قبل از سیستم)'+(x.currency==='USD'?' (دالر)':''),amount:x.amount,isOpening:true,currency:x.currency||'AFN'}));
     history = [...history,...pays,...openings].sort((a,b)=>(b.ts||0)-(a.ts||0));
+
+    /* ---------- دفتر حساب: مانده بعد از هر ردیف + خلاصهٔ بالای صفحه ----------
+       مانده = افتتاحیه + (مجموع هر فاکتور − پرداخت زمان خود فاکتور) − همهٔ دریافت/پرداخت‌های بعدی
+       (همان فرمولی که «تطبیق حساب‌ها» استفاده می‌کند). برای هر ارز جدا حساب می‌شود. */
+    const cmpAsc = (a,b)=> String(a.date||'').slice(0,10).localeCompare(String(b.date||'').slice(0,10)) || (a.ts||0)-(b.ts||0);
+    const run = {AFN:0, USD:0};
+    const sm = {AFN:{inv:0, invN:0, open:0, paid:0}, USD:{inv:0, invN:0, open:0, paid:0}};
+    [...history].sort(cmpAsc).forEach(h=>{
+      const cur = h.currency==='USD' ? 'USD' : 'AFN';
+      const amt = Number(h.amount)||0;
+      if(h.isPayment){
+        const sign = ((type==='customers') === (h.ptype==='receive')) ? -1 : 1;
+        run[cur] += sign*amt; sm[cur].paid += -sign*amt;
+      } else if(h.isOpening){
+        run[cur] += amt; sm[cur].open += amt;
+      } else {
+        const ip = Number(h.initPaid)||0;
+        run[cur] += amt - ip; sm[cur].paid += ip;
+        if(h.status!=='cancelled'){ sm[cur].inv += amt; sm[cur].invN++; }
+      }
+      h.runBal = Math.round(run[cur]*100)/100;
+    });
+    const trades = history.filter(h=>!h.isPayment && !h.isOpening && h.status!=='cancelled');
+    const lastTrade = trades.length ? trades.map(h=>String(h.date||'').slice(0,10)).sort().pop() : '';
+    const curList = (type==='suppliers' && (history.some(h=>h.currency==='USD') || Math.abs(p.balanceUSD||0)>0.5)) ? ['AFN','USD'] : ['AFN'];
+    const tile = (lbl,val,col)=>`<div class="u-text-align-center"><div class="field-note">${lbl}</div><div class="num u-font-weight-800" style="${col?'color:'+col:''}">${val}</div></div>`;
+    const sumCard = curList.map(cur=>{
+      const f = cur==='USD' ? (v=>'$'+fmt2(v)) : fmt;
+      const unit = cur==='USD' ? 'دالر' : this.state.settings.currency;
+      const b = Math.round(run[cur]*100)/100;
+      const stored = cur==='USD' ? Number(p.balanceUSD)||0 : Number(p.balance)||0;
+      const mism = Math.abs(b-stored)>0.5 ? `<div class="field-note u-margin-top-6px u-color-var-red">توجه: مانده‌ای که از جمع سوابق می‌آید (${f(b)}) با مانده ثبت‌شده (${f(stored)}) فرق دارد؛ از تنظیمات بخش «تطبیق حساب‌ها» را ببینید.</div>` : '';
+      return `<div class="card u-margin-top-12px">
+        ${curList.length>1?`<div class="field-note" style="margin-bottom:6px"><b>حساب به ${unit}</b></div>`:''}
+        <div class="grid2">
+          ${tile(type==='customers'?'مجموع فروش ('+sm[cur].invN+' فاکتور)':'مجموع خرید ('+sm[cur].invN+' بل)', f(sm[cur].inv))}
+          ${tile(type==='customers'?'مجموع دریافتی':'مجموع پرداختی', f(sm[cur].paid), 'var(--green)')}
+        </div>
+        <div class="grid2 u-margin-top-8px">
+          ${tile('بدهی افتتاحیه', f(sm[cur].open))}
+          ${tile(b>0.5?'مانده — بدهکار':(b<-0.5?'مانده — طلبکار':'مانده — تسویه'), f(Math.abs(b)), b>0.5?'var(--red)':'var(--green)')}
+        </div>
+        ${mism}
+      </div>`;
+    }).join('');
+    const balLine = h => (h.runBal===undefined) ? '' : `<span class="sub num">مانده بعد از این ردیف: ${(h.currency==='USD'?'$'+fmt2(Math.abs(h.runBal)):fmt(Math.abs(h.runBal)))} ${h.runBal>0.5?'بدهکار':(h.runBal<-0.5?'طلبکار':'تسویه')}</span>`;
 
     const rows = history.length ? history.map(h=>{
       const f = h.currency==='USD' ? fmt2 : fmt;
@@ -774,14 +823,14 @@ export const viewMethods = {
         const photoBtn = h.receiptImage
           ? `<span class="icon-btn" onclick="App.viewPaymentReceipt('${h.paymentId}')" title="مشاهده عکس رسید">${ic('image',15)}</span>`
           : `<span class="icon-btn" onclick="App.addPaymentReceiptPhoto('${h.paymentId}')" title="افزودن عکس رسید">${ic('camera',15)}</span>`;
-        return `<div class="row-item"><div class="r-left"><b>${h.label}</b>${photoBtn}${h.voided?' <span class="badge gold">باطل شده</span>':''}${(!h.voided && !h.reversalOf && App.isOwner())?`<span class="icon-btn" onclick="App.voidPayment('${h.paymentId}')" title="ابطال پرداخت">${ic('trash',15)}</span>`:''}<span class="sub">${h.date}</span>${h.who?`<span class="sub u-opacity-75">${escapeHtml(h.who)}</span>`:''}</div><div class="r-right num" style="color:${color}">${f(h.amount)}</div></div>`;
+        return `<div class="row-item"><div class="r-left"><b>${h.label}</b>${photoBtn}${h.voided?' <span class="badge gold">باطل شده</span>':''}${(!h.voided && !h.reversalOf && App.isOwner())?`<span class="icon-btn" onclick="App.voidPayment('${h.paymentId}')" title="ابطال پرداخت">${ic('trash',15)}</span>`:''}<span class="sub">${h.date}</span>${h.who?`<span class="sub u-opacity-75">${escapeHtml(h.who)}</span>`:''}${balLine(h)}</div><div class="r-right num" style="color:${color}">${f(h.amount)}</div></div>`;
       }
       if(h.isOpening){
-        return `<div class="row-item"><div class="r-left"><b>${h.label}</b><span class="sub">${h.date}</span></div><div class="r-right num u-color-var-gold-d">${f(h.amount)}</div></div>`;
+        return `<div class="row-item"><div class="r-left"><b>${h.label}</b><span class="sub">${h.date}</span>${balLine(h)}</div><div class="r-right num u-color-var-gold-d">${f(h.amount)}</div></div>`;
       }
       const clickAttr = h.saleId ? ` onclick="App.viewInvoice('${h.saleId}')" style="cursor:pointer;"` : (h.purchaseId ? ` onclick="App.viewPurchase('${h.purchaseId}')" style="cursor:pointer;"` : '');
       const cancelledTag = h.status==='cancelled' ? ' <span class="badge gold">باطل شده</span>' : '';
-      return `<div class="row-item"${clickAttr}><div class="r-left"><b>${h.label} — مجموع ${f(h.amount)}</b>${cancelledTag}<span class="sub">${h.date} · پرداخت‌شده: ${f(h.paid)}</span></div><div class="r-right num u-color-var-red">${f(h.amount-h.paid)}</div></div>`;
+      return `<div class="row-item"${clickAttr}><div class="r-left"><b>${h.label} — مجموع ${f(h.amount)}</b>${cancelledTag}<span class="sub">${h.date} · پرداخت‌شده: ${f(h.paid)}</span>${balLine(h)}</div><div class="r-right num u-color-var-red">${f(h.amount-h.paid)}</div></div>`;
     }).join('') : `<div class="empty"><span class="ic">${ic('history',24)}</span>هنوز معامله‌ای با این ${type==='customers'?'مشتری':'عمده‌فروش'} ثبت نشده</div>`;
 
     const actionLabel = type==='customers' ? 'دریافت پول از مشتری' : 'پرداخت پول به عمده‌فروش';
@@ -831,7 +880,9 @@ export const viewMethods = {
         </div>
       </div>` : ''}
     </div>
-    <h2 class="section-title">سابقهٔ معاملات (${history.length})</h2>
+    ${sumCard}
+    ${lastTrade?`<div class="field-note u-text-align-center u-margin-top-8px">آخرین معامله: <b class="num">${lastTrade}</b></div>`:''}
+    <h2 class="section-title">دفتر حساب — همهٔ معاملات به ترتیب تاریخ (${history.length})</h2>
     <div class="card">${rows}</div>
     `;
   },
@@ -941,7 +992,7 @@ export const viewMethods = {
   renderProducts(){
     const owner=this.isOwner();
     const threshold = this.state.settings.lowStockThreshold!==undefined ? this.state.settings.lowStockThreshold : 1;
-    const sorted=[...this.state.products].sort((a,b)=>a.name.localeCompare(b.name,'fa'));
+    const sorted=this.state.products.filter(p=>!p.removed).sort((a,b)=>a.name.localeCompare(b.name,'fa'));
     const ls = this.listState('products');
     const chips = [
       {k:'all', label:'همه', count:sorted.length},
@@ -967,7 +1018,11 @@ export const viewMethods = {
           {label:"ویرایش واحدها و قیمت‌ها", icon:"sliders", onClick:()=>App.editProductUnits("${p.id}")},
           {label:"اصلاح موجودی", icon:"package", onClick:()=>App.adjustProductStock("${p.id}")},
           {label:"ویرایش نام و قیمت پایه", icon:"pencil", onClick:()=>App.editProduct("${p.id}")},
-          {label:"حذف محصول", icon:"trash", danger:true, onClick:()=>App.deleteProduct("${p.id}")}
+          {label:"بایگانی محصول", icon:"archive", onClick:()=>App.deleteProduct("${p.id}")},
+          {label:"حذف کامل محصول", icon:"trash", danger:true, onClick:()=>App.removeProductForever("${p.id}")}
+        ])'>${ic('more-vertical',17)}</span>`:''}
+        ${owner&&p.archived?`<span class="menu-dots" onclick='App.openActionMenu([
+          {label:"حذف کامل محصول", icon:"trash", danger:true, onClick:()=>App.removeProductForever("${p.id}")}
         ])'>${ic('more-vertical',17)}</span>`:''}
       </div></div>`;
     }).join('') : `<div class="empty"><span class="ic">${ic('archive',26)}</span><b>هنوز محصولی اضافه نشده</b>با ثبت اولین خرید یا فروش، محصول خودکار ساخته می‌شود</div>`;

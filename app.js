@@ -774,7 +774,36 @@ const App = {
      دکمهٔ بازگشت اول پنجرهٔ باز را می‌بندد، بعد به صفحهٔ قبلی برمی‌گردد. فقط در صفحهٔ اصلی از اپ خارج می‌شود.
      پنجره‌هایی که با دکمهٔ خودشان بسته شده‌اند، مرحلهٔ «مرده» می‌مانند و popstate آن‌ها را بی‌صدا رد می‌کند. */
   _pushState(extra){
-    try{ history.pushState(Object.assign({tab:this.tab, sub:this.sub}, extra||{}), ''); }catch(e){}
+    try{ history.pushState(Object.assign({tab:this.tab, sub:this.sub, depth:this._navDepth||0}, extra||{}), ''); }catch(e){}
+  },
+  /* ---- تاریخچهٔ صفحه‌ها (دکمهٔ بازگشت) ----
+     «صفحهٔ اصلی» (dashboard) پایهٔ تاریخچه است. رفتن از صفحهٔ اصلی به هر بخش یک مرحله می‌سازد، ولی جابه‌جایی
+     بین بخش‌ها (خرید ← بدهی‌ها ← بیشتر ← ...) همان مرحله را جایگزین می‌کند؛ پس از هر جا یک بار
+     «بازگشت» مستقیم به صفحهٔ اصلی می‌رسد و بار دوم از برنامه خارج می‌شود.
+     صفحهٔ جزئیات فاکتور/بل خرید استثناست: یک مرحلهٔ جدا دارد تا بازگشت، به صفحهٔ قبلی‌اش برگردد.
+     depth = تعداد مرحله‌های بالای صفحهٔ اصلی (در خود state ذخیره می‌شود تا بعد از بازگشت هم درست بماند). */
+  _backSilently(n){
+    if(!(n>0)) return;
+    this._pendingPops = (this._pendingPops||0) + 1;
+    const tok = this._popTok = (this._popTok||0) + 1;
+    setTimeout(()=>{ if(this._popTok===tok && this._pendingPops>0){ this._pendingPops=0; this._flushDeferred(); } }, 600);
+    try{ history.go(-n); }catch(e){ this._pendingPops=0; }
+  },
+  _historyForNav(tab,sub){
+    const depth = this._navDepth||0;
+    const isDetail = (tab==='invoice' || tab==='purchase-view');
+    try{
+      if(tab==='dashboard'){
+        if(depth>0) this._backSilently(depth);
+        else history.replaceState({tab:'dashboard', sub:null, depth:0}, '');
+        this._navDepth = 0;
+      } else if(depth===0 || isDetail){
+        this._navDepth = depth+1;
+        history.pushState({tab, sub:sub||null, depth:this._navDepth}, '');
+      } else {
+        history.replaceState({tab, sub:sub||null, depth}, '');
+      }
+    }catch(e){}
   },
   _pushLayer(){ this._pushState({layer:true}); },
   _hasLayerTop(){ return !!(history.state && history.state.layer); },
@@ -802,16 +831,18 @@ const App = {
   },
   _applyNav(tab,sub){
     if(tab!==this.tab || (sub||null)!==(this.sub||null)) this.listUI = {};   // جستجو/فیلتر هر صفحه با ورود به صفحهٔ دیگر پاک می‌شود
+    if(tab!=='customers' && tab!=='invoice' && tab!=='purchase-view') this.detailId=null;   // پروفایل مشتری با رفتن به بخش دیگر بسته می‌شود
     this.tab=tab; this.sub=sub||null; this.renderNav(); this.render(); window.scrollTo(0,0);
   },
   navigate(tab,sub){
     if(this._defer(()=>this.navigate(tab,sub))) return;
     const same = tab===this.tab && (sub||null)===(this.sub||null);
-    if(!same) this._pushState({tab, sub:sub||null});
+    if(!same) this._historyForNav(tab, sub);
     this._applyNav(tab,sub);
   },
   _initHistory(){
-    try{ history.replaceState({tab:this.tab, sub:this.sub}, ''); }catch(e){}
+    this._navDepth = 0;
+    try{ history.replaceState({tab:this.tab, sub:this.sub, depth:0}, ''); }catch(e){}
     window.addEventListener('popstate', (e)=>{
       // بازگشتی که خودمان برای بستن پنجره فرستاده بودیم: فقط صف کارهای منتظر را اجرا کن
       if((this._pendingPops||0) > 0){
@@ -820,6 +851,7 @@ const App = {
         return;
       }
       const st = e.state || {};
+      if(typeof st.depth==='number') this._navDepth = st.depth;
       this._fromPop = true;
       try{
         if(this.imageViewerSrc){ this.closeImageViewer(); return; }
@@ -941,13 +973,23 @@ const App = {
   
   openSearch(){ if(this._defer(()=>this.openSearch())) return; this._pushLayer(); this.searchOpen=true; this.searchQuery=''; this.renderSearchRoot(); setTimeout(()=>{ const el=document.getElementById('global-search-input'); if(el) el.focus(); },50); },
   closeSearch(){ this._closeOverlay(()=>{ this.searchOpen=false; this.renderSearchRoot(); }); },
+  /* باز کردن پروفایل (دفتر حساب) مشتری/عمده‌فروش از نتیجهٔ جستجو.
+     بستن پنجرهٔ جستجو یک «بازگشت» در تاریخچه می‌فرستد و navigate تا پایان آن به تعویق می‌افتد؛
+     قبلاً openParty فوراً اجرا می‌شد و بعد navigate مقدار sub را پاک می‌کرد و فقط فهرست دیده می‌شد.
+     اینجا هر دو کار با هم و بعد از بسته شدن جستجو انجام می‌شود. */
+  openPartyFromSearch(type,id){
+    this.closeSearch();
+    const go=()=>{ this.detailId=id; this.payFormOpen=false; this.navigate('customers', type); };
+    if(this._defer(go)) return;
+    go();
+  },
   onSearchInput(v){ this.searchQuery=v; clearTimeout(this._gsT); this._gsT=setTimeout(()=>this.renderSearchResultsOnly(),120); },
   runGlobalSearch(q){
     q=(q||'').trim();
     if(!q) return {products:[],customers:[],suppliers:[],sales:[],purchases:[]};
     const norm = s=>String(s||'').toLowerCase();
     const nq = norm(q);
-    const products = this.state.products.filter(p=>norm(p.name).includes(nq)).slice(0,8);
+    const products = this.state.products.filter(p=>!p.removed && norm(p.name).includes(nq)).slice(0,8);
     const customers = this.state.customers.filter(c=>norm(c.name).includes(nq)||norm(c.phone).includes(nq)).slice(0,8);
     const suppliers = this.state.suppliers.filter(c=>norm(c.name).includes(nq)||norm(c.phone).includes(nq)).slice(0,8);
     const invNo = nq.replace(/^#/,'').replace(/^0+/,'');
@@ -970,8 +1012,8 @@ const App = {
     return !q.trim() ? `<div class="empty"><span class="ic">${ic('search',26)}</span><b>جست‌وجوی سراسری</b>نام محصول، مشتری، عمده‌فروش، یا شمارهٔ فاکتور فروش/بل خرید را بنویسید</div>` :
       (!hasAny ? `<div class="empty"><span class="ic">${ic('frown',26)}</span>چیزی با «${escapeHtml(q)}» پیدا نشد</div>` :
       group(ic('archive',13)+' محصولات', r.products, p=>`<div class="row-item clickable" onclick="App.closeSearch(); App.navigate('more','products');"><div class="r-left"><b>${escapeHtml(p.name)}</b><span class="sub">موجودی: ${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</span></div><div class="r-right num">${fmt(p.sellPrice)}</div></div>`)
-      + group(ic('users',13)+' مشتریان', r.customers, c=>`<div class="row-item clickable" onclick="App.closeSearch(); App.navigate('customers'); App.openParty('customers','${c.id}');"><div class="r-left"><b>${escapeHtml(c.name)}</b><span class="sub">${escapeHtml(c.phone||'')}</span></div><div class="r-right num" style="color:${c.balance>0.5?'var(--red)':'var(--green)'}">${fmt(c.balance||0)}</div></div>`)
-      + group(ic('factory',13)+' عمده‌فروشان', r.suppliers, c=>`<div class="row-item clickable" onclick="App.closeSearch(); App.navigate('customers'); App.openParty('suppliers','${c.id}');"><div class="r-left"><b>${escapeHtml(c.name)}</b><span class="sub">${escapeHtml(c.phone||'')}</span></div><div class="r-right num" style="color:${c.balance>0.5?'var(--red)':'var(--green)'}">${fmt(c.balance||0)}</div></div>`)
+      + group(ic('users',13)+' مشتریان', r.customers, c=>`<div class="row-item clickable" onclick="App.openPartyFromSearch('customers','${c.id}')"><div class="r-left"><b>${escapeHtml(c.name)}</b><span class="sub">${escapeHtml(c.phone||'')}</span></div><div class="r-right num" style="color:${c.balance>0.5?'var(--red)':'var(--green)'}">${fmt(c.balance||0)}</div></div>`)
+      + group(ic('factory',13)+' عمده‌فروشان', r.suppliers, c=>`<div class="row-item clickable" onclick="App.openPartyFromSearch('suppliers','${c.id}')"><div class="r-left"><b>${escapeHtml(c.name)}</b><span class="sub">${escapeHtml(c.phone||'')}</span></div><div class="r-right num" style="color:${c.balance>0.5?'var(--red)':'var(--green)'}">${fmt(c.balance||0)}</div></div>`)
       + group(ic('receipt',13)+' فروش‌ها', r.sales, s=>`<div class="row-item clickable" onclick="App.closeSearch(); App.viewInvoice('${s.id}');"><div class="r-left"><b>فروش ${this.invoiceNoLabel(s.id)} — ${escapeHtml(s.customerName)}</b><span class="sub">${s.date}</span></div><div class="r-right num">${fmt(s.total)}</div></div>`)
       + group(ic('package',13)+' خریدها', r.purchases, s=>`<div class="row-item clickable" onclick="App.closeSearch(); App.viewPurchase('${s.id}');"><div class="r-left"><b>خرید ${this.purchaseBillLabel(s)} — ${escapeHtml(s.supplierName||'—')}</b><span class="sub">${s.date}</span></div><div class="r-right num">${fmt(s.total)}</div></div>`));
   },
@@ -1127,7 +1169,7 @@ const App = {
   },
   inventoryReportRows(){
     const threshold = this.state.settings.lowStockThreshold!==undefined ? Number(this.state.settings.lowStockThreshold) : 1;
-    return this.state.products.map(p=>{
+    return this.state.products.filter(p=>!p.removed).map(p=>{
       const stock = Number(p.stock)||0;
       const avgCost = Number(p.avgCost)||0;
       const unit = this.unitByName(p, p.defaultSaleUnit);
@@ -1784,7 +1826,7 @@ const App = {
     this.updateUnitHint('pp');
   },
   productOptions(){
-    const sorted=this.state.products.slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'fa'));
+    const sorted=this.state.products.filter(p=>!p.removed).sort((a,b)=>String(a.name).localeCompare(String(b.name),'fa'));
     return '<option value="">— انتخاب محصول از فهرست —</option>' +
       sorted.map(p=>`<option value="${p.id}">${escapeHtml(p.name)}${p.archived?' — بایگانی‌شده':''} — موجودی: ${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</option>`).join('') +
       '<option value="__new__">+ محصول جدید</option>';
@@ -2262,7 +2304,7 @@ const App = {
      (نه تایپ دستی نام) و انتخاب واحد و قیمت خودکار همان واحد
      ========================================================= */
   productOptionsNoNew(){
-    const sorted=this.state.products.slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'fa'));
+    const sorted=this.state.products.filter(p=>!p.removed).sort((a,b)=>String(a.name).localeCompare(String(b.name),'fa'));
     return '<option value="">— انتخاب از فهرست محصولات —</option>' +
       sorted.map(p=>`<option value="${p.id}">${escapeHtml(p.name)}${p.archived?' — بایگانی‌شده':''} — موجودی: ${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</option>`).join('');
   },
@@ -2994,7 +3036,7 @@ const App = {
     return this.stockInUnit(p, u) <= t;
   },
   lowStockList(){
-    return [...this.state.products].filter(p=>!p.archived && this.isLowStock(p)).sort((a,b)=>(a.stock||0)-(b.stock||0));
+    return [...this.state.products].filter(p=>!p.archived && !p.removed && this.isLowStock(p)).sort((a,b)=>(a.stock||0)-(b.stock||0));
   },
   
   /* ---------- Expenses ---------- */
@@ -3402,6 +3444,23 @@ const App = {
       if(!newUnit || !ladder.some(u=>u.name===newUnit)) throw new Error('واحد نامعتبر است.');
       return updateDoc(doc(cols.products, id), { defaultSaleUnit: newUnit }).then(()=>this.toast('واحد نمایش تغییر کرد: '+newUnit));
     }
+  },
+  /* حذف کامل: محصول از همهٔ فهرست‌ها (محصولات، بایگانی، خرید، فروش، جستجو، گزارش) ناپدید می‌شود.
+     سند در پایگاه داده می‌ماند (علامت removed) تا فاکتورهای قدیمی، مرجوعی و ابطال آن‌ها خراب نشود؛
+     نام کالا در خود فاکتورها ثبت است و همان‌جا دیده می‌شود. */
+  removeProductForever(id){
+    if(!this.isOwner()){ this.toast('فقط مدیر می‌تواند محصول را حذف کند.'); return; }
+    const p=this.state.products.find(x=>x.id===id); if(!p || p.removed) return;
+    if(Math.abs(Number(p.stock)||0) > 0.0001){
+      this.toast('موجودی این محصول صفر نیست. اول با «اصلاح موجودی» آن را صفر کنید تا ارزش انبار درست بماند.');
+      return;
+    }
+    this.openConfirmModal({
+      title:'حذف کامل محصول',
+      msg:'«'+p.name+'» برای همیشه از فهرست محصولات، بایگانی، خرید، فروش و جستجو حذف شود؟\nفاکتورهای قبلی که این کالا در آن‌هاست دست‌نخورده می‌ماند.',
+      danger:true, confirmLabel:'حذف کامل',
+      onConfirm: ()=> updateDoc(doc(cols.products, id), { removed:true, archived:true, removedAt:Date.now(), removedBy:(this.user&&this.user.email)||'' }).then(()=>this.toast('محصول حذف شد.')).catch(e=>{ console.error(e); App.toastError('خطا در حذف محصول؛ دوباره تلاش کنید.'); })
+    });
   },
   deleteProduct(id){
     if(!this.isOwner()){ this.toast('فقط مدیر می‌تواند محصول را بایگانی کند.'); return; }
