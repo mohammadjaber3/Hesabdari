@@ -35,7 +35,12 @@ function safeDate() {
   return !('date' in d()) || (d().date is string && d().date.matches('^[0-9\\-:T.+Z ]*$'));
 }
 function safeImage(k) {
-  return !(k in d()) || (d()[k] is string && (d()[k] == '' || d()[k].matches('^data:image/(png|jpeg|jpg|webp|gif);base64,.*')));
+  return !(k in d()) || (d()[k] is string && (d()[k] == '' || (d()[k].matches('^data:image/(png|jpeg|jpg|webp|gif);base64,.*')
+                                              || d()[k].matches('^img:[A-Za-z0-9_.:-]+$'))));
+}
+function safeImageDoc(id) {
+  return d().id == id && d().data is string
+    && d().data.matches('^data:image/(png|jpeg|jpg|webp|gif);base64,.*');
 }
 function safeContent() { return safeDate() && safeImage('billImage') && safeImage('receiptImage'); }
 
@@ -165,6 +170,20 @@ match /businesses/{biz} {
     allow create: if isMember(biz) && idMatches(id)
                   && request.resource.data.userId == request.auth.token.email;
     allow update, delete: if false;
+  }
+
+  // photos of receipts / supplier bills (kept apart so the main lists stay small)
+  match /images/{id} {
+    allow read: if isOwner(biz)
+                || (id.matches('^payments_.*') && canReadSalesSide(biz))
+                || (id.matches('^purchases_.*') && canReadBooks(biz));
+    allow create: if safeImageDoc(id)
+                  && ((id.matches('^payments_.*') && canOperate(biz))
+                      || (id.matches('^purchases_.*') && (isOwner(biz) || isStaff(biz) || isPartner(biz))));
+    allow update: if safeImageDoc(id)
+                  && ((id.matches('^payments_.*') && isOwner(biz))
+                      || (id.matches('^purchases_.*') && (isOwner(biz) || isStaff(biz))));
+    allow delete: if isOwner(biz);
   }
 
   match /payments/{id} {

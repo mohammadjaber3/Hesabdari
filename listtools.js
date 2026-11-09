@@ -39,3 +39,11 @@ export function listBar({key, placeholder, q, chips, active}){
 export function noMatchHtml(){
   return `<div class="empty"><span class="ic">${ic('search',26)}</span><b>موردی پیدا نشد</b>جستجو یا فیلتر را تغییر بدهید</div>`;
 }
+
+
+/* صفحه‌بندی ساده: فقط LIST_PAGE مورد اول نشان داده می‌شود و دکمهٔ «نمایش بیشتر» بقیه را باز می‌کند */
+export const LIST_PAGE = 60;
+export function moreBtn(key, shown, total){
+  if(total <= shown) return '';
+  return `<button type="button" class="btn btn-outline" onclick="App.moreList('${key}')">نمایش بیشتر <span class="num">(${total-shown} مورد باقی‌مانده)</span></button>`;
+}

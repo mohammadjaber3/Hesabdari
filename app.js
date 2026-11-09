@@ -30,7 +30,7 @@ import {
   productProfitSummary, debtAging, AGING_BUCKETS, trendBuckets
 } from "./ledger.js";
 import { buildTrendChart } from "./chart.js";
-import { XLSX_JS_URL, compressImageForStorage, dateLabel, escapeHtml, fmt, fmt2, getDeviceId, getDeviceLabel, ic, immutableInvoiceNo, loadExternalScript, sanitizeDoc, setDeviceLabel, sum, uid } from './helpers.js';
+import { IMG_PREFIX, isImgRef, XLSX_JS_URL, compressImageForStorage, dateLabel, escapeHtml, fmt, fmt2, getDeviceId, getDeviceLabel, ic, immutableInvoiceNo, loadExternalScript, sanitizeDoc, setDeviceLabel, sum, uid } from './helpers.js';
 import { viewMethods, bindViews } from './views.js';
 
 /* ---------- سیاست دسترسی نقش «شریک» (راننده) ----------
@@ -42,7 +42,7 @@ import { viewMethods, bindViews } from './views.js';
      • مصارف: فقط ثبت جدید؛ حذف/ویرایش ندارد
      • هیچ حذفی، هیچ مرجوعی/ابطال/ویرایش فاکتور، هیچ خرید جدید و هیچ تنظیماتی ندارد
    اگر سیاست عوض شد، فقط همین جدول و بخش partner در firestore.rules را عوض کنید. */
-const PARTNER_CAN_CREATE = ['sales','customers','payments','expenses','suppliers','purchases','products','stockLedger','auditLog'];
+const PARTNER_CAN_CREATE = ['sales','customers','payments','expenses','suppliers','purchases','products','stockLedger','auditLog','images'];
 const PARTNER_CAN_UPDATE = {
   sales:['settled','remaining'],            // تسویهٔ فاکتور هنگام دریافت پول
   customers:['balance','phone','address'],  // مانده و اطلاعات تماس
@@ -226,6 +226,8 @@ COLLECTIONS.forEach(name => { cols[name] = collection(db, 'businesses', BIZ_ID, 
    فقط هنگام نیاز (گزارش/تطبیق) با query خوانده می‌شوند. */
 const LEDGER_COLLECTIONS = ['stockLedger','auditLog'];
 LEDGER_COLLECTIONS.forEach(name => { cols[name] = collection(db, 'businesses', BIZ_ID, name); });
+/* عکس رسید/بل: در کالکشن جدا (فقط هنگام دیدن خوانده می‌شود)، نه داخل رکوردهای اصلی */
+cols.images = collection(db, 'businesses', BIZ_ID, 'images');
 const settingsDocRef   = doc(db, 'businesses', BIZ_ID, 'meta', 'settings');
 const migratedFlagRef  = doc(db, 'businesses', BIZ_ID, 'meta', 'migratedV2');
 const oldStateDocRef   = doc(db, 'businesses', BIZ_ID, 'data', 'state'); // ساختار قدیمی (فقط برای مهاجرت یک‌باره)
@@ -606,6 +608,7 @@ const App = {
           migrateRecordArrays(this.state.sales, this.state.purchases);
           if(name==='sales' || name==='purchases') this._migrateImmutableInvoiceNumbers(name).catch(e=>console.warn('invoice number migration failed',e));
         }
+        this._dataVer = (this._dataVer||0)+1;   // نسخهٔ داده؛ نتیجهٔ محاسبه‌های گزارش تا عوض‌شدن داده نگه داشته می‌شود
         this._loadedParts.add(name);
         markPart(name, snap.metadata.hasPendingWrites);
         checkReady();
@@ -938,7 +941,7 @@ const App = {
   
   openSearch(){ if(this._defer(()=>this.openSearch())) return; this._pushLayer(); this.searchOpen=true; this.searchQuery=''; this.renderSearchRoot(); setTimeout(()=>{ const el=document.getElementById('global-search-input'); if(el) el.focus(); },50); },
   closeSearch(){ this._closeOverlay(()=>{ this.searchOpen=false; this.renderSearchRoot(); }); },
-  onSearchInput(v){ this.searchQuery=v; this.renderSearchResultsOnly(); },
+  onSearchInput(v){ this.searchQuery=v; clearTimeout(this._gsT); this._gsT=setTimeout(()=>this.renderSearchResultsOnly(),120); },
   runGlobalSearch(q){
     q=(q||'').trim();
     if(!q) return {products:[],customers:[],suppliers:[],sales:[],purchases:[]};
@@ -1870,7 +1873,7 @@ const App = {
       status:'active', returns:[], originalTotal: total,
       ...this.recordMeta()
     };
-    if(billImage) newPurchase.billImage = billImage;
+    if(billImage) newPurchase.billImage = IMG_PREFIX+'purchases_'+purchaseId;   // خود عکس در کالکشن images ذخیره می‌شود
 
     /* خرید و میانگین قیمت در یک batch نوشته می‌شوند تا خود فاکتور، تغییر موجودی
        و ثبت دفتر انبار با هم پذیرفته یا رد شوند. توجه: این batch برای avgCost
@@ -1908,6 +1911,7 @@ const App = {
           }
         }
       });
+      if(billImage) batch.set(doc(cols.images,'purchases_'+purchaseId), {id:'purchases_'+purchaseId, col:'purchases', recordId:purchaseId, data:billImage, ts:Date.now()});
       batch.set(doc(cols.purchases,purchaseId),newPurchase);
       this.audit(batch,{action:'create',entityType:'purchase',entityId:purchaseId,before:null,after:newPurchase});
       await batch.commit();
@@ -2631,9 +2635,25 @@ const App = {
       }
     });
   },
+  /* عکس‌های جدید فقط وقتی دیده می‌شوند از دیتابیس خوانده می‌شوند (اول از حافظهٔ گوشی)؛ عکس‌های قدیمی هنوز داخل رکورد است */
+  async _loadImageData(v){
+    if(!v) return '';
+    if(!isImgRef(v)) return v;
+    const snap = await getDocQuick(doc(cols.images, v.slice(IMG_PREFIX.length)));
+    return snap.exists() ? (snap.data().data||'') : '';
+  },
+  async _openImage(v){
+    if(!isImgRef(v)){ this.viewImage(v); return; }
+    try{
+      this.toast('در حال بارگذاری عکس...');
+      const src = await this._loadImageData(v);
+      if(typeof src!=='string' || src.indexOf('data:image/')!==0){ this.toastError('عکس پیدا نشد (شاید هنوز همگام نشده).'); return; }
+      this.viewImage(src);
+    }catch(e){ console.error(e); this.toastError('بارگذاری عکس ناکام شد؛ اینترنت را بررسی کنید.'); }
+  },
   viewPurchaseBillImage(purchaseId){
     const pur=this.state.purchases.find(x=>x.id===purchaseId);
-    if(pur && pur.billImage) this.viewImage(pur.billImage);
+    if(pur && pur.billImage) this._openImage(pur.billImage);
   },
   addPurchaseBillPhoto(purchaseId){
     if(!this.guardWrite()) return;
@@ -2643,7 +2663,11 @@ const App = {
       const file=input.files[0]; if(!file) return;
       try{
         const dataUrl=await compressImageForStorage(file);
-        await updateDoc(doc(cols.purchases, purchaseId), { billImage: dataUrl });
+        const iid='purchases_'+purchaseId;
+        const b=writeBatch(db);
+        b.set(doc(cols.images,iid), {id:iid, col:'purchases', recordId:purchaseId, data:dataUrl, ts:Date.now()});
+        b.update(doc(cols.purchases, purchaseId), { billImage: IMG_PREFIX+iid });
+        await b.commit();
       }catch(err){ App.toastError(err.message||'خطا در ذخیرهٔ عکس'); }
     };
     input.click();
@@ -2813,7 +2837,10 @@ const App = {
     }
     this.audit(batch, { action:'create', entityType:'payment', entityId:paymentId, before:null, after:paymentDoc });
     if(currency==='USD') paymentDoc.rate = payRate;
-    if(receiptImage) paymentDoc.receiptImage = receiptImage;
+    if(receiptImage){
+      paymentDoc.receiptImage = IMG_PREFIX+'payments_'+paymentId;   // خود عکس در کالکشن images ذخیره می‌شود
+      batch.set(doc(cols.images,'payments_'+paymentId), {id:'payments_'+paymentId, col:'payments', recordId:paymentId, data:receiptImage, ts:Date.now()});
+    }
     batch.set(doc(cols.payments, paymentId), paymentDoc);
     batch.commit().catch(e=>{ console.error(e); App.toastError('خطا؛ دوباره تلاش کنید.'); });
     this._payTxId = undefined;
@@ -2822,7 +2849,7 @@ const App = {
   },
   viewPaymentReceipt(paymentId){
     const pay = this.state.payments.find(x=>x.id===paymentId);
-    if(pay && pay.receiptImage) this.viewImage(pay.receiptImage);
+    if(pay && pay.receiptImage) this._openImage(pay.receiptImage);
   },
   addPaymentReceiptPhoto(paymentId){
     const input=document.createElement('input');
@@ -2831,7 +2858,11 @@ const App = {
       const file=input.files[0]; if(!file) return;
       try{
         const dataUrl=await compressImageForStorage(file);
-        await updateDoc(doc(cols.payments, paymentId), { receiptImage: dataUrl });
+        const iid='payments_'+paymentId;
+        const b=writeBatch(db);
+        b.set(doc(cols.images,iid), {id:iid, col:'payments', recordId:paymentId, data:dataUrl, ts:Date.now()});
+        b.update(doc(cols.payments, paymentId), { receiptImage: IMG_PREFIX+iid });
+        await b.commit();
       }catch(err){ App.toastError(err.message||'خطا در ذخیرهٔ عکس'); }
     };
     input.click();
@@ -3388,16 +3419,19 @@ const App = {
      مشتری/عمده‌فروش (فقط برای طرف‌های ثبت‌شده)، این صفحه همهٔ فروش‌ها (چه مشتری نقدی
      چه ثبت‌شده)، خریدها، مصارف/برداشت‌ها، و دریافت/پرداخت‌ها را با فیلتر تاریخ و نوع
      نشان می‌دهد — چیزی گم نمی‌شود. */
-  setHistoryPeriod(p){ this.historyPeriod=p; this.render(); },
-  setHistoryType(t){ this.historyType=t; this.render(); },
+  setHistoryPeriod(p){ this.historyPeriod=p; this.listState('history').n=0; this.render(); },
+  setHistoryType(t){ this.historyType=t; this.listState('history').n=0; this.render(); },
   // ---- جستجو و فیلتر لیست‌ها ----
   listState(key){ this.listUI = this.listUI || {}; return (this.listUI[key] = this.listUI[key] || {q:'', f:'all'}); },
   setListQuery(key, value, caret){
-    this.listState(key).q = value;
-    this._restoreFocus = { id:'lq-'+key, pos: (caret==null ? value.length : caret) };   // تا کاربر وسط تایپ، کیبورد نپرد
-    this.render();
+    const ls=this.listState(key); ls.q = value; ls.n = 0;
+    this._lqLast = { id:'lq-'+key, pos: (caret==null ? value.length : caret) };   // تا کاربر وسط تایپ، کیبورد نپرد
+    this._restoreFocus = this._lqLast;
+    clearTimeout(this._lqT);   // رندر با ۱۵۰ میلی‌ثانیه تأخیر: با تایپ پشت‌سرهم، فقط یک بار
+    this._lqT = setTimeout(()=>{ this._restoreFocus = this._lqLast; this.render(); }, 150);
   },
-  setListFilter(key, f){ this.listState(key).f = f; this.render(); },
+  setListFilter(key, f){ const ls=this.listState(key); ls.f = f; ls.n = 0; this.render(); },
+  moreList(key){ const ls=this.listState(key); ls.n = (ls.n||60) + 60; this.render(); },
   
   /* ---------- Reports ---------- */
   setPeriod(p){ this.reportPeriod=p; this.render(); },
@@ -3574,8 +3608,81 @@ const App = {
     // بعضی مرورگرهای موبایل دانلود را غیرهم‌زمان آغاز می‌کنند؛ فوراً آزادکردن URL ممکن است فایل را خراب کند.
     setTimeout(()=>URL.revokeObjectURL(url), 1000);
   },
-  exportBackup(){
-    this._downloadJSON(buildBackup({ businessId:BIZ_ID, state:this.state, appVersion:'hesabdari-app' }), 'backup-hesabdari-'+todayISO()+'.json');
+  /* فایل پشتیبان باید مثل قبل «کامل و مستقل» باشد: عکس‌هایی که در کالکشن images هستند دوباره داخل رکورد گذاشته می‌شوند.
+     اگر حتی یک عکس خوانده نشود، پشتیبان ساخته نمی‌شود (تا پشتیبانِ ناقص دست کسی نرسد). */
+  async _stateForBackup(){
+    const s=this.state;
+    const refs=new Set();
+    (s.payments||[]).forEach(p=>{ if(isImgRef(p.receiptImage)) refs.add(p.receiptImage); });
+    (s.purchases||[]).forEach(p=>{ if(isImgRef(p.billImage)) refs.add(p.billImage); });
+    if(!refs.size) return s;
+    const map=new Map(); const list=[...refs];
+    for(let i=0;i<list.length;i+=8){
+      await Promise.all(list.slice(i,i+8).map(async r=>{
+        const d=await this._loadImageData(r);
+        if(!d) throw new Error('image-missing:'+r);
+        map.set(r,d);
+      }));
+    }
+    return { ...s,
+      payments:(s.payments||[]).map(p=> isImgRef(p.receiptImage) ? { ...p, receiptImage:map.get(p.receiptImage) } : p),
+      purchases:(s.purchases||[]).map(p=> isImgRef(p.billImage) ? { ...p, billImage:map.get(p.billImage) } : p) };
+  },
+  async exportBackup(){
+    try{
+      const st=await this._stateForBackup();
+      this._downloadJSON(buildBackup({ businessId:BIZ_ID, state:st, appVersion:'hesabdari-app' }), 'backup-hesabdari-'+todayISO()+'.json');
+    }catch(e){ console.error(e); this.toastError('ساخت فایل پشتیبان ناکام شد (خواندن عکس‌ها). با اینترنت دوباره تلاش کنید.'); }
+  },
+  /* ---------- انتقال یک‌باره‌ی عکس‌های قدیمی (فقط مالک) ----------
+     هر عکس اول در کالکشن images ساخته می‌شود و «در همان batch اتمی» رکورد به آن اشاره می‌کند؛
+     یا هر دو انجام می‌شود یا هیچ‌کدام. قبل از شروع، پشتیبان کامل خودکار دانلود می‌شود. */
+  imageMigrationCount(){
+    const inl=v=>typeof v==='string' && v.indexOf('data:image/')===0;
+    return (this.state.payments||[]).filter(p=>inl(p.receiptImage)).length + (this.state.purchases||[]).filter(p=>inl(p.billImage)).length;
+  },
+  migrateImages(){
+    if(!this.isOwner()){ this.toast('این کار فقط برای مالک مجاز است.'); return; }
+    if(!navigator.onLine){ this.toastError('انتقال عکس‌ها فقط با اینترنت ممکن است.'); return; }
+    const n=this.imageMigrationCount();
+    if(!n){ this.toast('همهٔ عکس‌ها قبلاً منتقل شده‌اند.'); return; }
+    this.openConfirmModal({
+      title:'انتقال عکس‌ها (سبک‌سازی)',
+      msg:n+' عکس رسید/بل هنوز داخل رکوردهاست و باعث کندی می‌شود. اول یک فایل پشتیبان کامل دانلود می‌شود، بعد عکس‌ها یکی‌یکی به جای جدا منتقل می‌شوند. اطلاعات حساب‌ها تغییر نمی‌کند. در طول کار برنامه را نبندید.',
+      confirmLabel:'شروع انتقال',
+      onConfirm:()=>{ this._runMigrateImages(); }
+    });
+  },
+  async _runMigrateImages(){
+    if(this._migratingImages) return;
+    this._migratingImages=true;
+    try{
+      const st=await this._stateForBackup();
+      this._downloadJSON(buildBackup({ businessId:BIZ_ID, state:st, appVersion:'hesabdari-app' }), 'backup-before-image-move-'+Date.now()+'.json');
+      const inl=v=>typeof v==='string' && v.indexOf('data:image/')===0;
+      const jobs=[];
+      (this.state.payments||[]).forEach(r=>{ if(inl(r.receiptImage)) jobs.push({col:'payments', field:'receiptImage', id:r.id, data:r.receiptImage}); });
+      (this.state.purchases||[]).forEach(r=>{ if(inl(r.billImage)) jobs.push({col:'purchases', field:'billImage', id:r.id, data:r.billImage}); });
+      let ok=0, bad=0;
+      this.toast('انتقال شروع شد ('+jobs.length+' عکس)...');
+      for(const j of jobs){
+        const iid=j.col+'_'+j.id;
+        try{
+          const b=writeBatch(db,{noLedger:true});
+          b.set(doc(cols.images,iid), {id:iid, col:j.col, recordId:j.id, data:j.data, ts:Date.now(), migrated:true});
+          b.update(doc(cols[j.col],j.id), { [j.field]: IMG_PREFIX+iid });
+          await b.commit();   // با noLedger: تا تأیید سرور صبر می‌کند
+          ok++;
+        }catch(e){ bad++; console.error('image move failed', iid, e); }
+        if((ok+bad)%10===0) this.toast('منتقل‌شده: '+ok+' از '+jobs.length);
+      }
+      if(bad) this.toastError(ok+' عکس منتقل شد، '+bad+' عکس نشد (در جای قبلی سالم مانده). بعداً دوباره بزنید.');
+      else this.toast('انتقال کامل شد: '+ok+' عکس. برنامه از این به بعد سریع‌تر باز می‌شود.');
+    }catch(e){
+      console.error(e); this.toastError('انتقال شروع نشد (پشتیبان ساخته نشد). چیزی تغییر نکرد.');
+    }
+    this._migratingImages=false;
+    this.render();
   },
   async exportBackupExcel(){
     if(typeof XLSX==='undefined'){
@@ -3643,7 +3750,7 @@ const App = {
   async _runImportBackup(parsed, input){
     if(!navigator.onLine){ this.toastError('بازیابی از فایل پشتیبان فقط با اینترنت ممکن است (حجم زیاد و باید سرور تأیید کند).'); return; }
     try{
-      this._downloadJSON(buildBackup({ businessId:BIZ_ID, state:this.state, appVersion:'hesabdari-app' }), 'auto-backup-before-import-'+Date.now()+'.json');
+      this._downloadJSON(buildBackup({ businessId:BIZ_ID, state:await this._stateForBackup(), appVersion:'hesabdari-app' }), 'auto-backup-before-import-'+Date.now()+'.json');
 
         migrateSettings(parsed.settings);
         migrateRecordArrays(parsed.sales, parsed.purchases);
@@ -3758,9 +3865,10 @@ const App = {
   },
   async _runWipeAll(){
     if(!navigator.onLine){ this.toastError('پاک‌کردن کامل اطلاعات فقط با اینترنت ممکن است.'); return; }
-    this._downloadJSON(buildBackup({ businessId:BIZ_ID, state:this.state, appVersion:'hesabdari-app' }), 'auto-backup-before-wipe-'+Date.now()+'.json');
+    let _bk; try{ _bk=await this._stateForBackup(); }catch(e){ console.error(e); this.toastError('پشتیبان خودکار ساخته نشد؛ پاک‌سازی انجام نشد.'); return; }
+    this._downloadJSON(buildBackup({ businessId:BIZ_ID, state:_bk, appVersion:'hesabdari-app' }), 'auto-backup-before-wipe-'+Date.now()+'.json');
     try{
-      for(const name of COLLECTIONS){
+      for(const name of [...COLLECTIONS,'images']){
         const existing = await getDocs(cols[name]);
         let batch=writeBatch(db,{noLedger:true}); let opCount=0;
         for(const d of existing.docs){

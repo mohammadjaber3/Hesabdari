@@ -16,7 +16,6 @@ const APP_SHELL = [
   './',
   './index.html',
   './styles.css',
-  './fonts/Vazirmatn-Variable.woff2',
   './app.js',
   './core.js',
   './units.js',
@@ -127,6 +126,11 @@ self.addEventListener('install', (event) => {
     await cacheShell(cache);          // اگر حتی یک فایل برنامه نیاید، نصب رد می‌شود و نسخهٔ قبلی سالم می‌ماند
     // Firebase اجباری است: اگر کامل کش نشود، نصب رد می‌شود (نسخهٔ قبلی سالم می‌ماند و دفعهٔ بعد که اینترنت بود دوباره تلاش می‌شود)
     // وگرنه سرویس‌ورکر «نصب‌شده» ولی برنامه آفلاین بالا نمی‌آمد. Chart.js / xlsx / فونت همچنان «بهترین‌ممکن»اند.
+    // فونت «بهترین‌ممکن» است: اگر فایلش نبود/نیامد، نصب برنامه خراب نمی‌شود (با فونت سیستم هم کار می‌کند)
+    try {
+      const fr = await fetch('./fonts/Vazirmatn-Variable.woff2', { cache: 'reload' });
+      if (fr && fr.status === 200) await cache.put('./fonts/Vazirmatn-Variable.woff2', fr);
+    } catch (e) { /* دفعهٔ بعد */ }
     const missing = await precacheExternal(cache).catch(() => ['precache-error']);
     if (missing && missing.length) throw new Error('firebase modules not cached: ' + missing.join(', '));
     await self.skipWaiting();

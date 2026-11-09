@@ -41,7 +41,26 @@ export function fmt2(n){
 
 export function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
-export const _SAFE_IMG = /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+\/=]+$/;
+/* عکس یا «داده‌ی خود عکس» است (قدیمی)، یا ارجاعی به سند کالکشن images به شکل img:<شناسه> (جدید) */
+export const _SAFE_IMG = /^(?:data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+\/=]+|img:[A-Za-z0-9_.:\-]+)$/;
+export const IMG_PREFIX = 'img:';
+export const isImgRef = v => typeof v === 'string' && v.indexOf(IMG_PREFIX) === 0;
+
+/* n مورد تازه‌تر از چند آرایه، بدون کپی و مرتب‌کردن همهٔ داده‌ها. groups: [[آرایه, نوع], ...] */
+export function recentByTs(groups, n){
+  const out = [];
+  groups.forEach(([arr, type])=>{
+    const top = [];
+    for(const x of (arr||[])){
+      const t = x.ts||0;
+      if(top.length<n || t>(top[top.length-1].ts||0)){
+        top.push(x); top.sort((a,b)=>(b.ts||0)-(a.ts||0)); if(top.length>n) top.pop();
+      }
+    }
+    top.forEach(x=>out.push({...x,_type:type}));
+  });
+  return out.sort((a,b)=>(b.ts||0)-(a.ts||0)).slice(0,n);
+}
 
 export const _IMG_KEYS = new Set(['billImage','receiptImage','image','photo']);
 
@@ -85,13 +104,13 @@ export function _resizeImageToDataUrl(img, maxDim, quality){
 export async function compressImageForStorage(file){
   if(!file || !file.type || file.type.indexOf('image/')!==0){ throw new Error('لطفاً یک فایل عکس انتخاب کنید'); }
   const img = await _loadImageFromFile(file);
-  const attempts = [[1100,0.62],[850,0.5],[650,0.4],[500,0.32]];
+  const attempts = [[900,0.55],[760,0.48],[620,0.4],[500,0.32]];   // عکس رسید کوچک‌تر = سریع‌تر و کم‌حجم‌تر
   let lastUrl=null;
   for(const [dim,q] of attempts){
     lastUrl = _resizeImageToDataUrl(img, dim, q);
-    if(lastUrl.length < 700000) return lastUrl; // ~500KB باینری، امن زیر سقف ۱ مگابایتی سند
+    if(lastUrl.length < 160000) return lastUrl; // ~120KB باینری؛ برای خواندن رسید کافی است
   }
-  if(lastUrl.length < 950000) return lastUrl;
+  if(lastUrl.length < 700000) return lastUrl;
   throw new Error('حجم عکس بعد از فشرده‌سازی هنوز زیاد است؛ لطفاً با نور بهتر یا نزدیک‌تر دوباره عکس بگیرید.');
 }
 

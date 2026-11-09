@@ -1,13 +1,24 @@
 /* ---------- نماهای برنامه (render ها) — از app.js جدا شد؛ رفتار بدون تغییر است ---------- */
 import { todayISO, round2, fmtQty, previousRange, changePercent } from "./core.js";
 import { WITHDRAWAL_CATEGORY, salesSummary, productProfitSummary, debtAging, AGING_BUCKETS } from "./ledger.js";
-import { escapeHtml, fmt, fmt2, getDeviceLabel, ic, startOfMonth, startOfWeek, sum } from './helpers.js';
-import { matchQ, listBar, noMatchHtml } from './listtools.js';
+import { escapeHtml, fmt, fmt2, getDeviceLabel, ic, recentByTs, startOfMonth, startOfWeek, sum } from './helpers.js';
+import { matchQ, listBar, noMatchHtml, moreBtn, LIST_PAGE } from './listtools.js';
 
 let App = null;
 export function bindViews(a){ App = a; }
 
 export const viewMethods = {
+  /* نتیجهٔ محاسبه‌های سنگین (خلاصه فروش، سود محصولات، سن بدهی) تا وقتی داده عوض نشده نگه داشته می‌شود */
+  _memo(name, args, fn){
+    const c = this._memoCache || (this._memoCache = {});
+    const key = name+'|'+JSON.stringify(args);
+    const e = c[key];
+    if(e && e.v===this._dataVer) return e.val;
+    const val = fn();
+    if(Object.keys(c).length>40){ for(const k in c) delete c[k]; }
+    c[key] = { v:this._dataVer, val };
+    return val;
+  },
   renderLoading(){
     document.getElementById('bottomnav').innerHTML='';
     document.getElementById('biz-name').textContent='فروشگاه صانع';
@@ -234,15 +245,11 @@ export const viewMethods = {
     const todayExpensesAll = this.expensesInRange(today,today);
     const todayExpenses = todayExpensesAll.filter(e=>e.category!==WITHDRAWAL_CATEGORY);
     const todayWithdrawals = todayExpensesAll.filter(e=>e.category===WITHDRAWAL_CATEGORY);
-    const todaySm = salesSummary({ sales:this.state.sales, returns:this.state.returns, from:today, to:today });
+    const todaySm = this._memo('ss',[today,today],()=>salesSummary({ sales:this.state.sales, returns:this.state.returns, from:today, to:today }));
     const todayProfit = todaySm.grossProfit - sum(todayExpenses,'amount');
     const cur = this.state.settings.currency;
 
-    const recent = [
-      ...this.state.sales.map(x=>({...x,_type:'sale'})),
-      ...this.state.purchases.map(x=>({...x,_type:'purchase'})),
-      ...this.state.expenses.map(x=>({...x,_type:'expense'})),
-    ].sort((a,b)=>(b.ts||0)-(a.ts||0)).slice(0,8);
+    const recent = recentByTs([[this.state.sales,'sale'],[this.state.purchases,'purchase'],[this.state.expenses,'expense']], 8);
 
     const recentHtml = recent.length ? recent.map(x=>{
       const who=this.whoLabel(x);
@@ -639,7 +646,9 @@ export const viewMethods = {
     <div class="card no-print">
       <b class="u-align-items-center u-gap-6px" style="display:flex">${ic('camera',16)}عکس بل/فاکتور شرکت</b>
       ${pur.billImage
-        ? `<img src="${escapeHtml(pur.billImage)}" class="bill-thumb u-margin-top-10px" onclick="App.viewPurchaseBillImage('${pur.id}')">`
+        ? (String(pur.billImage).indexOf('data:')===0
+            ? `<img src="${escapeHtml(pur.billImage)}" class="bill-thumb u-margin-top-10px" onclick="App.viewPurchaseBillImage('${pur.id}')">`
+            : `<button class="btn btn-outline" onclick="App.viewPurchaseBillImage('${pur.id}')">${ic('image',16)}مشاهدهٔ عکس بل</button>`)
         : `<div class="field-note">هنوز عکسی برای این خرید ثبت نشده.</div>`}
       ${App.canWrite()?`<button class="btn btn-outline" onclick="App.addPurchaseBillPhoto('${pur.id}')">${ic('camera',16)}${pur.billImage?'تغییر عکس بل':'افزودن عکس بل شرکت'}</button>`:''}
     </div>
@@ -697,7 +706,8 @@ export const viewMethods = {
     const byFilter = c => ls.f==='debt' ? balOf(c)>0.5 : ls.f==='credit' ? balOf(c)<-0.5 : ls.f==='settled' ? Math.abs(balOf(c))<=0.5 : true;
     const visible = sorted.filter(c => byFilter(c) && matchQ(ls.q, c.name, c.phone, c.address));
     const totalKey = sub==='customers' ? this.totalReceivable() : this.totalPayable();
-    const rows = visible.length ? visible.map(c=>{
+    const lim = ls.n||LIST_PAGE;
+    const rows = visible.length ? visible.slice(0,lim).map(c=>{
       const bal=c.balance||0;
       let badge;
       if(sub==='suppliers'){
@@ -738,6 +748,7 @@ export const viewMethods = {
     </div>
     ${listBar({key:sub, placeholder: sub==='customers'?'جستجوی نام یا شماره مشتری':'جستجوی نام شرکت یا عمده‌فروش', q:ls.q, chips, active:ls.f})}
     <div class="card">${visible.length || !listArr.length ? rows : noMatchHtml()}</div>
+    ${moreBtn(sub, Math.min(lim,visible.length), visible.length)}
     `;
   },
 
@@ -940,7 +951,8 @@ export const viewMethods = {
     ];
     const byFilter = p => ls.f==='low' ? this.isLowStock(p,threshold) : ls.f==='out' ? (p.stock||0)<=0 : ls.f==='archived' ? !!p.archived : true;
     const visible = sorted.filter(p => byFilter(p) && matchQ(ls.q, p.name, ...((this.productUnits(p)||[]).map(u=>u.name))));
-    const rows = visible.length ? visible.map(p=>{
+    const lim = ls.n||LIST_PAGE;
+    const rows = visible.length ? visible.slice(0,lim).map(p=>{
       const ladder=this.productUnits(p);
       const txUnits=this.transactionUnits(p);
       const defUnit=this.unitByName(p, p.defaultSaleUnit);
@@ -991,6 +1003,7 @@ export const viewMethods = {
     ${owner&&sorted.length?`<div class="field-note u-margin-bottom-8px">با دکمهٔ ${ic('sliders',13)} روی هر محصول، واحدهای واقعی معامله (کارتن ← قوطی/بسته) و قیمت‌هایشان را ویرایش کنید. «عدد» فقط واحد داخلی محاسبات است.</div>`:''}
     ${listBar({key:'products', placeholder:'جستجوی نام کالا یا واحد', q:ls.q, chips, active:ls.f})}
     <div class="card">${visible.length || !sorted.length ? rows : noMatchHtml()}</div>
+    ${moreBtn('products', Math.min(lim,visible.length), visible.length)}
     `;
   },
 
@@ -1060,7 +1073,8 @@ export const viewMethods = {
     </div>
     ${listBar({key:'history', placeholder:'جستجوی نام مشتری، تأمین‌کننده، کالا یا بل', q:hq.q})}
     <div class="field-note">بازه: ${label} (${start==='0000-01-01'?'ابتدا':start} تا ${end}) — ${rows.length} مورد</div>
-    <div class="card">${rows.length?rows.map(r=>r.html).join(''):(hq.q?noMatchHtml():`<div class="empty"><span class="ic">${ic('history',24)}</span>در این بازه معامله‌ای نیست</div>`)}</div>
+    <div class="card">${rows.length?rows.slice(0,hq.n||LIST_PAGE).map(r=>r.html).join(''):(hq.q?noMatchHtml():`<div class="empty"><span class="ic">${ic('history',24)}</span>در این بازه معامله‌ای نیست</div>`)}</div>
+    ${moreBtn('history', Math.min(hq.n||LIST_PAGE, rows.length), rows.length)}
     `;
   },
 
@@ -1077,7 +1091,7 @@ export const viewMethods = {
     const expensesAll=this.expensesInRange(start,end);
     const expenses=expensesAll.filter(e=>e.category!==WITHDRAWAL_CATEGORY);
     const withdrawals=expensesAll.filter(e=>e.category===WITHDRAWAL_CATEGORY);
-    const sm=salesSummary({ sales:this.state.sales, returns:this.state.returns, from:start, to:end });
+    const sm=this._memo('ss',[start,end],()=>salesSummary({ sales:this.state.sales, returns:this.state.returns, from:start, to:end }));
     const revenue=sm.net;
     const cogs=sm.cogs;
     const grossProfit=sm.grossProfit;
@@ -1088,7 +1102,7 @@ export const viewMethods = {
 
     /* ----- مقایسه با دورهٔ قبل ----- */
     const prevR = previousRange({ period:this.reportPeriod, start, end });
-    const prevSm = salesSummary({ sales:this.state.sales, returns:this.state.returns, from:prevR.start, to:prevR.end });
+    const prevSm = this._memo('ss',[prevR.start,prevR.end],()=>salesSummary({ sales:this.state.sales, returns:this.state.returns, from:prevR.start, to:prevR.end }));
     const prevExp = sum(this.expensesInRange(prevR.start,prevR.end).filter(e=>e.category!==WITHDRAWAL_CATEGORY),'amount');
     const prevNet = prevSm.grossProfit - prevExp;
     const cmpRow = (label, cur, prev)=>{
@@ -1100,13 +1114,13 @@ export const viewMethods = {
     const compareCard = `<div class="eyebrow"><span>مقایسه با دورهٔ قبل</span></div><div class="card">${cmpRow('فروش خالص', revenue, prevSm.net)}${cmpRow('سود خالص', netProfit, prevNet)}</div>`;
 
     /* ----- سود به تفکیک محصول ----- */
-    const prodProfit = productProfitSummary({ sales:this.state.sales, from:start, to:end });
+    const prodProfit = this._memo('pp',[start,end],()=>productProfitSummary({ sales:this.state.sales, from:start, to:end }));
     const prodRows = prodProfit.slice(0,10).map(r=>
       `<div class="row-item"><div class="r-left"><b>${escapeHtml(r.name)}</b><span class="sub">فروش ${fmt(r.revenue)} · بهای تمام‌شده ${fmt(r.cost)}</span></div><div class="r-right num" style="color:${r.profit>=0?'var(--green)':'var(--red)'}">${fmt(r.profit)}</div></div>`).join('');
     const prodCard = `<div class="eyebrow"><span>سود به تفکیک محصول (۱۰ محصولِ برتر)</span></div><div class="card">${prodRows || '<div class="empty">در این بازه فروشی نیست.</div>'}${prodProfit.length?'<div class="field-note">بر اساس تاریخ فاکتور و پس از کسر مرجوعی؛ ممکن است با «سود ناخالص» بالا کمی فرق کند.</div>':''}</div>`;
 
     /* ----- سن بدهی مشتریان (وضعیت امروز، مستقل از بازهٔ انتخاب‌شده) ----- */
-    const aging = debtAging({ customers:this.state.customers, sales:this.state.sales, today });
+    const aging = this._memo('da',[today],()=>debtAging({ customers:this.state.customers, sales:this.state.sales, today }));
     const agingRows = AGING_BUCKETS.map(b=>`<div class="row-item"><div class="r-left">${b.label}</div><div class="r-right num" style="${b.key==='d90p'&&aging.totals[b.key]>0?'color:var(--red)':''}">${fmt(aging.totals[b.key])}</div></div>`).join('')
       + (aging.totals.noInvoice>0.001 ? `<div class="row-item"><div class="r-left">بدون فاکتور <span class="sub">(مانده افتتاحیه/قدیمی)</span></div><div class="r-right num">${fmt(aging.totals.noInvoice)}</div></div>` : '');
     const topDebtors = aging.rows.slice(0,5).map(r=>`<div class="row-item"><div class="r-left"><b>${escapeHtml(r.name)}</b><span class="sub">قدیمی‌ترین بدهی: ${r.oldestDays} روز پیش</span></div><div class="r-right num u-color-var-red">${fmt(r.balance)}</div></div>`).join('');
@@ -1248,6 +1262,8 @@ export const viewMethods = {
       <div class="field-note">این برنامه آفلاین هم کار می‌کند: هر تغییری روی گوشی شما فوراً ذخیره می‌شود و به‌محض وصل شدن اینترنت، خودکار با بقیهٔ اعضای تیم در فضای ابری سینک می‌شود (یک دیتابیس مشترک برای همه). دانلود/بازیابی فایل پشتیبان فقط برای نسخهٔ اضافی یا انتقال کامل داده به یک نصب جدید است.</div>
       <button class="btn btn-outline" onclick="App.exportBackup()">${ic('download',16)}دانلود فایل پشتیبان (JSON — برای بازیابی کامل)</button>
       <button class="btn btn-outline" onclick="App.exportBackupExcel()">${ic('sheet',16)}دانلود پشتیبان اکسل (برای مطالعه/حسابدار)</button>
+      ${this.isOwner() && this.imageMigrationCount()>0 ? `<div class="field-note u-margin-top-14px">${this.imageMigrationCount()} عکس رسید/بل هنوز داخل رکوردهاست و برنامه را کند می‌کند. با این دکمه (یک بار) به جای جدا منتقل می‌شود؛ قبلش پشتیبان کامل دانلود می‌شود.</div>
+      <button class="btn btn-outline" onclick="App.migrateImages()">${ic('image',16)}انتقال عکس‌ها (سبک‌سازی)</button>`:''}
       ${this.isAdmin()?`
       <label class="u-margin-top-14px">بازیابی از فایل پشتیبان</label>
       <div class="hint u-color-var-red-700 u-background-var-red-050 u-border-color-oklch-89-04-27">${ic('alert-triangle',13)}این کار دیتابیس مشترک همهٔ کاربران را جایگزین می‌کند، نه فقط اطلاعات همین گوشی را.</div>
