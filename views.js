@@ -989,7 +989,126 @@ export const viewMethods = {
     `;
   },
 
+  /* ---------- پروفایل محصول ---------- */
+  renderProductDetail(){
+    const p = this.state.products.find(x=>x.id===this.productDetailId);
+    if(!p || p.removed){ this.productDetailId=null; return this.renderProducts(); }
+    const cur = this.state.settings.currency || '';
+    const books = this.canSeeBooks(), rep = this.canSeeReports();
+    const defUnit = this.unitByName(p, p.defaultSaleUnit) || {name:p.unit||'عدد', factor:1};
+    const fu = Number(defUnit.factor)||1;
+    const num0 = v=>Number(v)||0;
+    const dd = x=>String(x||'').slice(0,10);
+    const byDateDesc = (a,b)=> dd(b.date).localeCompare(dd(a.date)) || num0(b.ts)-num0(a.ts);
+
+    // فروش‌ها (فاکتورهای باطل در جمع‌ها نمی‌آیند ولی در فهرست با برچسب دیده می‌شوند)
+    const saleRows = [];
+    this.state.sales.forEach(sl=>{ (sl.items||[]).forEach(it=>{ if(it.productId===p.id) saleRows.push({s:sl, it, cancelled: sl.status==='cancelled'}); }); });
+    saleRows.sort((a,b)=>byDateDesc(a.s,b.s));
+    let soldQty=0, soldRev=0, soldCost=0, retQty=0;
+    saleRows.filter(r=>!r.cancelled).forEach(r=>{
+      const net = Math.max(0, num0(r.it.qty)-num0(r.it.returnedQty));
+      soldQty += net; soldRev += net*num0(r.it.unitPrice); soldCost += net*num0(r.it.cost); retQty += num0(r.it.returnedQty);
+    });
+    const lastSale = saleRows.find(r=>!r.cancelled);
+
+    // خریدها
+    const purRows = [];
+    if(books) this.state.purchases.forEach(pu=>{ (pu.items||[]).forEach(it=>{ if(it.productId===p.id) purRows.push({s:pu, it, cancelled: pu.status==='cancelled'}); }); });
+    purRows.sort((a,b)=>byDateDesc(a.s,b.s));
+    let boughtQty=0, boughtAFN=0, boughtAFNqty=0; const boughtUSD={amt:0,qty:0};
+    const sup = {};
+    purRows.filter(r=>!r.cancelled).forEach(r=>{
+      const net = Math.max(0, num0(r.it.qty)-num0(r.it.returnedQty));
+      const usd = r.s.currency==='USD';
+      boughtQty += net;
+      if(usd){ boughtUSD.amt += net*num0(r.it.unitCost); boughtUSD.qty += net; } else { boughtAFN += net*num0(r.it.unitCost); boughtAFNqty += net; }
+      const key = r.s.supplierName || '—';
+      const g = sup[key] = sup[key] || {name:key, qty:0, afn:0, usd:0, last:'', lastPrice:0, lastUsd:false};
+      g.qty += net; if(usd) g.usd += net*num0(r.it.unitCost); else g.afn += net*num0(r.it.unitCost);
+      if(dd(r.s.date) >= g.last){ g.last = dd(r.s.date); g.lastPrice = num0(r.it.unitCost)*(this.itemFactor(r.it)); g.lastUsd = usd; g.lastUnit = this.itemUnitName(r.it); }
+    });
+    const lastPur = purRows.find(r=>!r.cancelled);
+    const supList = Object.values(sup).sort((a,b)=>b.last.localeCompare(a.last));
+
+    const stock = num0(p.stock);
+    const diff = Math.round((stock - (boughtQty - soldQty))*10000)/10000;
+    const pf = (r, usdFlag)=>{ // قیمت یک قلم به واحد خودش
+      const v = num0(r.it.unitPrice!==undefined ? r.it.unitPrice : r.it.unitCost) * this.itemFactor(r.it);
+      return (usdFlag?'$'+fmt2(v):fmt2(v))+' / '+this.itemUnitName(r.it);
+    };
+    const tile = (lbl,val,col)=>`<div class="u-text-align-center"><div class="field-note">${lbl}</div><div class="num u-font-weight-800" style="${col?'color:'+col:''}">${val}</div></div>`;
+    const qtyTxt = v=>this.qtyBreakdown(p, v);
+    const priceUnit = v=>fmt2(v*fu)+' '+cur+' / '+defUnit.name;
+
+    const stats = `
+      <div class="card">
+        <div class="grid2">
+          ${tile('موجودی فعلی', escapeHtml(qtyTxt(stock)), stock<=0?'var(--red)':'')}
+          ${rep?tile('ارزش موجودی', fmt(stock*num0(p.avgCost))+' '+cur):tile('واحد پایه', escapeHtml(p.unit||'عدد'))}
+        </div>
+        <div class="grid2 u-margin-top-8px">
+          ${tile('کل فروخته‌شده (پس از مرجوعی)', escapeHtml(qtyTxt(soldQty)))}
+          ${books?tile('کل خریداری‌شده', escapeHtml(qtyTxt(boughtQty))):tile('مرجوعی فروش', escapeHtml(qtyTxt(retQty)))}
+        </div>
+        <div class="grid2 u-margin-top-8px">
+          ${tile('مجموع مبلغ فروش', fmt(soldRev)+' '+cur, 'var(--green)')}
+          ${rep?tile('سود تقریبی فروش', fmt(soldRev-soldCost)+' '+cur, soldRev-soldCost>=0?'var(--green)':'var(--red)'):tile('میانگین قیمت فروش', soldQty>0?priceUnit(soldRev/soldQty):'—')}
+        </div>
+        ${Math.abs(diff)>0.0001 && books ? `<div class="field-note u-margin-top-8px">اختلاف موجودی با (خرید − فروش): ${escapeHtml(qtyTxt(Math.abs(diff)))} ${diff>0?'بیشتر':'کمتر'} — از موجودی اولیه، اصلاح دستی یا ضایعات.</div>`:''}
+        <div class="field-note u-margin-top-8px">مبلغ فروش پیش از تخفیف کلی فاکتور حساب شده است.</div>
+      </div>
+      <div class="card u-margin-top-12px">
+        <div class="field-note"><b>قیمت‌ها (به ${escapeHtml(defUnit.name)})</b></div>
+        <div class="row"><span class="label">قیمت فروش فعلی</span><span class="val num">${fmt2(this.unitSellPrice(p, defUnit))} ${cur}</span></div>
+        ${rep?`<div class="row"><span class="label">قیمت تمام‌شدهٔ فعلی</span><span class="val num">${fmt2(this.unitCost(p, defUnit))} ${cur}</span></div>`:''}
+        ${soldQty>0?`<div class="row"><span class="label">میانگین قیمت فروش‌رفته</span><span class="val num">${priceUnit(soldRev/soldQty)}</span></div>`:''}
+        ${lastSale?`<div class="row"><span class="label">آخرین فروش (${dd(lastSale.s.date)})</span><span class="val num">${pf(lastSale)}</span></div>`:''}
+        ${books && boughtAFNqty>0?`<div class="row"><span class="label">میانگین قیمت خرید (${cur})</span><span class="val num">${priceUnit(boughtAFN/boughtAFNqty)}</span></div>`:''}
+        ${books && boughtUSD.qty>0?`<div class="row"><span class="label">میانگین قیمت خرید (دالر)</span><span class="val num">$${fmt2(boughtUSD.amt/boughtUSD.qty*fu)} / ${escapeHtml(defUnit.name)}</span></div>`:''}
+        ${books && lastPur?`<div class="row"><span class="label">آخرین خرید (${dd(lastPur.s.date)}) از ${escapeHtml(lastPur.s.supplierName||'—')}</span><span class="val num">${pf(lastPur, lastPur.s.currency==='USD')}</span></div>`:''}
+      </div>`;
+
+    const supHtml = books && supList.length ? `
+      <h2 class="section-title">خرید از چه کسانی (${supList.length})</h2>
+      <div class="card">${supList.map(g=>`<div class="row-item"><div class="r-left"><b>${escapeHtml(g.name)}</b><span class="sub">مجموع خرید: ${escapeHtml(qtyTxt(g.qty))} · آخرین: ${g.last}</span><span class="sub num">آخرین قیمت: ${g.lastUsd?'$':''}${fmt2(g.lastPrice)} / ${escapeHtml(g.lastUnit||defUnit.name)}</span></div><div class="r-right num">${g.afn>0?fmt(g.afn)+' '+cur:''}${g.afn>0&&g.usd>0?'<br>':''}${g.usd>0?'$'+fmt2(g.usd):''}</div></div>`).join('')}</div>` : '';
+
+    const LIM = 60;
+    const saleHtml = saleRows.length ? saleRows.slice(0,LIM).map(r=>{
+      const ret = num0(r.it.returnedQty)>0 ? ` · مرجوعی: ${escapeHtml(this.itemQtyLabel(r.it, r.it.returnedQty))}` : '';
+      return `<div class="row-item clickable" onclick="App.viewInvoice('${r.s.id}')"><div class="r-left"><b>فروش ${escapeHtml(this.invoiceNoLabel(r.s.id))} — ${escapeHtml(r.s.customerName||'—')}</b>${r.cancelled?' <span class="badge gold">باطل شده</span>':''}<span class="sub">${dd(r.s.date)} · ${escapeHtml(this.itemQtyLabel(r.it))}${ret}</span></div><div class="r-right num">${pf(r)}</div></div>`;
+    }).join('') + (saleRows.length>LIM?`<div class="field-note u-text-align-center">${saleRows.length-LIM} مورد قدیمی‌تر نمایش داده نشد</div>`:'')
+      : `<div class="empty"><span class="ic">${ic('history',24)}</span>هنوز فروشی از این محصول ثبت نشده</div>`;
+    const purHtml = !books ? '' : (purRows.length ? purRows.slice(0,LIM).map(r=>{
+      const usd = r.s.currency==='USD';
+      return `<div class="row-item clickable" onclick="App.viewPurchase('${r.s.id}')"><div class="r-left"><b>خرید ${escapeHtml(this.purchaseBillLabel(r.s))} — ${escapeHtml(r.s.supplierName||'—')}</b>${r.cancelled?' <span class="badge gold">باطل شده</span>':''}<span class="sub">${dd(r.s.date)} · ${escapeHtml(this.itemQtyLabel(r.it))}</span></div><div class="r-right num">${(usd?'$':'')+fmt2(num0(r.it.unitCost)*this.itemFactor(r.it))} / ${escapeHtml(this.itemUnitName(r.it))}</div></div>`;
+    }).join('') + (purRows.length>LIM?`<div class="field-note u-text-align-center">${purRows.length-LIM} مورد قدیمی‌تر نمایش داده نشد</div>`:'')
+      : `<div class="empty"><span class="ic">${ic('history',24)}</span>هنوز خریدی از این محصول ثبت نشده</div>`);
+
+    return `
+    <button class="back-btn" onclick="App.closeProduct()">${ic('chevron-right',16)}بازگشت به فهرست محصولات</button>
+    <div class="card">
+      <div class="u-justify-content-space-between u-align-items-center" style="display:flex">
+        <b class="u-font-size-16px">${escapeHtml(p.name)}</b>
+        ${p.archived?'<span class="badge gold">بایگانی‌شده</span>':`<span class="badge ${this.isLowStock(p)?'red':'green'}">${this.isLowStock(p)?'کم‌موجود':'فعال'}</span>`}
+      </div>
+      ${this.productUnits(p).length>1?`<div class="sub u-margin-top-6px">${escapeHtml(this.unitLadderLabel(p))}</div>`:''}
+      ${this.isOwner()&&!p.archived?`<div class="grid2 u-margin-top-10px">
+        <button class="btn btn-outline u-margin-top-0" onclick="App.editProductUnits('${p.id}')">${ic('sliders',15)}واحدها و قیمت</button>
+        <button class="btn btn-outline u-margin-top-0" onclick="App.adjustProductStock('${p.id}')">${ic('package',15)}اصلاح موجودی</button>
+      </div>`:''}
+    </div>
+    ${stats}
+    ${supHtml}
+    <h2 class="section-title">فروش‌های این محصول (${saleRows.length})</h2>
+    <div class="card">${saleHtml}</div>
+    ${books?`<h2 class="section-title">خریدهای این محصول (${purRows.length})</h2>
+    <div class="card">${purHtml}</div>`:''}
+    `;
+  },
+
   renderProducts(){
+    if(this.productDetailId) return this.renderProductDetail();
     const owner=this.isOwner();
     const threshold = this.state.settings.lowStockThreshold!==undefined ? this.state.settings.lowStockThreshold : 1;
     const sorted=this.state.products.filter(p=>!p.removed).sort((a,b)=>a.name.localeCompare(b.name,'fa'));
@@ -1010,7 +1129,7 @@ export const viewMethods = {
       const stockInDef=this.stockInUnit(p,defUnit);
       const priceLine = txUnits.map(u=>u.name+': '+fmt2(this.unitSellPrice(p,u))+(this.isUnitPriceManual(p,u)?'*':'')).join(' · ');
       const costLine  = txUnits.map(u=>u.name+': '+fmt2(this.unitCost(p,u))).join(' · ');
-      return `<div class="row-item"><div class="r-left"><b>${escapeHtml(p.name)}</b>${p.archived?'<span class="sub">بایگانی‌شده — همچنان قابل انتخاب در خرید و فروش</span>':''}${ladder.length>1?`<span class="sub">${escapeHtml(this.unitLadderLabel(p))}</span>`:''}<span class="sub">فروش — ${escapeHtml(priceLine)}</span><span class="sub">تمام‌شده — ${escapeHtml(costLine)}</span></div>
+      return `<div class="row-item"><div class="r-left u-cursor-pointer" onclick="App.openProduct('${p.id}')"><b>${escapeHtml(p.name)}</b>${p.archived?'<span class="sub">بایگانی‌شده — همچنان قابل انتخاب در خرید و فروش</span>':''}${ladder.length>1?`<span class="sub">${escapeHtml(this.unitLadderLabel(p))}</span>`:''}<span class="sub">فروش — ${escapeHtml(priceLine)}</span><span class="sub">تمام‌شده — ${escapeHtml(costLine)}</span></div>
       <div class="r-right u-align-items-center u-gap-10px" style="display:flex">
         <span class="badge ${this.isLowStock(p,threshold)?'red':'gold'} num" title="${escapeHtml(fmtQty(stockInDef)+' '+defUnit.name)}">${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</span>
         ${owner&&!p.archived?`<span class="icon-btn" onclick="App.editProductUnits('${p.id}')" title="ویرایش واحدها و قیمت">${ic('sliders',16)}</span>`:''}

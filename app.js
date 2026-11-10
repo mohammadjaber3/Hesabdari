@@ -831,7 +831,8 @@ const App = {
   },
   _applyNav(tab,sub){
     if(tab!==this.tab || (sub||null)!==(this.sub||null)) this.listUI = {};   // جستجو/فیلتر هر صفحه با ورود به صفحهٔ دیگر پاک می‌شود
-    if(tab!=='customers' && tab!=='invoice' && tab!=='purchase-view') this.detailId=null;   // پروفایل مشتری با رفتن به بخش دیگر بسته می‌شود
+    if(tab!=='customers' && tab!=='invoice' && tab!=='purchase-view') this.detailId=null;
+    if(!(tab==='more' && sub==='products') && tab!=='invoice' && tab!=='purchase-view') this.productDetailId=null;   // پروفایل مشتری با رفتن به بخش دیگر بسته می‌شود
     this.tab=tab; this.sub=sub||null; this.renderNav(); this.render(); window.scrollTo(0,0);
   },
   navigate(tab,sub){
@@ -977,6 +978,14 @@ const App = {
      بستن پنجرهٔ جستجو یک «بازگشت» در تاریخچه می‌فرستد و navigate تا پایان آن به تعویق می‌افتد؛
      قبلاً openParty فوراً اجرا می‌شد و بعد navigate مقدار sub را پاک می‌کرد و فقط فهرست دیده می‌شد.
      اینجا هر دو کار با هم و بعد از بسته شدن جستجو انجام می‌شود. */
+  openProduct(id){ this.productDetailId=id; this.render(); window.scrollTo(0,0); },
+  closeProduct(){ this.productDetailId=null; this.render(); },
+  openProductFromSearch(id){
+    this.closeSearch();
+    const go=()=>{ this.productDetailId=id; this.navigate('more','products'); };
+    if(this._defer(go)) return;
+    go();
+  },
   openPartyFromSearch(type,id){
     this.closeSearch();
     const go=()=>{ this.detailId=id; this.payFormOpen=false; this.navigate('customers', type); };
@@ -1011,7 +1020,7 @@ const App = {
     const group = (title, arr, renderRow) => arr.length ? `<div class="search-group-title">${title}</div>` + arr.map(renderRow).join('') : '';
     return !q.trim() ? `<div class="empty"><span class="ic">${ic('search',26)}</span><b>جست‌وجوی سراسری</b>نام محصول، مشتری، عمده‌فروش، یا شمارهٔ فاکتور فروش/بل خرید را بنویسید</div>` :
       (!hasAny ? `<div class="empty"><span class="ic">${ic('frown',26)}</span>چیزی با «${escapeHtml(q)}» پیدا نشد</div>` :
-      group(ic('archive',13)+' محصولات', r.products, p=>`<div class="row-item clickable" onclick="App.closeSearch(); App.navigate('more','products');"><div class="r-left"><b>${escapeHtml(p.name)}</b><span class="sub">موجودی: ${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</span></div><div class="r-right num">${fmt(p.sellPrice)}</div></div>`)
+      group(ic('archive',13)+' محصولات', r.products, p=>`<div class="row-item clickable" onclick="App.openProductFromSearch('${p.id}')"><div class="r-left"><b>${escapeHtml(p.name)}</b><span class="sub">موجودی: ${escapeHtml(this.qtyBreakdown(p,p.stock||0))}</span></div><div class="r-right num">${fmt(p.sellPrice)}</div></div>`)
       + group(ic('users',13)+' مشتریان', r.customers, c=>`<div class="row-item clickable" onclick="App.openPartyFromSearch('customers','${c.id}')"><div class="r-left"><b>${escapeHtml(c.name)}</b><span class="sub">${escapeHtml(c.phone||'')}</span></div><div class="r-right num" style="color:${c.balance>0.5?'var(--red)':'var(--green)'}">${fmt(c.balance||0)}</div></div>`)
       + group(ic('factory',13)+' عمده‌فروشان', r.suppliers, c=>`<div class="row-item clickable" onclick="App.openPartyFromSearch('suppliers','${c.id}')"><div class="r-left"><b>${escapeHtml(c.name)}</b><span class="sub">${escapeHtml(c.phone||'')}</span></div><div class="r-right num" style="color:${c.balance>0.5?'var(--red)':'var(--green)'}">${fmt(c.balance||0)}</div></div>`)
       + group(ic('receipt',13)+' فروش‌ها', r.sales, s=>`<div class="row-item clickable" onclick="App.closeSearch(); App.viewInvoice('${s.id}');"><div class="r-left"><b>فروش ${this.invoiceNoLabel(s.id)} — ${escapeHtml(s.customerName)}</b><span class="sub">${s.date}</span></div><div class="r-right num">${fmt(s.total)}</div></div>`)
