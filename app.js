@@ -563,6 +563,7 @@ const App = {
     const checkReady = ()=>{
       if(!this.dataReady && this._loadedParts.size>=totalParts){
         this.dataReady = true;
+        setTimeout(()=>{ try{ this._resumeUnitMigrations(); }catch(e){} }, 2500);
       }
       document.getElementById('biz-name').textContent = this.state.settings.businessName || 'فروشگاه صانع';
       {const _bd=document.getElementById('biz-date'); if(_bd) _bd.textContent = dateLabel(todayISO());}
@@ -575,7 +576,7 @@ const App = {
     // الان رسیده باز می‌شویم؛ بقیهٔ بخش‌ها هم به‌محض رسیدن (چه از کش، چه بعد از وصل شدن به
     // اینترنت) خودشان صفحه را به‌روزرسانی می‌کنند.
     this._readyTimeout = setTimeout(()=>{
-      if(!this.dataReady){ this.dataReady = true; checkReady(); }
+      if(!this.dataReady){ this.dataReady = true; checkReady(); setTimeout(()=>{ try{ this._resumeUnitMigrations(); }catch(e){} }, 2500); }
     }, 3000);
 
     // وضعیت واقعی سینک باید از روی همهٔ داده‌ها (فروش، خرید، محصولات و ...) سنجیده شود،
@@ -3283,7 +3284,9 @@ const App = {
         setTxt('pu-scale-label','هر ۱ «'+oldBase+'» (واحد پایهٔ قبلی) برابر چند «'+r.base+'» است؟');
         const sc=document.getElementById('pu-scale');
         if(sc && sc.dataset.touched!=='1'){ const m=r.ladder.find(u=>u.key!=='base' && u.name===oldBase); sc.value = m ? m.factor : 1; }
-        setTxt('pu-scale-note','موجودی و قیمت‌های ثبت‌شده با همین ضریب به واحد جدید تبدیل می‌شوند. این کار فقط برای محصولی که هنوز در هیچ فاکتور خرید یا فروشی نیامده ممکن است.');
+        const nS=this.state.sales.filter(d=>(d.items||[]).some(it=>it.productId===this._puId)).length;
+        const nP=this.state.purchases.filter(d=>(d.items||[]).some(it=>it.productId===this._puId)).length;
+        setTxt('pu-scale-note','موجودی و قیمت‌های ثبت‌شده با همین ضریب به واحد جدید تبدیل می‌شوند'+((nS+nP)?(' و تعداد و قیمت واحد در '+nS+' فاکتور فروش و '+nP+' بل خرید قبلی این محصول هم هم‌مقیاس می‌شود (مبلغ‌ها و جمع فاکتورها تغییر نمی‌کند)'):'')+'. بهتر است قبل از ذخیره از «پشتیبان‌گیری» یک نسخه بگیرید.');
       }
     }
     show('pu-row-pack', r.hasPack);
@@ -3335,14 +3338,14 @@ const App = {
   },
   saveProductUnits(id){
     const p=this.state.products.find(x=>x.id===id); if(!p) throw new Error('محصول یافت نشد.');
+    if(p.unitMigPending) throw new Error('تبدیل واحد قبلی این محصول هنوز کامل نشده است. برنامه را ببندید و دوباره باز کنید تا خودش کامل شود، بعد دوباره امتحان کنید.');
     const r=this._puRead();
     if(!r.pk.ok) throw new Error(r.pk.error);
     if(!r.txUnits.length) throw new Error('حداقل یک واحد (کارتن، قوطی یا بسته) تعریف کنید.');
     if(r.hasPack && r.hasMid && r.packSize<=r.midPer) throw new Error('کارتن باید از قوطی/بسته بزرگ‌تر باشد.');
     /* واحد پایه می‌تواند عوض شود. موجودی همیشه به «واحد پایه» نگه‌داری می‌شود، پس اگر خود واحد پایه عوض شد
-       (مثلاً از کارتن به عدد) موجودی و قیمت‌ها با ضریب تبدیل عوض می‌شوند. فاکتورهای قبلی مقدارشان را به همان
-       واحد پایهٔ قدیم نگه داشته‌اند؛ پس این تبدیل فقط برای محصولی که هنوز در فاکتوری نیامده مجاز است.
-       عوض کردن فقط «نام» واحد یا اندازهٔ کارتن/بسته (بدون عوض شدن خود واحد پایه) همیشه آزاد است. */
+       (مثلاً از کارتن به بسته) موجودی و قیمت‌ها و همهٔ فاکتورهای قبلی همین محصول با ضریب تبدیل هم‌مقیاس می‌شوند
+       (پایین‌تر). عوض کردن فقط «نام» واحد یا اندازهٔ کارتن/بسته همیشه آزاد است. */
     const oldBase=(this.productUnits(p).find(u=>u.key==='base')||{}).name||'عدد';
     let scale=1;
     if(r.base!==oldBase){
@@ -3350,10 +3353,6 @@ const App = {
       if(!(scale>0)) throw new Error('ضریب تبدیل واحد پایه را درست بنویسید (هر ۱ «'+oldBase+'» چند «'+r.base+'» است؟).');
     }
     const scaled = Math.abs(scale-1)>1e-9;
-    if(scaled){
-      const usedIn = [...this.state.sales, ...this.state.purchases].some(doc0=>(doc0.items||[]).some(it=>it.productId===id));
-      if(usedIn) throw new Error('این محصول قبلاً در فاکتور خرید یا فروش آمده؛ پس تغییر مقیاس واحد پایه‌اش (از «'+oldBase+'» به «'+r.base+'») حساب‌های قبلی را به‌هم می‌ریزد. فقط نام واحدها و اندازهٔ کارتن/بسته را عوض کنید، یا یک محصول جدید با واحد درست بسازید و موجودی را به آن منتقل کنید.');
-    }
     const names=r.ladder.map(u=>u.name);
     if(new Set(names).size!==names.length) throw new Error('نام واحدها باید با هم متفاوت باشد.');
     if(!r.saleUnits.length) throw new Error('حداقل یک واحد فروش را انتخاب کنید.');
@@ -3380,18 +3379,86 @@ const App = {
       ...this.editMeta()
     };
     if(!scaled) return updateDoc(doc(cols.products, id), fields).then(()=>this.toast('واحدها و قیمت‌ها ذخیره شد'));
-    // تبدیل مقیاس: موجودی با increment عوض می‌شود تا در دفتر حرکت انبار هم یک «اصلاح» ثبت شود و تطبیق انبار به‌هم نخورد
+    /* تبدیل مقیاس واحد پایه (مثلاً از کارتن به بسته، هر کارتن ۲۰ بسته):
+       ۱) خود محصول: موجودی ×ضریب (با increment تا در دفتر حرکت انبار یک «اصلاح» ثبت شود)، قیمت‌ها ÷ضریب، واحدهای جدید.
+          همین‌جا یک علامت «در حال تبدیل» (unitMigPending) هم ثبت می‌شود تا اگر وسط کار قطع شد، برنامه ادامه‌اش بدهد.
+       ۲) فاکتورهای خرید و فروش و ضایعات همین محصول: تعداد ×ضریب، قیمت واحد ÷ضریب. مبلغ‌ها و جمع فاکتورها ثابت می‌ماند. */
     const stock0=Number(p.stock)||0, delta=round4(stock0*scale-stock0);
-    // پیش‌نویس‌های باز فروش/خرید که این محصول را دارند به واحد قدیم‌اند؛ پاک می‌شوند
     try{
       if(this.saleDraft&&this.saleDraft.items) this.saleDraft.items=this.saleDraft.items.filter(it=>it.productId!==id);
       if(this.purchaseDraft&&this.purchaseDraft.items) this.purchaseDraft.items=this.purchaseDraft.items.filter(it=>it.productId!==id);
     }catch(e){}
+    const mig={ id:uid(), scale, oldBase, newBase:r.base, startTs:Date.now() };
     App._mv('ADJUSTMENT','تبدیل واحد پایه: هر ۱ '+oldBase+' = '+fmtQty(scale)+' '+r.base,{ refType:'manual' });
     const batch=writeBatch(db);
-    batch.update(doc(cols.products, id), { ...fields, stock: increment(delta) });
+    batch.update(doc(cols.products, id), { ...fields, stock: increment(delta), unitMigPending: mig });
     this.audit(batch, { action:'adjust', entityType:'product', entityId:id, before:{ id, unit:p.unit, stock:p.stock, avgCost:p.avgCost }, after:{ id, unit:r.base, stock:round4(stock0*scale), avgCost } });
-    return batch.commit().then(()=>this.toast('واحد پایه به «'+r.base+'» تبدیل شد'));
+    return batch.commit().then(()=>this._migrateProductHistory(id, mig).then(
+      ()=>this.toast('واحد پایه به «'+r.base+'» تبدیل شد؛ فاکتورهای قبلی هم هم‌مقیاس شدند'),
+      (e)=>{ console.error(e); this.toastError('واحد پایه عوض شد ولی هم‌مقیاس کردن فاکتورهای قبلی کامل نشد. برنامه را ببندید و دوباره باز کنید؛ خودش ادامه می‌دهد.'); }
+    ));
+  },
+  /* تعداد و قیمت واحدِ همهٔ فاکتورهای قبلی یک محصول را به واحد پایهٔ جدید برمی‌گرداند.
+     هر سند بعد از تبدیل علامت unitMigs[productId] می‌گیرد؛ پس اگر کار نیمه‌کاره بماند و دوباره اجرا شود، هیچ سندی دو بار تبدیل نمی‌شود.
+     فقط اسنادی که پیش از شروع تبدیل ثبت شده‌اند تبدیل می‌شوند (فاکتور تازه از همان اول در واحد جدید است). */
+  async _migrateProductHistory(pid, mig){
+    const N=Number(mig.scale)||1;
+    const up=v=>Math.round((Number(v)||0)*N*1e6)/1e6;
+    const down=v=>Math.round((Number(v)||0)/N*1e8)/1e8;
+    const has=v=>v!==undefined && v!==null;
+    const fixItem=it=>{
+      if(!it || it.productId!==pid) return it;
+      const o={...it, unit:mig.newBase, txUnit: it.txUnit || mig.oldBase, txFactor: round4((Number(it.txFactor)||1)*N)};
+      if(has(it.qty)) o.qty=up(it.qty);
+      if(has(it.returnedQty)) o.returnedQty=up(it.returnedQty);
+      if(has(it.adjBase)) o.adjBase=up(it.adjBase);
+      if(has(it.unitPrice)) o.unitPrice=down(it.unitPrice);
+      if(has(it.unitCost)) o.unitCost=down(it.unitCost);
+      if(has(it.cost)) o.cost=down(it.cost);
+      return o;
+    };
+    const pending=(d)=> (d.ts||0)<=mig.startTs && !(d.unitMigs && d.unitMigs[pid]===mig.id);
+    const jobs=[];
+    /* اسناد را مستقیم از پایگاه داده می‌خوانیم (نه از حافظهٔ صفحه) تا اگر داده‌ای هنوز کامل بارگذاری نشده یا
+       از دستگاه دیگری رسیده، هیچ فاکتوری جا نماند. */
+    const readAll=async(col)=>(await getDocs(cols[col])).docs.map(x=>({ ...x.data(), id:x.id }));
+    const [allSales, allPurchases, allExpenses] = await Promise.all([readAll('sales'), readAll('purchases'), readAll('expenses')]);
+    [['sales',allSales],['purchases',allPurchases]].forEach(([col,arr])=>{
+      (arr||[]).forEach(d=>{
+        if(!(d.items||[]).some(it=>it.productId===pid) || !pending(d)) return;
+        const upd={ items:d.items.map(fixItem), unitMigs:{...(d.unitMigs||{}), [pid]:mig.id} };
+        if(Array.isArray(d.returns)) upd.returns=d.returns.map(rt=>{
+          const it=(d.items||[])[rt.itemIndex];
+          if(!it || it.productId!==pid) return rt;
+          const o={...rt}; if(has(rt.qty)) o.qty=up(rt.qty); if(has(rt.unitPrice)) o.unitPrice=down(rt.unitPrice); if(has(rt.unitCost)) o.unitCost=down(rt.unitCost);
+          return o;
+        });
+        jobs.push([doc(cols[col], d.id), upd]);
+      });
+    });
+    allExpenses.forEach(e=>{
+      if(e.productId!==pid || e.kind!=='waste' || !pending(e)) return;
+      const upd={ unit:mig.newBase, unitMigs:{...(e.unitMigs||{}), [pid]:mig.id} };
+      if(has(e.quantity)) upd.quantity=up(e.quantity);
+      jobs.push([doc(cols.expenses, e.id), upd]);
+    });
+    if(jobs.length) this.toast('در حال هم‌مقیاس کردن '+jobs.length+' سند قبلی...');
+    for(let i=0;i<jobs.length;i+=400){
+      const b=writeBatch(db,{noLedger:true});
+      jobs.slice(i,i+400).forEach(([ref,upd])=>b.update(ref,upd));
+      await b.commit();
+    }
+    await updateDoc(doc(cols.products, pid), { unitMigPending: null });
+  },
+  /* اگر تبدیل واحد وسط کار قطع شده بود (اینترنت/بستن برنامه)، مدیر که وارد شود ادامه داده می‌شود */
+  async _resumeUnitMigrations(){
+    if(this._migRunning || !this.isOwner()) return;
+    const list=(this.state.products||[]).filter(p=>p.unitMigPending && p.unitMigPending.id);
+    if(!list.length) return;
+    this._migRunning=true;
+    try{ for(const p of list){ await this._migrateProductHistory(p.id, p.unitMigPending); } this.toast('تبدیل واحد نیمه‌کاره کامل شد.'); }
+    catch(e){ console.error(e); this.toastError('ادامهٔ تبدیل واحد ناکام ماند؛ برنامه را دوباره باز کنید.'); }
+    finally{ this._migRunning=false; }
   },
   // اصلاح موجودی همیشه افزایشی (increment) است، نه جایگزینی مطلق — یعنی حتی اگر
   // هم‌زمان یک فاکتور دیگر (فروش/خرید/کنسل) روی همین محصول در حال ثبت باشد،
