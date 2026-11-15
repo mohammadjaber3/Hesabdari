@@ -3158,6 +3158,7 @@ const App = {
     const p=this.state.products.find(x=>x.id===id); if(!p) return;
     this._puId=id;
     const ladder=this.productUnits(p);
+    this._puOldBase=(ladder.find(u=>u.key==='base')||{}).name||'عدد';
     const packU=ladder.find(u=>u.key==='pack');
     const midU=ladder.find(u=>u.key==='mid');
     const baseTr=this.isBaseTradable(p);
@@ -3185,6 +3186,12 @@ const App = {
       <div><label id="pu-midper-label">هر واحد میانی حاوی چند عدد؟</label><input id="pu-midper" type="number" inputmode="decimal" step="1" value="${midPerV}" placeholder="24 — یا خالی" oninput="App.previewProductUnits()"></div>
     </div>
     <div class="field-note">مثال: ۱ کارتن = ۶ قوطی و ۱ قوطی = ۲۴ عدد. اگر عدد داخلی ندارد، «حاوی چند عدد» خالی بماند.</div>
+    <div id="pu-scale-box" class="card u-margin-top-10px" style="display:none">
+      <b class="u-font-size-13-5px">تبدیل واحد پایه</b>
+      <label id="pu-scale-label">هر ۱ واحد پایهٔ قبلی برابر چند واحد پایهٔ جدید است؟</label>
+      <input id="pu-scale" type="number" inputmode="decimal" step="any" value="1" oninput="this.dataset.touched='1'; App.previewProductUnits()">
+      <div class="field-note" id="pu-scale-note"></div>
+    </div>
     <div class="u-margin-top-12px"><label>واحدهای مجاز خرید و فروش</label><div id="pu-sale-units" class="grid2"></div></div>
     <label class="u-align-items-center u-gap-8px u-margin-top-10px" style="display:flex"><input id="pu-fractional" type="checkbox" ${p.allowFractionalSale?'checked':''}> فروش کسری این محصول مجاز باشد (مثلاً ۰٫۵ بسته)</label>
     <hr class="divider">
@@ -3216,7 +3223,7 @@ const App = {
     <div id="pu-preview"></div>`;
     this.openCustomModal({
       title:'واحدها و قیمت «'+p.name+'»',
-      sub:'موجودی فعلی: '+this.qtyBreakdown(p,p.stock||0)+' — موجودی از این‌جا تغییر نمی‌کند (برای آن «اصلاح موجودی»).',
+      sub:'موجودی فعلی: '+this.qtyBreakdown(p,p.stock||0)+' — موجودی از این‌جا تغییر نمی‌کند (برای آن «اصلاح موجودی»)، مگر اینکه واحد پایه را عوض کنید.',
       bodyHtml: body,
       submitLabel:'ذخیرهٔ واحدها و قیمت‌ها',
       onOpen: ()=>{
@@ -3254,6 +3261,7 @@ const App = {
       cost:gn('pu-cost'), costUnit:gs('pu-costunit'),
       sellPack:gn('pu-sell-pack'), sellMid:gn('pu-sell-mid'), sellBase:gn('pu-sell-base'),
       defaultUnit:gs('pu-default'),
+      scale:(()=>{ const bx=document.getElementById('pu-scale-box'); const on=!!(bx && bx.style.display!=='none'); return on ? gn('pu-scale') : 1; })(),
       saleUnits:Array.from(document.querySelectorAll('#pu-sale-units input[data-unit]')).filter(el=>el.checked).map(el=>el.dataset.unit),
       allowFractionalSale:!!document.getElementById('pu-fractional')?.checked};
   },
@@ -3267,6 +3275,17 @@ const App = {
     setTxt('pu-lbl-sell-pack','قیمت فروش هر '+(r.packName||'کارتن'));
     setTxt('pu-lbl-sell-mid','قیمت فروش هر '+(r.midName||'قوطی'));
     setTxt('pu-lbl-sell-base','قیمت فروش هر '+r.base);
+    { // اگر واحد پایه عوض شده، ضریب تبدیل لازم است
+      const oldBase=this._puOldBase||'عدد';
+      const need=!!(r.pk.ok && r.base!==oldBase);
+      show('pu-scale-box', need);
+      if(need){
+        setTxt('pu-scale-label','هر ۱ «'+oldBase+'» (واحد پایهٔ قبلی) برابر چند «'+r.base+'» است؟');
+        const sc=document.getElementById('pu-scale');
+        if(sc && sc.dataset.touched!=='1'){ const m=r.ladder.find(u=>u.key!=='base' && u.name===oldBase); sc.value = m ? m.factor : 1; }
+        setTxt('pu-scale-note','موجودی و قیمت‌های ثبت‌شده با همین ضریب به واحد جدید تبدیل می‌شوند. این کار فقط برای محصولی که هنوز در هیچ فاکتور خرید یا فروشی نیامده ممکن است.');
+      }
+    }
     show('pu-row-pack', r.hasPack);
     show('pu-row-mid', r.hasMid);
     show('pu-row-base', r.baseTradable);
@@ -3289,11 +3308,12 @@ const App = {
     const costUnit = r2.txUnits.find(u=>u.name===r2.costUnit) || r2.txUnits[0];
     const costEl=document.getElementById('pu-cost');
     const currentProduct=this.state.products.find(x=>x.id===this._puId);
-    if(costEl && currentProduct && costUnit && costEl.dataset.touched!=='1') costEl.value=this.unitCost(currentProduct,costUnit)>0?this.unitCost(currentProduct,costUnit):'';
+    const sc2 = r2.scale>0 ? r2.scale : 1;
+    if(costEl && currentProduct && costUnit && costEl.dataset.touched!=='1'){ const cv=round4((Number(currentProduct.avgCost)||0)/sc2*costUnit.factor); costEl.value = cv>0 ? cv : ''; }
     const costPerBase = costUnit && r2.cost>0 ? r2.cost/costUnit.factor : 0;
     const inferredBasePrice = r2.baseTradable
-      ? (r2.sellBase>0 ? r2.sellBase : (r2.sellPack>0 && r2.packSize>0 ? r2.sellPack/r2.packSize : Number(currentProduct?.sellPrice)||0))
-      : (r2.hasMid && r2.sellMid>0 ? r2.sellMid/r2.midPer : (r2.hasPack && r2.sellPack>0 ? r2.sellPack/r2.packSize : Number(currentProduct?.sellPrice)||0));
+      ? (r2.sellBase>0 ? r2.sellBase : (r2.sellPack>0 && r2.packSize>0 ? r2.sellPack/r2.packSize : (Number(currentProduct?.sellPrice)||0)/sc2))
+      : (r2.hasMid && r2.sellMid>0 ? r2.sellMid/r2.midPer : (r2.hasPack && r2.sellPack>0 ? r2.sellPack/r2.packSize : (Number(currentProduct?.sellPrice)||0)/sc2));
     const priceOf=u=>{
       if(u.key==='pack' && r2.sellPack>0) return r2.sellPack;
       if(u.key==='mid'  && r2.sellMid>0)  return r2.sellMid;
@@ -3319,23 +3339,29 @@ const App = {
     if(!r.pk.ok) throw new Error(r.pk.error);
     if(!r.txUnits.length) throw new Error('حداقل یک واحد (کارتن، قوطی یا بسته) تعریف کنید.');
     if(r.hasPack && r.hasMid && r.packSize<=r.midPer) throw new Error('کارتن باید از قوطی/بسته بزرگ‌تر باشد.');
-    // موجودی همیشه به واحد پایه نگه‌داری می‌شود؛ پس معنی «واحد پایه» (داشتن یا نداشتن عدد داخلی) بعد از ثبت عوض نمی‌شود
-    const wasTradable=this.isBaseTradable(p);
-    if(r.baseTradable!==wasTradable) throw new Error(wasTradable
-      ? 'این محصول عدد داخلی ندارد و نوع بسته‌بندی‌اش قابل تغییر نیست. «چند عدد» را خالی بگذارید.'
-      : 'این محصول با «عدد داخلی» ثبت شده و نوع بسته‌بندی‌اش قابل تغییر نیست. برای محصول بدون عدد داخلی، محصول جدید بسازید.');
-    if(wasTradable){
-      const curKind = (p.packUnit && Number(p.packPer)>1) ? 'base' : 'single';
-      if(r.pk.kind!==curKind && r.pk.unit!==p.unit) throw new Error('واحد پایهٔ این محصول «'+p.unit+'» است؛ نام آن را عوض نکنید وقتی واحد بزرگ اضافه/حذف می‌کنید.');
+    /* واحد پایه می‌تواند عوض شود. موجودی همیشه به «واحد پایه» نگه‌داری می‌شود، پس اگر خود واحد پایه عوض شد
+       (مثلاً از کارتن به عدد) موجودی و قیمت‌ها با ضریب تبدیل عوض می‌شوند. فاکتورهای قبلی مقدارشان را به همان
+       واحد پایهٔ قدیم نگه داشته‌اند؛ پس این تبدیل فقط برای محصولی که هنوز در فاکتوری نیامده مجاز است.
+       عوض کردن فقط «نام» واحد یا اندازهٔ کارتن/بسته (بدون عوض شدن خود واحد پایه) همیشه آزاد است. */
+    const oldBase=(this.productUnits(p).find(u=>u.key==='base')||{}).name||'عدد';
+    let scale=1;
+    if(r.base!==oldBase){
+      scale=Number(r.scale)||0;
+      if(!(scale>0)) throw new Error('ضریب تبدیل واحد پایه را درست بنویسید (هر ۱ «'+oldBase+'» چند «'+r.base+'» است؟).');
+    }
+    const scaled = Math.abs(scale-1)>1e-9;
+    if(scaled){
+      const usedIn = [...this.state.sales, ...this.state.purchases].some(doc0=>(doc0.items||[]).some(it=>it.productId===id));
+      if(usedIn) throw new Error('این محصول قبلاً در فاکتور خرید یا فروش آمده؛ پس تغییر مقیاس واحد پایه‌اش (از «'+oldBase+'» به «'+r.base+'») حساب‌های قبلی را به‌هم می‌ریزد. فقط نام واحدها و اندازهٔ کارتن/بسته را عوض کنید، یا یک محصول جدید با واحد درست بسازید و موجودی را به آن منتقل کنید.');
     }
     const names=r.ladder.map(u=>u.name);
     if(new Set(names).size!==names.length) throw new Error('نام واحدها باید با هم متفاوت باشد.');
     if(!r.saleUnits.length) throw new Error('حداقل یک واحد فروش را انتخاب کنید.');
     const costUnit=r.txUnits.find(u=>u.name===r.costUnit)||r.txUnits[0];
-    const avgCost = r.cost>0 ? round4(r.cost/costUnit.factor) : 0;
+    const avgCost = r.cost>0 ? round4(r.cost/costUnit.factor) : (scaled ? round4((Number(p.avgCost)||0)/scale) : 0);
     const basePrice = r.baseTradable
-      ? (r.sellBase>0 ? round2(r.sellBase) : (r.sellPack>0 && r.packSize>0 ? round2(r.sellPack/r.packSize) : round2(p.sellPrice||0)))
-      : (r.hasMid && r.sellMid>0 ? round2(r.sellMid/r.midPer) : (r.hasPack && r.sellPack>0 ? round2(r.sellPack/r.packSize) : round2(p.sellPrice||0)));
+      ? (r.sellBase>0 ? round2(r.sellBase) : (r.sellPack>0 && r.packSize>0 ? round2(r.sellPack/r.packSize) : round2((p.sellPrice||0)/scale)))
+      : (r.hasMid && r.sellMid>0 ? round2(r.sellMid/r.midPer) : (r.hasPack && r.sellPack>0 ? round2(r.sellPack/r.packSize) : round2((p.sellPrice||0)/scale)));
     const fields={
       unit:r.base,
       unitQty:1,
@@ -3353,7 +3379,19 @@ const App = {
       defaultSaleUnit:r.saleUnits.includes(r.defaultUnit)?r.defaultUnit:r.saleUnits[0],
       ...this.editMeta()
     };
-    return updateDoc(doc(cols.products, id), fields).then(()=>this.toast('واحدها و قیمت‌ها ذخیره شد'));
+    if(!scaled) return updateDoc(doc(cols.products, id), fields).then(()=>this.toast('واحدها و قیمت‌ها ذخیره شد'));
+    // تبدیل مقیاس: موجودی با increment عوض می‌شود تا در دفتر حرکت انبار هم یک «اصلاح» ثبت شود و تطبیق انبار به‌هم نخورد
+    const stock0=Number(p.stock)||0, delta=round4(stock0*scale-stock0);
+    // پیش‌نویس‌های باز فروش/خرید که این محصول را دارند به واحد قدیم‌اند؛ پاک می‌شوند
+    try{
+      if(this.saleDraft&&this.saleDraft.items) this.saleDraft.items=this.saleDraft.items.filter(it=>it.productId!==id);
+      if(this.purchaseDraft&&this.purchaseDraft.items) this.purchaseDraft.items=this.purchaseDraft.items.filter(it=>it.productId!==id);
+    }catch(e){}
+    App._mv('ADJUSTMENT','تبدیل واحد پایه: هر ۱ '+oldBase+' = '+fmtQty(scale)+' '+r.base,{ refType:'manual' });
+    const batch=writeBatch(db);
+    batch.update(doc(cols.products, id), { ...fields, stock: increment(delta) });
+    this.audit(batch, { action:'adjust', entityType:'product', entityId:id, before:{ id, unit:p.unit, stock:p.stock, avgCost:p.avgCost }, after:{ id, unit:r.base, stock:round4(stock0*scale), avgCost } });
+    return batch.commit().then(()=>this.toast('واحد پایه به «'+r.base+'» تبدیل شد'));
   },
   // اصلاح موجودی همیشه افزایشی (increment) است، نه جایگزینی مطلق — یعنی حتی اگر
   // هم‌زمان یک فاکتور دیگر (فروش/خرید/کنسل) روی همین محصول در حال ثبت باشد،
