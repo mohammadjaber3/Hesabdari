@@ -12,5 +12,5 @@ export {
 export {
   initializeFirestore, getFirestore, persistentLocalCache, persistentMultipleTabManager,
   doc, getDoc, getDocFromCache, getDocs, setDoc, updateDoc, deleteDoc, onSnapshot,
-  collection, writeBatch, increment, runTransaction
+  collection, writeBatch, increment, runTransaction, enableNetwork, disableNetwork
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";

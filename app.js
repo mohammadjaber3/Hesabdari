@@ -8,7 +8,7 @@ import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence,
   initializeFirestore, getFirestore, persistentLocalCache, persistentMultipleTabManager,
   doc, getDoc, getDocFromCache, getDocs, setDoc as _setDoc, updateDoc as _updateDoc, deleteDoc as _deleteDoc, onSnapshot,
-  collection, writeBatch as _writeBatch, increment as _increment, runTransaction
+  collection, writeBatch as _writeBatch, increment as _increment, runTransaction, enableNetwork, disableNetwork
 } from "./firebase-sdk.js";
 import {
   round2, round4, fmtQty, todayISO, addDaysISO, daysBetweenISO, startOfWeekISO, startOfMonthISO, dateLabelFa,
@@ -91,9 +91,9 @@ function increment(n){ const v=_increment(n); try{ v.__delta=n; }catch(e){} retu
    آفلاین هرگز تمام نمی‌شود. تغییر همان لحظه در حافظهٔ گوشی (IndexedDB) اعمال و در صف ارسال می‌ماند، پس برای
    کاربر منتظر سرور نمی‌مانیم (وگرنه فرم باز می‌ماند، پیام «ذخیره شد» نمی‌آید و کاربر دوباره می‌زند و رکورد تکراری می‌شود).
    اگر سرور بعداً رد کرد، همان‌جا خطا نشان داده می‌شود. */
-function _localFirst(p){
+function _localFirst(p, path){
   Promise.resolve(p).then(()=>{ try{ App._recomputeSyncState(); }catch(e){} }, (err)=>{
-    console.error('write rejected by server', err);
+    console.error('write rejected by server', err); syncLog('write-rejected','setDoc/updateDoc/deleteDoc',{ err:String((err&&err.message)||err).slice(0,200) }); addRejected('تغییر تکی', path?[path]:[], err); try{ App.renderSyncBadgeExtra(); }catch(e){}
     try{
       App._markWriteResult(false, err);
       App.toastError('سرور این تغییر را قبول نکرد و برگشت داده شد: '+((err&&err.message)||''));
@@ -101,10 +101,10 @@ function _localFirst(p){
   });
   return Promise.resolve();
 }
-const setDocRaw = (...a)=> _localFirst(_setDoc(...a));
-function setDoc(...a){ _assertCanWrite('create', a[0], a[1]); return _localFirst(_setDoc(...a)); }
-function updateDoc(...a){ _assertCanWrite('update', a[0], a[1]); return _localFirst(_updateDoc(...a)); }
-function deleteDoc(...a){ _assertCanWrite('delete', a[0]); return _localFirst(_deleteDoc(...a)); }
+const setDocRaw = (...a)=> _localFirst(_setDoc(...a), a[0]&&a[0].path);
+function setDoc(...a){ _assertCanWrite('create', a[0], a[1]); return _localFirst(_setDoc(...a), a[0]&&a[0].path); }
+function updateDoc(...a){ _assertCanWrite('update', a[0], a[1]); return _localFirst(_updateDoc(...a), a[0]&&a[0].path); }
+function deleteDoc(...a){ _assertCanWrite('delete', a[0]); return _localFirst(_deleteDoc(...a), a[0]&&a[0].path); }
 /* خواندنِ سریع: اول از حافظهٔ گوشی (فوری، بدون شبکه)؛ فقط اگر آنجا نبود از سرور.
    getDoc معمولی در اینترنتِ ضعیف تا ~۱۰ ثانیه منتظر سرور می‌ماند. */
 async function getDocQuick(ref){
@@ -129,14 +129,16 @@ function writeBatch(d, opts){
   const noLedger = !!(opts && opts.noLedger);
   let ctx=null;
   try{ if(App){ ctx=App._mvCtx||null; App._mvCtx=null; } }catch(e){ ctx=null; }
-  const pending=[]; let refType='', refId='';
+  const pending=[]; let refType='', refId=''; const touched=[];
   const noteRef=(ref)=>{
+    try{ if(ref&&ref.path&&touched.indexOf(ref.path)<0) touched.push(ref.path); }catch(e){}
     const m=/\/(sales|purchases)\/([^\/]+)$/.exec((ref&&ref.path)||'');
     if(m && !refId){ refType = m[1]==='sales' ? 'sale' : 'purchase'; refId = m[2]; }
   };
   const prodId=(ref)=>{ const m=/\/products\/([^\/]+)$/.exec((ref&&ref.path)||''); return m?m[1]:null; };
   b.delete=function(ref,...rest){
     denied = denied || _partnerCheck('delete', ref);
+    try{ if(ref&&ref.path) touched.push(ref.path); }catch(e){}
     return _delete(ref,...rest);
   };
   b.update=function(ref,data,...rest){
@@ -184,7 +186,7 @@ function writeBatch(d, opts){
     Promise.resolve(real).then(()=>{
       try{ App._recomputeSyncState(); }catch(e){}
     }, (err)=>{
-      console.error('batch rejected by server', err);
+      console.error('batch rejected by server', err); syncLog('batch-rejected','batch',{ err:String((err&&err.message)||err).slice(0,200) }); addRejected('ثبت گروهی (فاکتور/موجودی/...)', touched, err); try{ App.renderSyncBadgeExtra(); }catch(e){}
       try{
         App._markWriteResult(false, err);
         App.toastError('سرور این تغییر را قبول نکرد و برگشت داده شد: '+((err&&err.message)||''));
@@ -391,6 +393,48 @@ async function migrateOldDataIfNeeded(){
 
 /* ---------- App ---------- */
 
+/* ---------- گزارش عیب‌یابی همگام‌سازی ----------
+   هر رویداد Firestore (کدام بخش، چند سند، از کش یا سرور، نوشتهٔ در انتظار) در حافظهٔ گوشی نگه داشته می‌شود
+   تا اگر دوباره «رفرش مکرر» رخ داد، علت دقیق از روی همین گزارش پیدا شود.
+   دیدن گزارش: آدرس برنامه را با ?debug=1 باز کنید؛ دکمهٔ «گزارش» پایین صفحه ظاهر می‌شود. */
+const SYNC_LOG_KEY='hesabdari_synclog';
+function syncLog(kind, name, info){
+  try{
+    let arr=[]; try{ arr=JSON.parse(localStorage.getItem(SYNC_LOG_KEY)||'[]'); }catch(e){}
+    arr.push({t:new Date().toISOString().slice(11,23), kind, name, ...(info||{})});
+    if(arr.length>300) arr=arr.slice(-300);
+    localStorage.setItem(SYNC_LOG_KEY, JSON.stringify(arr));
+  }catch(e){}
+}
+(function(){
+  try{
+    if(!/[?&]debug=1/.test(location.search)) return;
+    window.addEventListener('load', ()=>{
+      const b=document.createElement('button');
+      b.textContent='گزارش';
+      b.style.cssText='position:fixed;bottom:70px;left:8px;z-index:99999;padding:6px 10px;border-radius:8px;border:1px solid #888;background:#fff;font-size:12px';
+      b.onclick=()=>{
+        const txt=localStorage.getItem(SYNC_LOG_KEY)||'[]';
+        (navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject()).then(()=>alert('گزارش کپی شد؛ آن را بفرستید.'),()=>prompt('گزارش را کپی کنید:',txt));
+      };
+      document.body.appendChild(b);
+    });
+  }catch(e){}
+})();
+
+/* ---------- فهرست تغییرهای ردشده توسط سرور ----------
+   سرور که تغییری را رد می‌کند، Firestore آن را از گوشی هم برمی‌گرداند (داده برنمی‌گردد و دوباره ارسال نمی‌شود).
+   برای اینکه کاربر آن را ببیند و دستی دوباره ثبت کند، اینجا نگه داشته می‌شود تا کاربر خودش پاکش کند. */
+const REJECTED_KEY='hesabdari_rejected';
+function readRejected(){ try{ return JSON.parse(localStorage.getItem(REJECTED_KEY)||'[]'); }catch(e){ return []; } }
+function addRejected(what, paths, err){
+  try{
+    const arr=readRejected();
+    arr.push({ts:Date.now(), what, paths:(paths||[]).slice(0,8), err:String((err&&err.message)||err||'').slice(0,300)});
+    localStorage.setItem(REJECTED_KEY, JSON.stringify(arr.slice(-50)));
+  }catch(e){}
+}
+
 const App = {
   state: { settings: defaultSettings(), products:[], customers:[], suppliers:[], sales:[], purchases:[], expenses:[], payments:[], openingEntries:[], returns:[] },
   tab:'dashboard', sub:null,
@@ -591,6 +635,8 @@ const App = {
       const unsub = onSnapshot(cols[name], {includeMetadataChanges:true}, (snap)=>{
         // تغییر فقط در «متادیتا» (مثلاً رسیدن تأیید سرور برای نوشتهٔ محلی): داده عوض نشده، پس نه بازسازی نه رندر.
         // قبلاً هر تأییدِ سرور کل صفحه را دوباره می‌ساخت و فرم نیمه‌پرشده پاک می‌شد.
+        try{ this._pendingDocs = this._pendingDocs||{}; this._pendingDocs[name]=snap.docs.filter(d=>d.metadata.hasPendingWrites).map(d=>d.id); }catch(e){}
+        syncLog('snap', name, { n:snap.docChanges().length, cache:snap.metadata.fromCache, pend:snap.metadata.hasPendingWrites, ids:snap.docChanges().slice(0,3).map(c=>c.type+':'+c.doc.id) });
         if(this._loadedParts.has(name) && snap.docChanges().length===0){ markPart(name, snap.metadata.hasPendingWrites); return; }
         const arr = [];
         snap.forEach(d=>arr.push(sanitizeDoc(d.data())));
@@ -618,6 +664,7 @@ const App = {
     });
 
     const unsubSettings = onSnapshot(settingsDocRef, {includeMetadataChanges:true}, async (snap)=>{
+      syncLog('snap','settings',{ exists:snap.exists(), cache:snap.metadata.fromCache, pend:snap.metadata.hasPendingWrites });
       { const raw = JSON.stringify(snap.exists() ? snap.data() : null);
         if(this._loadedParts.has('settings') && raw===this._settingsRaw){ markPart('settings', snap.metadata.hasPendingWrites); return; }
         this._settingsRaw = raw; }
@@ -625,8 +672,15 @@ const App = {
         this.state.settings = migrateSettings(snap.data());
         setBusinessTimezone(this.state.settings.timezone);
       } else {
+        // فقط نمایش پیش‌فرض؛ هرگز روی سرور نمی‌نویسیم. «سند وجود ندارد» از روی کش/آفلاین یعنی «هنوز نرسیده»،
+        // نه «واقعاً نیست» — نوشتن پیش‌فرض‌ها شمارهٔ تلفن و نقد آغازین را پاک می‌کرد.
         this.state.settings = defaultSettings();
-        try{ await setDoc(settingsDocRef, this.state.settings); }catch(e){}
+        if(!snap.metadata.fromCache && navigator.onLine && this.isOwner()){
+          try{
+            const live = await getDoc(settingsDocRef); // تأیید مستقیم از سرور
+            if(!live.exists()) await setDoc(settingsDocRef, this.state.settings);
+          }catch(e){}
+        }
       }
       this._loadedParts.add('settings');
       markPart('settings', snap.metadata.hasPendingWrites);
@@ -1030,10 +1084,59 @@ const App = {
       // نکته: تابع openParty(type,id) از قبل در بخش مشتریان/فروشندگان تعریف شده
   // (پایین‌تر در همین فایل) و همان‌جا استفاده می‌شود — اینجا دوباره تعریف نشد.
 
+  /* ---------- صف همگام‌سازی: چه چیزی منتظر ارسال است و چه چیزی رد شده ---------- */
+  renderSyncBadgeExtra(){
+    const el=document.getElementById('sync-badge'); if(!el) return;
+    if(!el._queueBound){ el._queueBound=true; el.style.cursor='pointer'; el.onclick=()=>App.showSyncQueue(); }
+    const n=readRejected().length;
+    el.title = n ? ('تغییر ردشده: '+n) : '';
+    el.style.outline = n ? '2px solid #d33' : '';
+  },
+  _labelForPath(path){
+    const m=/\/(\w+)\/([^\/]+)$/.exec(path||''); if(!m) return path||'';
+    const [ , col, id ]=m;
+    const find=(arr)=> (arr||[]).find(x=>x.id===id);
+    if(col==='sales'){ const r=find(this.state.sales); return 'فاکتور فروش'+(r?(' '+(r.invoiceNo||'')+' — '+(r.customerName||'')+' — '+fmt(r.total)):''); }
+    if(col==='purchases'){ const r=find(this.state.purchases); return 'فاکتور خرید'+(r?(' '+(r.invoiceNo||'')+' — '+(r.supplierName||'')+' — '+fmt(r.total)):''); }
+    if(col==='products'){ const r=find(this.state.products); return 'محصول'+(r?(' '+r.name):''); }
+    if(col==='customers'){ const r=find(this.state.customers); return 'مشتری'+(r?(' '+r.name):''); }
+    if(col==='suppliers'){ const r=find(this.state.suppliers); return 'عمده‌فروش'+(r?(' '+r.name):''); }
+    if(col==='payments'){ const r=find(this.state.payments); return 'پرداخت/دریافت'+(r?(' '+r.partyName+' — '+fmt(r.amount)):''); }
+    if(col==='expenses'){ const r=find(this.state.expenses); return 'مصرف'+(r?(' '+r.category+' — '+fmt(r.amount)):''); }
+    const names={images:'عکس', stockLedger:'دفتر انبار', auditLog:'گزارش تغییرات', returns:'مرجوعی', openingEntries:'افتتاحیه', settings:'تنظیمات'};
+    return (names[col]||col)+' ('+id.slice(-6)+')';
+  },
+  showSyncQueue(){
+    const pend=this._pendingDocs||{};
+    const pendRows=[]; Object.keys(pend).forEach(col=>{ (pend[col]||[]).forEach(id=>pendRows.push(this._labelForPath('/'+col+'/'+id))); });
+    const rej=readRejected().slice().reverse();
+    const fa=(ts)=>{ try{ return new Date(ts).toLocaleString('fa-AF-u-nu-latn'); }catch(e){ return String(ts); } };
+    const li=(t)=>'<li style="margin:4px 0">'+escapeHtml(t)+'</li>';
+    const body=`
+      <div class="field-note">وضعیت: ${navigator.onLine?'اینترنت وصل است':'آفلاین'}</div>
+      <label style="margin-top:10px">منتظر ارسال به سرور (${pendRows.length})</label>
+      ${pendRows.length?'<ul style="padding-inline-start:18px;font-size:13px">'+pendRows.slice(0,40).map(li).join('')+'</ul>':'<div class="field-note">چیزی در صف نیست.</div>'}
+      <label style="margin-top:10px">ردشده توسط سرور (${rej.length})</label>
+      ${rej.length?'<ul style="padding-inline-start:18px;font-size:13px">'+rej.slice(0,20).map(r=>'<li style="margin:6px 0"><b>'+escapeHtml(fa(r.ts))+'</b> — '+escapeHtml(r.what)+'<br>'+(r.paths||[]).map(p=>escapeHtml(this._labelForPath(p))).join('<br>')+'<br><span style="color:#c33">'+escapeHtml(r.err)+'</span></li>').join('')+'</ul><div class="field-note">این تغییرها از گوشی برگردانده شده‌اند و خودکار دوباره ارسال نمی‌شوند. موارد بالا را بررسی و در صورت لزوم دوباره ثبت کنید.</div><button class="btn btn-outline" onclick="App.clearRejectedLog()">پاک‌کردن فهرست ردشده‌ها</button>':'<div class="field-note">مورد ردشده‌ای ثبت نشده.</div>'}
+    `;
+    this.openCustomModal({
+      title:'صف همگام‌سازی', sub:'برای ارسال دوبارهٔ موارد منتظر، دکمهٔ پایین را بزنید.', bodyHtml:body, submitLabel:'تلاش دوباره برای ارسال',
+      onSubmit: async ()=>{ await this.retrySync(); }
+    });
+  },
+  clearRejectedLog(){ try{ localStorage.removeItem(REJECTED_KEY); }catch(e){} this.renderSyncBadgeExtra(); this.closeModal(); this.toast('فهرست پاک شد'); },
+  async retrySync(){
+    try{
+      await disableNetwork(db); await new Promise(r=>setTimeout(r,500)); await enableNetwork(db);
+      this.toast('ارتباط دوباره برقرار شد؛ ارسال دوباره آغاز شد.');
+    }catch(e){ this.toastError('تلاش دوباره ناکام ماند: '+((e&&e.message)||'')); }
+  },
+
   setSyncState(st){
     this.syncState = st;
     const el=document.getElementById('sync-badge'); const txt=document.getElementById('sync-text');
     if(!el||!txt) return;
+    try{ this.renderSyncBadgeExtra(); }catch(e){}
     el.className = 'sync-badge '+st;
     txt.textContent = st==='ok' ? 'همگام شده' : st==='pending' ? 'در حال همگام‌سازی...' : st==='error' ? 'خطا در همگام‌سازی' : 'آفلاین';
   },
@@ -1226,7 +1329,7 @@ const App = {
       submitLabel:'ذخیره',
       onSubmit: (v)=>{
         if(!v.rate || v.rate<=0) throw new Error('نرخ نامعتبر است.');
-        return updateDoc(settingsDocRef, {usdRate:v.rate}).then(()=>{ this.toast('نرخ دالر ذخیره شد'); });
+        return setDoc(settingsDocRef, {usdRate:v.rate}, {merge:true}).then(()=>{ this.toast('نرخ دالر ذخیره شد'); });
       }
     });
   },
@@ -3767,7 +3870,7 @@ const App = {
       lowStockThreshold: parseFloat(document.getElementById('set-lowstock').value)||0,
       timezone: (document.getElementById('set-timezone')||{}).value || 'Asia/Kabul',
     };
-    updateDoc(settingsDocRef, fields).then(()=>{
+    setDoc(settingsDocRef, fields, {merge:true}).then(()=>{
       setBusinessTimezone(fields.timezone);
       document.getElementById('biz-name').textContent=fields.businessName;
       this.toast('تنظیمات ذخیره شد');
